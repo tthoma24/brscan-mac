@@ -15,6 +15,7 @@ add_library(brscan
   libbrscan/version.cpp
   libbrscan/session.cpp
   libbrscan/transport_tcp.cpp
+  libbrscan/command.cpp
 )
 target_include_directories(brscan PUBLIC libbrscan/include)
 target_include_directories(brscan PUBLIC libbrscan)
@@ -35,9 +36,12 @@ if(BUILD_TESTING)
     tests/version_test.cpp
     tests/fake_transport_test.cpp
     tests/session_test.cpp
+    tests/command_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests)
+  target_compile_definitions(brscan_tests PRIVATE
+    BRSCAN_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 
   include(GoogleTest)
   gtest_discover_tests(brscan_tests)
