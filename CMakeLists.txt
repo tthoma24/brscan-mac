@@ -13,8 +13,11 @@ endif()
 # against this and never talk to a socket or the ICA framework directly.
 add_library(brscan
   libbrscan/version.cpp
+  libbrscan/session.cpp
+  libbrscan/transport_tcp.cpp
 )
 target_include_directories(brscan PUBLIC libbrscan/include)
+target_include_directories(brscan PUBLIC libbrscan)
 
 # Tests.
 include(CTest)
@@ -31,6 +34,7 @@ if(BUILD_TESTING)
   add_executable(brscan_tests
     tests/version_test.cpp
     tests/fake_transport_test.cpp
+    tests/session_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests)
