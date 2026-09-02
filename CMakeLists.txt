@@ -16,9 +16,19 @@ add_library(brscan
   libbrscan/session.cpp
   libbrscan/transport_tcp.cpp
   libbrscan/command.cpp
+  libbrscan/response.cpp
+  libbrscan/decode_jpeg.cpp
 )
 target_include_directories(brscan PUBLIC libbrscan/include)
 target_include_directories(brscan PUBLIC libbrscan)
+
+# libturbojpeg, for DecodeJpeg. Installed under MacPorts; located via
+# pkg-config rather than assuming a fixed prefix.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(TURBOJPEG REQUIRED libturbojpeg)
+target_include_directories(brscan PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
+target_link_libraries(brscan PRIVATE ${TURBOJPEG_LIBRARIES})
+target_link_directories(brscan PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
 # Tests.
 include(CTest)
@@ -37,9 +47,14 @@ if(BUILD_TESTING)
     tests/fake_transport_test.cpp
     tests/session_test.cpp
     tests/command_test.cpp
+    tests/response_test.cpp
+    tests/decode_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests)
+  target_include_directories(brscan_tests PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
+  target_link_libraries(brscan_tests PRIVATE ${TURBOJPEG_LIBRARIES})
+  target_link_directories(brscan_tests PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
   target_compile_definitions(brscan_tests PRIVATE
     BRSCAN_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 
