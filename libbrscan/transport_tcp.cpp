@@ -31,12 +31,34 @@ Status ConnectBounded(int fd, const sockaddr* addr, socklen_t addrlen,
     return Status::kIoError;
   }
 
-  pollfd pfd{};
-  pfd.fd = fd;
-  pfd.events = POLLOUT;
-  const int rc = poll(&pfd, 1, timeout_ms);
-  if (rc == 0) return Status::kTimeout;
-  if (rc < 0) return Status::kIoError;
+  // poll() can be interrupted by a signal (EINTR) before the deadline; retry
+  // it against an absolute deadline computed once, the same pattern used in
+  // Read(), so a retry only gets the time that genuinely remains rather than
+  // restarting the full timeout on every signal.
+  const auto deadline = std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(timeout_ms);
+  for (;;) {
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    const auto remaining_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(remaining)
+            .count();
+    // Truncation toward zero means anything under 1ms remaining would
+    // otherwise poll with a 0ms timeout (a valid, non-blocking poll) or,
+    // worse in the analogous recv() case, disable the timeout outright.
+    // Treat "less than a millisecond left" as timed out.
+    if (remaining_ms <= 0) return Status::kTimeout;
+
+    pollfd pfd{};
+    pfd.fd = fd;
+    pfd.events = POLLOUT;
+    const int rc = poll(&pfd, 1, static_cast<int>(remaining_ms));
+    if (rc == 0) return Status::kTimeout;
+    if (rc < 0) {
+      if (errno == EINTR) continue;
+      return Status::kIoError;
+    }
+    break;
+  }
 
   int so_error = 0;
   socklen_t so_error_len = sizeof(so_error);
@@ -120,12 +142,16 @@ Status TcpTransport::Read(uint8_t* buf, size_t cap, size_t* out_len,
 
   for (;;) {
     const auto remaining = deadline - std::chrono::steady_clock::now();
-    if (remaining <= std::chrono::steady_clock::duration::zero()) {
-      return Status::kTimeout;
-    }
     const auto remaining_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(remaining)
             .count();
+    // duration_cast truncates toward zero, so 0 < remaining < 1ms would
+    // otherwise compute remaining_ms == 0, and setsockopt(SO_RCVTIMEO, {0,0})
+    // does not mean "expire immediately" — it means "no timeout" (BSD/POSIX
+    // semantics), which would let the final recv() block indefinitely.
+    // Treat "less than a millisecond left" as timed out before touching the
+    // socket at all.
+    if (remaining_ms <= 0) return Status::kTimeout;
 
     timeval tv{};
     tv.tv_sec = remaining_ms / 1000;
