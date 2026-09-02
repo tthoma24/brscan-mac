@@ -18,6 +18,7 @@ add_library(brscan
   libbrscan/command.cpp
   libbrscan/response.cpp
   libbrscan/decode_jpeg.cpp
+  libbrscan/scanner.cpp
 )
 target_include_directories(brscan PUBLIC libbrscan/include)
 target_include_directories(brscan PUBLIC libbrscan)
@@ -29,6 +30,13 @@ pkg_check_modules(TURBOJPEG REQUIRED libturbojpeg)
 target_include_directories(brscan PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
 target_link_libraries(brscan PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
+
+# The end-to-end scanning CLI. Links only against the brscan library --
+# never talks to a socket or the protocol codecs directly.
+add_executable(brscan-cli tools/brscan-cli.cpp)
+target_link_libraries(brscan-cli PRIVATE brscan)
+target_link_libraries(brscan-cli PRIVATE ${TURBOJPEG_LIBRARIES})
+target_link_directories(brscan-cli PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
 # Tests.
 include(CTest)
@@ -49,6 +57,7 @@ if(BUILD_TESTING)
     tests/command_test.cpp
     tests/response_test.cpp
     tests/decode_test.cpp
+    tests/scanner_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests)
