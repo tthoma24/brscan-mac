@@ -1,0 +1,5 @@
+build/
+.worktrees/
+reference/
+*.dmg
+.DS_Store
