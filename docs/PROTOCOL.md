@@ -65,16 +65,47 @@ A typical scan is: `ESC Q` (once per connection), then per scan
 1. Greeting: `+OK 200\r\n` on connect.
 2. `ESC Q` reply: a binary capability block (starts `c1 00 ...`) carrying the
    device maxima and supported-size bitmaps. Not required for basic scanning.
-3. `ESC I` reply: an ASCII, comma-terminated offer of the granted parameters:
-   `xdpi,ydpi,flag,?,xmaxpx,?,ymaxpx,`. For A3 at 100 dpi the observed offer is
-   `100,100,2,292,1153,427,1684,` (1153 x 1684 px = 11.53 x 16.84 in). The
-   capability probe (`R=19200,19200`) returns the device maximum, observed as
-   `2400,1200` and `2400,2400` depending on source.
-4. Image data: one or more blocks, each a short binary header (length and
-   status) followed by payload. Color payload is a single baseline JPEG stream
-   (`ff d8 ... ff d9`); grayscale payload is raw. The exact block header layout
-   and the end-of-page, end-of-job, and cancel status bytes are decoded in the
-   response codec.
+   No fixed or self-describing length was found for it (55-56 bytes across
+   samples); a client that doesn't need its contents can just read until the
+   connection goes quiet rather than relying on a byte count.
+3. `ESC S` / `ESC D` reply: a short ack with no fixed length observed --
+   2 bytes (`80 00`) in one capture, as little as 1 byte (`80`) live against
+   real hardware. Contents unconfirmed; safe to discard.
+4. `ESC I` reply: `[1-byte status][2-byte little-endian length][ASCII CSV
+   text][NUL]`. The status byte was `0x00` in every sample seen and its
+   meaning is unconfirmed. The CSV is a comma-terminated offer of the granted
+   parameters: `xdpi,ydpi,flag,?,xmaxpx,?,ymaxpx,`. For A3 at 100 dpi the
+   observed offer is `100,100,2,292,1153,427,1684,` (1153 x 1684 px = 11.53 x
+   16.84 in). The capability probe (`R=19200,19200`) returns the device
+   maximum, observed as `2400,1200` and `2400,2400` depending on source.
+5. Image data: one or more blocks, each a short binary header followed by
+   payload. The header is 12 or 13 bytes depending on firmware (a live probe
+   against real hardware found 12 bytes, missing a constant leading `0x00`
+   byte that an earlier vendor-driver capture had); either way its last two
+   bytes are a little-endian length/width field, with two constant anchor
+   bytes earlier in it (see the response codec for the exact offsets and how
+   it detects which shape is on the wire).
+
+   - **Color** (`M=CGRAY`, `C=JPEG`): the payload is one baseline JPEG stream
+     (`ff d8 ... ff d9`), but for anything over 65524 bytes (`0xfff4`) it
+     arrives split into multiple blocks: every block's header gives that
+     block's own payload length, pinned at the `0xfff4` sentinel while more
+     blocks follow, and the true (shorter) length on the final block. A
+     reader must strip each embedded header and concatenate the block
+     payloads to reassemble the real JPEG -- reading the stream as if it
+     were one contiguous run and just searching for the EOI marker corrupts
+     it, since an embedded header can land in the middle of the
+     entropy-coded data.
+   - **Grayscale** (`M=GRAY64`, `C=NONE`): the payload is raw 8-bit samples,
+     `width * height` bytes, and is **not** chunked the way color is even
+     past the same 65524-byte size -- confirmed by a live gray scan crossing
+     that boundary with no header spliced in. The mid-stream headers seen for
+     color appear to be an artifact of how the device's JPEG encoder flushes
+     bounded output bursts, not a general network-layer framing.
+
+   The end-of-page, end-of-job, and cancel status bytes beyond the block
+   header are not decoded by this codebase; see "Cancellation" below for how
+   a cancelled scan is detected instead (a read timeout, not a status byte).
 
 ## Resolution and size
 
