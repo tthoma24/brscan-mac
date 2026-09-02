@@ -30,8 +30,10 @@ if(BUILD_TESTING)
 
   add_executable(brscan_tests
     tests/version_test.cpp
+    tests/fake_transport_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
+  target_include_directories(brscan_tests PRIVATE libbrscan tests)
 
   include(GoogleTest)
   gtest_discover_tests(brscan_tests)
