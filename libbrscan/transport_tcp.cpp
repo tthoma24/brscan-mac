@@ -3,12 +3,53 @@
 #include <cerrno>
 #include <cstring>
 
+#include <chrono>
+
+#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 namespace brscan {
+
+namespace {
+
+// Performs a connect() on `fd` bounded by `timeout_ms`: puts the socket in
+// non-blocking mode, initiates the connect, and waits for it to become
+// writable (or fail) via poll(). Restores blocking mode before returning on
+// any path where the fd is still usable, since Read()/Write() expect a
+// blocking socket.
+Status ConnectBounded(int fd, const sockaddr* addr, socklen_t addrlen,
+                       int timeout_ms) {
+  const int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1) return Status::kIoError;
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return Status::kIoError;
+
+  if (connect(fd, addr, addrlen) != 0 && errno != EINPROGRESS) {
+    return Status::kIoError;
+  }
+
+  pollfd pfd{};
+  pfd.fd = fd;
+  pfd.events = POLLOUT;
+  const int rc = poll(&pfd, 1, timeout_ms);
+  if (rc == 0) return Status::kTimeout;
+  if (rc < 0) return Status::kIoError;
+
+  int so_error = 0;
+  socklen_t so_error_len = sizeof(so_error);
+  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len) != 0) {
+    return Status::kIoError;
+  }
+  if (so_error != 0) return Status::kIoError;
+
+  if (fcntl(fd, F_SETFL, flags) == -1) return Status::kIoError;
+  return Status::kOk;
+}
+
+}  // namespace
 
 TcpTransport::~TcpTransport() { Disconnect(); }
 
@@ -28,9 +69,10 @@ Status TcpTransport::Connect() {
   for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
     const int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (fd < 0) continue;
-    if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+
+    status = ConnectBounded(fd, ai->ai_addr, ai->ai_addrlen, connect_timeout_ms_);
+    if (status == Status::kOk) {
       fd_ = fd;
-      status = Status::kOk;
       break;
     }
     close(fd);
@@ -67,22 +109,42 @@ Status TcpTransport::Read(uint8_t* buf, size_t cap, size_t* out_len,
                            int timeout_ms) {
   if (fd_ == -1) return Status::kIoError;
 
-  timeval tv{};
-  tv.tv_sec = timeout_ms / 1000;
-  tv.tv_usec = (timeout_ms % 1000) * 1000;
-  if (setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
-    return Status::kIoError;
-  }
+  // SO_RCVTIMEO bounds a single recv() call, not the whole function: if
+  // recv() is interrupted by a signal (EINTR) partway through the wait, the
+  // timeout does not resume where it left off. Track an absolute deadline
+  // computed once up front so a retry after EINTR only gets the time that
+  // genuinely remains, instead of restarting the full timeout on every
+  // signal (which could extend the effective wait indefinitely).
+  const auto deadline = std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(timeout_ms);
 
-  const ssize_t n = recv(fd_, buf, cap, 0);
-  if (n < 0) {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) return Status::kTimeout;
-    return Status::kIoError;
-  }
-  if (n == 0) return Status::kIoError;  // Peer closed the connection.
+  for (;;) {
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) {
+      return Status::kTimeout;
+    }
+    const auto remaining_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(remaining)
+            .count();
 
-  *out_len = static_cast<size_t>(n);
-  return Status::kOk;
+    timeval tv{};
+    tv.tv_sec = remaining_ms / 1000;
+    tv.tv_usec = (remaining_ms % 1000) * 1000;
+    if (setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+      return Status::kIoError;
+    }
+
+    const ssize_t n = recv(fd_, buf, cap, 0);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) return Status::kTimeout;
+      return Status::kIoError;
+    }
+    if (n == 0) return Status::kIoError;  // Peer closed the connection.
+
+    *out_len = static_cast<size_t>(n);
+    return Status::kOk;
+  }
 }
 
 }  // namespace brscan

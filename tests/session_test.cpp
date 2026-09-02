@@ -26,6 +26,18 @@ TEST(Session, RejectsUnknownGreeting) {
   EXPECT_EQ(s.Open(), brscan::Status::kProtocolError);
 }
 
+// Bounded-connect regression test. 192.0.2.1 is RFC 5737 TEST-NET-1,
+// reserved for documentation: it is a routable-looking address that no host
+// answers, so packets to it are silently dropped rather than promptly
+// refused, which reliably reproduces the "unreachable device" case a
+// blocking connect() with no timeout would hang on. A short
+// connect_timeout_ms override keeps this fast instead of waiting out the
+// production default (TcpTransport::kDefaultConnectTimeoutMs).
+TEST(TcpTransport, ConnectTimesOutOnUnreachableHost) {
+  brscan::TcpTransport t("192.0.2.1", 54921, /*connect_timeout_ms=*/300);
+  EXPECT_EQ(t.Connect(), brscan::Status::kTimeout);
+}
+
 TEST(TcpTransportLive, GreetsWithOk) {
   const char* host = std::getenv("BRSCAN_TEST_HOST");
   if (host == nullptr) GTEST_SKIP() << "set BRSCAN_TEST_HOST to run";
