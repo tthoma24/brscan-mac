@@ -17,8 +17,9 @@ open-source implementations. No Brother software was consulted. See
 
 ## Commands (host to scanner)
 
-Every command is `0x1b <letter> 0x0a [body] 0x80`. The body, when present, is
-one or more `KEY=VALUE` lines separated by `0x0a`.
+Every command is `0x1b <letter> 0x0a [body] 0x80`, with one exception (Reset,
+below). The body, when present, is one or more `KEY=VALUE` lines separated by
+`0x0a`.
 
 | Command | Bytes | Body | Meaning |
 |---|---|---|---|
@@ -27,7 +28,13 @@ one or more `KEY=VALUE` lines separated by `0x0a`.
 | Select flatbed | `1b 53` | `FB` | Select the flatbed source |
 | Select ADF | `1b 44` | `ADF` | Select the document feeder source |
 | Execute | `1b 58` | scan parameters (below) | Start the scan; image data follows |
-| Reset | `1b 52` | (none) | Release the session at teardown |
+| Reset | `1b 52` (bare, no LF, no terminator) | n/a | Seen once mid-stream in the capture; purpose unconfirmed |
+
+Reset is the one exception to the standard framing: it is a bare two-byte
+sequence, `1b 52`, with no trailing `0x0a` and no `0x80` terminator. It
+appeared exactly once in the capture, mid-stream rather than at connection
+teardown, and it is not part of the normal scan flow (`ESC Q`, `ESC S`/`ESC
+D`, `ESC I`, `ESC X`); its exact role is unconfirmed.
 
 Source is selected explicitly: `ESC S FB` for the flatbed, or `ESC S FB`
 followed by `ESC D ADF` for the document feeder. It is not inferred from paper
