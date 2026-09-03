@@ -176,22 +176,35 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   }
 
   // Save every page (so FILE keeps the whole stack), numbered per
-  // WritePages when there's more than one.
+  // WritePages when there's more than one. `page1_path` is the actual file
+  // WritePages wrote for page 1 -- `path` itself only when there's exactly
+  // one page; for N>1, WritePages never writes `path` verbatim, only the
+  // numbered files, so anything downstream (the action, the log line, the
+  // caller's *saved_path) must name page1_path, not the never-written
+  // base `path`, or it points at a file that doesn't exist.
+  const int total_pages = static_cast<int>(pages.size());
+  const std::string page1_path = brscan::cli::PagePath(path, 1, total_pages);
+
   if (!brscan::cli::WritePages(pages, path)) {
     std::cerr << "[handle_event] FUNC=" << event.func
                << ": failed to write '" << path << "'\n";
     return Status::kIoError;
   }
-  std::cout << "[handle_event] FUNC=" << event.func << ": wrote " << path
-             << (pages.size() > 1 ? " (and further numbered pages)" : "")
-             << "\n";
+  if (total_pages == 1) {
+    std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
+               << page1_path << "\n";
+  } else {
+    std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
+               << total_pages << " pages, starting at " << page1_path
+               << "\n";
+  }
 
   // TODO(Task 1c.2): multi-page output/actions (PDF/TIFF combine). For now
-  // the FUNC action (IMAGE/OCR/EMAIL) runs on page 1's path only, even
+  // the FUNC action (IMAGE/OCR/EMAIL) runs on page 1's file only, even
   // though every page was just saved to disk above.
-  *saved_path = path;
+  *saved_path = page1_path;
 
-  return PerformAction(event.func, path, cfg, runner);
+  return PerformAction(event.func, page1_path, cfg, runner);
 }
 
 }  // namespace brscan::scand

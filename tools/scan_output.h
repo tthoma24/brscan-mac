@@ -37,4 +37,15 @@ bool WriteOutput(const brscan::ScanResult& result, const std::string& path);
 bool WritePages(const std::vector<brscan::ScanResult>& pages,
                  const std::string& path);
 
+// The actual on-disk path WritePages(pages, base) wrote (or will write) for
+// page `index_1based` (1-based) out of `total` pages: `base` unchanged when
+// `total == 1` (WritePages never numbers a single page), otherwise `base`
+// with `-<NNN>` inserted before its extension, matching WritePages' own
+// numbering exactly. Callers that need to know which real file a
+// particular page landed at -- e.g. to run an action against page 1's
+// file, rather than the never-written `base` path a multi-page scan
+// doesn't produce -- must go through this helper instead of
+// reimplementing the numbering.
+std::string PagePath(const std::string& base, int index_1based, int total);
+
 }  // namespace brscan::cli

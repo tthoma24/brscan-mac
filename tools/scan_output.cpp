@@ -28,6 +28,11 @@ std::string NumberedPagePath(const std::string& path, int page_number) {
 
 }  // namespace
 
+std::string PagePath(const std::string& base, int index_1based, int total) {
+  if (total <= 1) return base;
+  return NumberedPagePath(base, index_1based);
+}
+
 std::string DescribeFailure(brscan::Status status) {
   switch (status) {
     case brscan::Status::kBusy:
@@ -95,13 +100,11 @@ bool WriteOutput(const brscan::ScanResult& result, const std::string& path) {
 
 bool WritePages(const std::vector<brscan::ScanResult>& pages,
                  const std::string& path) {
-  if (pages.size() == 1) return WriteOutput(pages[0], path);
-
   bool ok = true;
-  for (size_t i = 0; i < pages.size(); ++i) {
-    const std::string numbered =
-        NumberedPagePath(path, static_cast<int>(i + 1));
-    if (!WriteOutput(pages[i], numbered)) ok = false;
+  const int total = static_cast<int>(pages.size());
+  for (int i = 0; i < total; ++i) {
+    const std::string page_path = PagePath(path, i + 1, total);
+    if (!WriteOutput(pages[static_cast<size_t>(i)], page_path)) ok = false;
   }
   return ok;
 }

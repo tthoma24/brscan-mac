@@ -54,13 +54,18 @@ std::string BuildOutputPath(const std::string& save_dir,
 // write (Status::kIoError) if the base path, once resolved, does not
 // actually land inside cfg.save_dir, as a second independent check on top
 // of BuildOutputPath()'s own sanitization -- and dispatches
-// PerformAction() on page 1's path only (TODO(Task 1c.2): drive
-// PerformAction from the full multi-page/PDF output instead). `transport`
-// must already be Transport::Connect()ed; this function neither connects
-// nor disconnects it (matching RunScan's own contract) so the caller
-// controls the connection's lifetime.
+// PerformAction() on page 1's *actual* file (tools/scan_output.h's
+// PagePath(base, 1, page_count) -- the base path itself for a single-page
+// scan, since WritePages never numbers a lone page, or the `-001`-suffixed
+// file for a multi-page one, since WritePages never writes the bare base
+// path when there's more than one page). TODO(Task 1c.2): drive
+// PerformAction from the full multi-page/PDF output instead of page 1
+// alone. `transport` must already be Transport::Connect()ed; this function
+// neither connects nor disconnects it (matching RunScan's own contract) so
+// the caller controls the connection's lifetime.
 //
-// On success, sets `*saved_path` to page 1's path and returns whatever
+// On success, sets `*saved_path` to that same page-1 file (never the
+// unwritten base path for a multi-page scan) and returns whatever
 // PerformAction() returned (Status::kOk today; see daemon/actions.h).
 // `*saved_path` is left untouched on failure. Returns RunScan's status
 // unchanged if the scan itself failed (including Status::kProtocolError

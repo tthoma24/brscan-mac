@@ -204,21 +204,17 @@ int main(int argc, char** argv) {
 
   if (!brscan::cli::WritePages(pages, args.output)) return 1;
 
-  if (pages.size() == 1) {
+  const int total_pages = static_cast<int>(pages.size());
+  if (total_pages == 1) {
     std::cout << "Wrote " << args.output << " (1 page, " << pages[0].width
                << "x" << pages[0].height << ")\n";
   } else {
-    // Mirror WritePages' own numbering (see scan_output.cpp's
-    // NumberedPagePath) just to name the first file in this message; the
-    // page count above is the authoritative "how many" answer.
-    const size_t dot = args.output.find_last_of('.');
-    const size_t slash = args.output.find_last_of('/');
-    const bool has_ext = dot != std::string::npos &&
-                          (slash == std::string::npos || dot > slash);
+    // brscan::cli::PagePath mirrors WritePages' own numbering, so this
+    // names the file WritePages actually wrote for page 1, not a
+    // hand-reconstructed guess at its name.
     const std::string first_path =
-        has_ext ? args.output.substr(0, dot) + "-001" + args.output.substr(dot)
-                : args.output + "-001";
-    std::cout << "Wrote " << pages.size() << " pages to " << first_path
+        brscan::cli::PagePath(args.output, 1, total_pages);
+    std::cout << "Wrote " << total_pages << " pages to " << first_path
                << " ...\n";
   }
   return 0;

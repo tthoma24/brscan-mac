@@ -33,10 +33,12 @@ std::vector<uint8_t> EncodeOfferFrame(const std::string& csv) {
 
 // A block header with the two confirmed anchor bytes set (offset 2 =
 // 0x07, offset 6 = 0x84; see ParseBlockHeader) and the given little-endian
-// width in the last two bytes. The other bytes are arbitrary filler, as
-// their meaning is unconfirmed (see response.h).
-std::vector<uint8_t> EncodeBlockHeader(uint16_t width) {
-  return {0x00, 0x64, 0x07, 0x00, 0x01, 0x00, 0x84, 0xc0, 0x01, 0x00, 0x00,
+// width in the last two bytes. `pidx` (default 1) is byte[4] --
+// confirmed as the 1-based page index for a color scan (see
+// reference/protocol-notes-adf-multipage.md); the other bytes are
+// arbitrary filler, as their meaning is unconfirmed (see response.h).
+std::vector<uint8_t> EncodeBlockHeader(uint16_t width, uint8_t pidx = 1) {
+  return {0x00, 0x64, 0x07, 0x00, pidx, 0x00, 0x84, 0xc0, 0x01, 0x00, 0x00,
           static_cast<uint8_t>(width & 0xff),
           static_cast<uint8_t>((width >> 8) & 0xff)};
 }
@@ -120,8 +122,15 @@ brscan::Params GrayParams() {
 // `length` in the last two bytes, matching BlockHeader::type/width in
 // response.h. Used for the RLENGTH modes (TEXT/ERRDIF/GRAY256): `type` is
 // 0x42 for a PackBits-compressed row or 0x40 for an uncompressed one.
-std::vector<uint8_t> EncodeRlengthBlockHeader(uint8_t type, uint16_t length) {
-  return {type, 0x07, 0x00, 0x01, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00,
+// `pidx` (default 1) is byte[3], in the same position as the color
+// header's confirmed page-index byte; a per-row RLENGTH header's byte[3]
+// isn't independently confirmed as a page index (docs/PROTOCOL.md's "Row
+// block framing" shows it as a constant), but ParseBlockHeader ignores it
+// either way, so tests may still vary it per page for fidelity to a
+// multi-page capture's shape.
+std::vector<uint8_t> EncodeRlengthBlockHeader(uint8_t type, uint16_t length,
+                                                uint8_t pidx = 1) {
+  return {type, 0x07, 0x00, pidx, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00,
           static_cast<uint8_t>(length & 0xff),
           static_cast<uint8_t>((length >> 8) & 0xff)};
 }
@@ -593,17 +602,17 @@ TEST(RunScan, ColorAdfMultiPageReturnsAllPages) {
   const auto jpeg2 = MakeSyntheticJpeg(16, 8);
   const auto jpeg3 = MakeSyntheticJpeg(16, 8);
 
-  auto block1 = EncodeBlockHeader(static_cast<uint16_t>(jpeg1.size()));
+  auto block1 = EncodeBlockHeader(static_cast<uint16_t>(jpeg1.size()), 1);
   block1.insert(block1.end(), jpeg1.begin(), jpeg1.end());
   t.QueueRead(block1);
   t.QueueRead(EncodeEndOfPageMarker(1));  // tail (next 2 bytes): `64 07`.
 
-  auto block2 = EncodeBlockHeader(static_cast<uint16_t>(jpeg2.size()));
+  auto block2 = EncodeBlockHeader(static_cast<uint16_t>(jpeg2.size()), 2);
   block2.insert(block2.end(), jpeg2.begin(), jpeg2.end());
   t.QueueRead(block2);
   t.QueueRead(EncodeEndOfPageMarker(2));  // tail (next 2 bytes): `64 07`.
 
-  auto block3 = EncodeBlockHeader(static_cast<uint16_t>(jpeg3.size()));
+  auto block3 = EncodeBlockHeader(static_cast<uint16_t>(jpeg3.size()), 3);
   block3.insert(block3.end(), jpeg3.begin(), jpeg3.end());
   t.QueueRead(block3);
   t.QueueRead(EncodeJobFinalTerminator(3));  // tail: `80 80`, job done.
@@ -635,13 +644,13 @@ TEST(RunScan, GrayAdfMultiPageReturnsAllPages) {
   QueuePreamble(&t);
   t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
 
-  auto block1 = EncodeBlockHeader(4);
+  auto block1 = EncodeBlockHeader(4, 1);
   const std::vector<uint8_t> raw1(4 * 3, 0x11);
   block1.insert(block1.end(), raw1.begin(), raw1.end());
   t.QueueRead(block1);
   t.QueueRead(EncodeEndOfPageMarker(1));
 
-  auto block2 = EncodeBlockHeader(4);
+  auto block2 = EncodeBlockHeader(4, 2);
   const std::vector<uint8_t> raw2(4 * 3, 0x22);
   block2.insert(block2.end(), raw2.begin(), raw2.end());
   t.QueueRead(block2);
@@ -672,24 +681,24 @@ TEST(RunScan, BlackWhiteAdfMultiPageReturnsAllPages) {
   t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,2,"));
 
   // Page 1: rows {0xAA, 0xBB} and {0xCC, 0xDD}, each a 2-byte literal run.
-  auto p1row0 = EncodeRlengthBlockHeader(0x42, 3);
+  auto p1row0 = EncodeRlengthBlockHeader(0x42, 3, 1);
   const std::vector<uint8_t> p1row0_payload = {0x01, 0xAA, 0xBB};
   p1row0.insert(p1row0.end(), p1row0_payload.begin(), p1row0_payload.end());
   t.QueueRead(p1row0);
 
-  auto p1row1 = EncodeRlengthBlockHeader(0x42, 3);
+  auto p1row1 = EncodeRlengthBlockHeader(0x42, 3, 1);
   const std::vector<uint8_t> p1row1_payload = {0x01, 0xCC, 0xDD};
   p1row1.insert(p1row1.end(), p1row1_payload.begin(), p1row1_payload.end());
   t.QueueRead(p1row1);
   t.QueueRead(EncodeEndOfPageMarker(1));
 
   // Page 2: rows {0x11, 0x22} and {0x33, 0x44}.
-  auto p2row0 = EncodeRlengthBlockHeader(0x42, 3);
+  auto p2row0 = EncodeRlengthBlockHeader(0x42, 3, 2);
   const std::vector<uint8_t> p2row0_payload = {0x01, 0x11, 0x22};
   p2row0.insert(p2row0.end(), p2row0_payload.begin(), p2row0_payload.end());
   t.QueueRead(p2row0);
 
-  auto p2row1 = EncodeRlengthBlockHeader(0x42, 3);
+  auto p2row1 = EncodeRlengthBlockHeader(0x42, 3, 2);
   const std::vector<uint8_t> p2row1_payload = {0x01, 0x33, 0x44};
   p2row1.insert(p2row1.end(), p2row1_payload.begin(), p2row1_payload.end());
   t.QueueRead(p2row1);
