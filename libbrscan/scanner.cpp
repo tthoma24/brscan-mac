@@ -1,5 +1,6 @@
 #include "brscan/scanner.h"
 
+#include <algorithm>
 #include <string>
 
 #include "brscan/session.h"
@@ -37,10 +38,13 @@ constexpr int kScanTimeoutMs = 20000;
 // doc comment for the residual risk this leaves.
 constexpr int kDrainIdleTimeoutMs = 800;
 
-// The device caps every payload block at this many bytes; a block header's
-// trailing length field pins at this exact value (its documented sentinel,
-// 0xfff4) precisely when the block is full and more blocks follow. See the
-// long comment above ReadChunkedJpeg for how this was found.
+// The device caps every payload block at this many bytes. A block header's
+// trailing length field pins at this exact value (0xfff4) as a "more data
+// follows" SENTINEL, NOT as an exact byte count: a chunk may declare
+// 0xfff4 yet carry FEWER bytes before the next block header or the
+// end-of-page marker (observed on real ADF hardware -- see the long
+// comment above ReadChunkedJpeg). A length strictly below 0xfff4 is an
+// honest final-chunk length.
 constexpr int kMaxChunkBytes = 0xfff4;
 
 // Buffers reads from a Transport and consumes them structurally: exact
@@ -117,6 +121,25 @@ class Framer {
     return Status::kOk;
   }
 
+  // Like Peek, but tolerant of the stream ending before `n` bytes arrive:
+  // fills until the buffer holds at least `n` bytes OR a Fill() times out
+  // (no more data is coming right now), then returns a copy of whatever is
+  // buffered (at most `n` bytes), without consuming it. A non-timeout error
+  // is propagated. Used to look ahead for a chunk boundary near the end of
+  // the payload, where the boundary itself (and the short tail after it)
+  // can arrive well before `n` further bytes would -- so a plain Peek(n)
+  // there would time out with nothing instead of surfacing the boundary.
+  Status PeekUpTo(size_t n, int timeout_ms, std::vector<uint8_t>* out) {
+    while (buf_.size() < n) {
+      const Status s = Fill(timeout_ms);
+      if (s == Status::kTimeout) break;
+      if (s != Status::kOk) return s;
+    }
+    const size_t take = std::min(n, buf_.size());
+    out->assign(buf_.begin(), buf_.begin() + take);
+    return Status::kOk;
+  }
+
  private:
   Transport* transport_;
   std::vector<uint8_t> buf_;
@@ -166,6 +189,63 @@ Status ReadBlockHeader(Framer* framer, int timeout_ms, BlockHeader* header) {
   return Status::kOk;
 }
 
+// Scans a look-ahead `window` (which must begin at the start of a chunk's
+// data, never inside a header) for the first chunk boundary at an offset
+// in [1, kMaxChunkBytes]. A boundary is the first position after the chunk
+// data where either the next block header or the end-of-page marker begins:
+//   - block header (12-byte shape): <type> 07 00 <pidx> 00 84 .. .. 00 00,
+//     type in {0x64, 0x40, 0x42};
+//   - end-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00.
+// Both shapes are matched on all of their fixed bytes -- the 07/84 anchors
+// AND the constant zero bytes -- not just a two- or three-byte anchor.
+// That precision matters: a looser 0x82/0x07/../0x84 marker test (three
+// bytes) false-matches ordinary JPEG entropy about once every 16 MB, and
+// real ADF duplex page 1 (~3.7 MB) hit exactly such a false positive
+// mid-payload, truncating the page. The full fixed-byte match survived
+// both the ~10 MB simplex and duplex captures with no false positive.
+//
+// On a match, sets *pos to the boundary offset (the sentinel chunk's true
+// data length) and *is_end_of_page to which pattern matched, and returns
+// true. Returns false when no boundary appears within the scanned range --
+// a genuinely full chunk that still continues. The scan stops at
+// kMaxChunkBytes so a legacy 13-byte header (whose leading 0x00 sits
+// exactly at offset 0xfff4 after a full chunk, one byte before its 0x64
+// anchor) is left to the "no boundary -> read exactly kMaxChunkBytes" path
+// rather than being mismatched one byte late.
+bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
+                       bool* is_end_of_page) {
+  const size_t limit =
+      std::min<size_t>(window.size(), static_cast<size_t>(kMaxChunkBytes));
+  for (size_t p = 1; p <= limit; ++p) {
+    if (p + 10 > window.size()) break;  // Too little left to match either.
+    // End-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00. Only [+3]
+    // (pidx) varies; the six zero bytes at [+2], [+4], [+6..9] plus the
+    // 82/07/84 anchors are what keep this from matching JPEG entropy. A
+    // looser 82/07/..84 test (three bytes) DID false-match mid-payload on
+    // real ADF duplex data, cutting a page short.
+    if (window[p] == 0x82 && window[p + 1] == 0x07 && window[p + 2] == 0x00 &&
+        window[p + 4] == 0x00 && window[p + 5] == 0x84 &&
+        window[p + 6] == 0x00 && window[p + 7] == 0x00 &&
+        window[p + 8] == 0x00 && window[p + 9] == 0x00) {
+      *pos = p;
+      *is_end_of_page = true;
+      return true;
+    }
+    // Next block header (12-byte shape): <type> 07 00 <pidx> 00 84 .. .. 00
+    // 00, with type in {0x64, 0x40, 0x42}. The [+2] and [+4] zeros are
+    // required for the same anti-false-match reason.
+    if ((window[p] == 0x64 || window[p] == 0x40 || window[p] == 0x42) &&
+        window[p + 1] == 0x07 && window[p + 2] == 0x00 &&
+        window[p + 4] == 0x00 && window[p + 5] == 0x84 &&
+        window[p + 8] == 0x00 && window[p + 9] == 0x00) {
+      *pos = p;
+      *is_end_of_page = false;
+      return true;
+    }
+  }
+  return false;
+}
+
 // Reads a full JPEG payload, which may span multiple network blocks.
 //
 // This is the key discovery of this task, found by scanning a real
@@ -177,39 +257,81 @@ Status ReadBlockHeader(Framer* framer, int timeout_ms, BlockHeader* header) {
 // around every 0x10000-ish boundary showed a repeating pattern: a second
 // 12-byte block header (same anchors as the first) spliced into the
 // stream every exactly 65524 bytes. BlockHeader::width's confirmed
-// "JPEG-length sentinel" behavior from Task 6 (response.h) turns out to be
-// this same mechanism seen from a single-block sample: the field is each
-// block's own payload length, capped at kMaxChunkBytes (0xfff4 = 65524)
-// while more blocks remain, and the true remaining length on the final
-// block. A payload under one block's worth is just the degenerate case of
-// this loop running once.
+// "JPEG-length sentinel" behavior from Task 6 (response.h) is this same
+// mechanism seen from a single-block sample.
 //
-// Residual risk: a final block whose payload is exactly kMaxChunkBytes
-// (0xfff4) is indistinguishable on the wire from a full, still-continuing
-// block -- both declare the same sentinel length. That case is not known
-// to have been observed (every payload seen live ended with a shorter
-// final block), and there's no way to tell them apart from the header
-// alone; if it ever occurs, this loop will call ReadBlockHeader again and
-// block until kScanTimeoutMs elapses waiting for a header that isn't
-// coming, surfacing as Status::kTimeout rather than a hang.
+// Crucially, 0xfff4 (kMaxChunkBytes) is a "MORE DATA FOLLOWS" sentinel,
+// NOT an exact per-block byte count. Real ADF hardware sends chunks that
+// declare 0xfff4 yet carry fewer bytes: in this project's capture, ADF
+// simplex page 1 has 52 chunks, and chunk 35's header declares 0xfff4
+// while its real data is only 0xfa4c bytes -- the next valid block header
+// sits at chunk35_data + 0xfa4c, not + 0xfff4. Trusting 0xfff4 as exact
+// over-reads into the next header, desyncs the stream, and the following
+// ReadBlockHeader fails with kProtocolError. (Single-page flatbed color
+// happened to use only exact-0xfff4 chunks plus an honest short final
+// chunk, so it worked and hid this until multi-page ADF exercised it.)
+//
+// So each chunk is read by its declared length's MEANING:
+//   - width < kMaxChunkBytes: an honest final-chunk length -- read exactly
+//     that many bytes; this is the last chunk of the payload.
+//   - width == kMaxChunkBytes: a sentinel -- the chunk's real data ends at
+//     the next boundary (FindChunkBoundary), capped at kMaxChunkBytes.
+//     Read up to that boundary. If the boundary is a block header, read it
+//     and continue. If it is the end-of-page marker, STOP and return with
+//     the marker still unconsumed, because RunScan's page loop reads that
+//     10-byte marker itself. If no boundary appears within kMaxChunkBytes,
+//     the chunk is genuinely full: read exactly kMaxChunkBytes and read
+//     the next header, as before.
 Status ReadChunkedJpeg(Framer* framer, const BlockHeader& first_header, int timeout_ms,
                         std::vector<uint8_t>* jpeg) {
   jpeg->clear();
   BlockHeader header = first_header;
   for (;;) {
     if (header.width <= 0) return Status::kProtocolError;
-    const size_t to_read = header.width == kMaxChunkBytes
-                                ? static_cast<size_t>(kMaxChunkBytes)
-                                : static_cast<size_t>(header.width);
+
+    if (header.width != kMaxChunkBytes) {
+      // Honest final-chunk length: read exactly that many bytes and stop.
+      std::vector<uint8_t> chunk;
+      const Status s = framer->ReadExact(static_cast<size_t>(header.width),
+                                         timeout_ms, &chunk);
+      if (s != Status::kOk) return s;
+      jpeg->insert(jpeg->end(), chunk.begin(), chunk.end());
+      break;
+    }
+
+    // Sentinel: the real chunk length isn't the header's 0xfff4. Look
+    // ahead (without consuming) far enough to cover a full chunk plus the
+    // boundary anchors that follow it, tolerating a short tail at the end
+    // of the payload, and find where this chunk's data actually ends.
+    std::vector<uint8_t> window;
+    Status s = framer->PeekUpTo(static_cast<size_t>(kMaxChunkBytes) + 13,
+                                timeout_ms, &window);
+    if (s != Status::kOk) return s;
+
+    size_t boundary = 0;
+    bool is_end_of_page = false;
+    if (FindChunkBoundary(window, &boundary, &is_end_of_page)) {
+      std::vector<uint8_t> chunk;
+      s = framer->ReadExact(boundary, timeout_ms, &chunk);
+      if (s != Status::kOk) return s;
+      jpeg->insert(jpeg->end(), chunk.begin(), chunk.end());
+      if (is_end_of_page) break;  // Leave the marker for RunScan's loop.
+      const Status header_status = ReadBlockHeader(framer, timeout_ms, &header);
+      if (header_status != Status::kOk) return header_status;
+      continue;
+    }
+
+    // No boundary within kMaxChunkBytes: a genuinely full chunk that
+    // continues. Read exactly kMaxChunkBytes and read the next header.
     std::vector<uint8_t> chunk;
-    const Status s = framer->ReadExact(to_read, timeout_ms, &chunk);
+    s = framer->ReadExact(static_cast<size_t>(kMaxChunkBytes), timeout_ms,
+                          &chunk);
     if (s != Status::kOk) return s;
     jpeg->insert(jpeg->end(), chunk.begin(), chunk.end());
-    if (header.width != kMaxChunkBytes) break;  // that was the final block.
     const Status header_status = ReadBlockHeader(framer, timeout_ms, &header);
     if (header_status != Status::kOk) return header_status;
   }
-  // Defensive cross-check on top of the length-driven read above: a
+  // Defensive cross-check on top of the boundary-driven read above: a
   // well-formed payload always ends at the JPEG EOI marker.
   if (jpeg->size() < 2 || (*jpeg)[jpeg->size() - 2] != 0xff ||
       (*jpeg)[jpeg->size() - 1] != 0xd9) {

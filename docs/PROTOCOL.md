@@ -168,14 +168,30 @@ A typical scan is: `ESC Q` (once per connection), then per scan
 
    - **Color** (`M=CGRAY`, `C=JPEG`): the payload is one baseline JPEG stream
      (`ff d8 ... ff d9`), but for anything over 65524 bytes (`0xfff4`) it
-     arrives split into multiple blocks: every block's header gives that
-     block's own payload length, pinned at the `0xfff4` sentinel while more
-     blocks follow, and the true (shorter) length on the final block. A
-     reader must strip each embedded header and concatenate the block
-     payloads to reassemble the real JPEG -- reading the stream as if it
-     were one contiguous run and just searching for the EOI marker corrupts
-     it, since an embedded header can land in the middle of the
-     entropy-coded data.
+     arrives split into multiple blocks. The header length field is **not** an
+     exact per-block byte count: `0xfff4` is a **"more data follows" sentinel**,
+     not a length. A block that declares `0xfff4` may physically carry *fewer*
+     than `0xfff4` bytes -- real ADF hardware does this (in this project's
+     capture, ADF simplex page 1 chunk 35 declares `0xfff4` but sends only
+     `0xfa4c` bytes before the next header). A value strictly below `0xfff4`
+     *is* an honest final-block length. So a reader cannot trust `0xfff4` as a
+     byte count; it must find where each block's data actually ends -- the next
+     block header, or the end-of-page marker -- capped at `0xfff4`, and
+     concatenate the block payloads with the embedded headers stripped.
+     Reading the stream as one contiguous run and just searching for the EOI
+     marker corrupts it (an embedded header lands in the entropy-coded data),
+     and trusting `0xfff4` as exact over-reads a short block into the next
+     header and desyncs the stream. The block header and end-of-page marker
+     are matched on all their fixed bytes, not a two/three-byte anchor,
+     because a looser test false-matches JPEG entropy (observed on real ADF
+     duplex data). See `ReadChunkedJpeg` in `libbrscan/scanner.cpp`.
+
+     Note: a **duplex** ADF job multiplexes its sheets -- the front-side and
+     back-side JPEGs arrive as *interleaved* blocks distinguished by the
+     header's 1-based page-index byte, each stream closed by its own
+     end-of-page marker -- rather than one complete page after another. The
+     reassembly here handles the sequential (simplex / single-page) layout;
+     de-interleaving a duplex job by page index is not yet implemented.
    - **Grayscale** (`M=GRAY64`, `C=NONE`): the payload is raw 8-bit samples,
      `width * height` bytes, and is **not** chunked the way color is even
      past the same 65524-byte size -- confirmed by a live gray scan crossing
