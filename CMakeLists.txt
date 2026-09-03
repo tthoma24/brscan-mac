@@ -60,9 +60,11 @@ if(BUILD_TESTING)
     tests/decode_test.cpp
     tests/decode_rlength_test.cpp
     tests/scanner_test.cpp
+    daemon/snmp_register.cpp
+    tests/snmp_register_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
-  target_include_directories(brscan_tests PRIVATE libbrscan tests)
+  target_include_directories(brscan_tests PRIVATE libbrscan tests daemon)
   target_include_directories(brscan_tests PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
   target_link_libraries(brscan_tests PRIVATE ${TURBOJPEG_LIBRARIES})
   target_link_directories(brscan_tests PRIVATE ${TURBOJPEG_LIBRARY_DIRS})

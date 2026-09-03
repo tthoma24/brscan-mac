@@ -72,3 +72,17 @@ its documented RLENGTH/PackBits algorithm under that license (see
 `libbrscan/decode_rlength.h`), consistent with the clean-room policy above,
 which names that project as a permitted source. No Brother binary, driver
 package, or decompiler output was run or read by this project directly.
+
+The constant below is from `reference/brscan-button.pcap`, our own capture of
+the Scan-button registration/notification traffic between a Mac running
+Brother's driver and the printer (issue #3), taken 2026-09-02. See
+`reference/protocol-notes-button.md` for the decoded structure; the raw SNMP
+Set packet is `reference/streams/button_snmp_set.bin` (git-ignored -- it
+carries the real capturing Mac's LAN IP and computer name, so it and every
+fixture derived from it stay out of the repository; committed tests in
+`tests/snmp_register_test.cpp` use synthetic values instead, e.g.
+`HOST=192.0.2.10:54925`, `USER="Test Mac"`).
+
+| Constant | Meaning | Source |
+|---|---|---|
+| SNMPv1 Set, community `internal`, OID `1.3.6.1.4.1.2435.2.3.9.2.11.1.1.0` (BER `2b 06 01 04 01 93 03 02 03 09 02 0b 01 01 00`), OctetString value `TYPE=BR;BUTTON=SCAN;DURATION=<sec>;CC=1;HOST=<ip>:<port>;USER="<name>";FUNC=<FILE\|IMAGE\|OCR\|EMAIL>;APPNUM=<n>;` (APPNUM: FILE 5, IMAGE 1, EMAIL 2, OCR 3) | Registers this Mac as a Scan-button destination | Capture, `reference/streams/button_snmp_set.bin`; BER tag/length framing (SEQUENCE, community, `[3]` SET-REQUEST, varbind list) cross-checked byte-for-byte against that capture and independently against `/opt/local/bin/snmpset`'s (net-snmp 5.9.4) own encoding of the same OID/community/value over a loopback UDP capture -- both agree with `daemon/snmp_register.cpp`'s `BuildSnmpSetRegister` field-by-field aside from request-id length/value, which the protocol allows to vary |
