@@ -83,6 +83,9 @@ std::optional<BlockHeader> ParseBlockHeader(const uint8_t* data, size_t len) {
   // payload width) and not confirmed (JPEG payload length/sentinel) to
   // mean.
   header.width = static_cast<int>(data[11]) | (static_cast<int>(data[12]) << 8);
+  // Byte 1: the payload-type marker. See the doc comment on
+  // BlockHeader::type in response.h.
+  header.type = static_cast<int>(data[1]);
   return header;
 }
 

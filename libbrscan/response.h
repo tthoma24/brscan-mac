@@ -35,11 +35,18 @@ std::optional<Offer> ParseOffer(const std::string& csv);
 struct BlockHeader {
   // Bytes [11:13], little-endian u16.
   //
-  // CONFIRMED for a raw grayscale (GRAY64/C=NONE) payload: the image
-  // width in pixels. Verified against the 300 dpi gray scans in
-  // reference/streams/s0_in.bin: header bytes `90 0d` -> 0x0d90 = 3472,
-  // matching the raw payload's row width (raw byte count factors evenly
-  // by 3472).
+  // CONFIRMED for a raw grayscale (GRAY64/C=NONE, or GRAY256/C=RLENGTH's
+  // uncompressed-row fallback -- see `type` below) payload: the payload's
+  // byte length -- the image width in pixels for GRAY64 (verified against
+  // the 300 dpi gray scans in reference/streams/s0_in.bin: header bytes
+  // `90 0d` -> 0x0d90 = 3472, matching the raw payload's row width), or a
+  // GRAY256 row's fixed byte width (also pixel width, 1 byte/pixel).
+  //
+  // CONFIRMED for an RLENGTH-compressed row (`type == 0x42`): that row's
+  // compressed payload length in bytes (varies row to row; see
+  // decode_rlength.h). Reconstructing the decompressed row's fixed byte
+  // width is the caller's job (from the requested scan area), not this
+  // field's.
   //
   // NOT reliable for a JPEG (CGRAY/C=JPEG) payload: in every JPEG sample
   // this field instead holds the encoded byte length when it fits under
@@ -48,6 +55,25 @@ struct BlockHeader {
   // that; see DecodeJpeg). Callers must not use this field for a JPEG
   // payload's dimensions.
   int width;
+
+  // Byte 1: a payload-type marker, confirmed for three values by
+  // cross-referencing every block in reference/streams/s0_in.bin (color
+  // and gray) and reference/streams/modes_{text,errdif,gray256}_in.bin
+  // (the new RLENGTH modes; see docs/PROTOCOL.md):
+  //   0x40 -- raw payload, byte length in `width` (GRAY64/C=NONE, and the
+  //           uncompressed-row fallback the device sometimes uses within
+  //           a GRAY256/C=RLENGTH scan -- observed for the large majority
+  //           of rows in a captured True Gray scan).
+  //   0x42 -- RLENGTH-compressed payload (TEXT/ERRDIF/GRAY256 with
+  //           C=RLENGTH), compressed byte length in `width`; decode with
+  //           DecodeRlengthRow (decode_rlength.h).
+  //   0x64 -- JPEG chunk (CGRAY/C=JPEG); `width` is the JPEG-length
+  //           sentinel behavior documented above, not a row width.
+  // A block whose anchors match but whose type is none of these (e.g.
+  // 0x82, the end-of-page/status marker documented in
+  // reference/protocol-notes-modes.md) is not a row-data block; callers
+  // must check `type` before reading `width` bytes of payload after it.
+  int type;
 };
 
 // Parses the 13-byte block header. Validates two constant anchor bytes

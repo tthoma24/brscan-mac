@@ -19,9 +19,16 @@ enum class Status {
   kTimeout,
 };
 
-// Scan color mode. Text/black-and-white modes are not yet in scope; see
-// docs/PROTOCOL.md.
-enum class ScanMode { kColor, kGray };
+// Scan color mode.
+//
+// kColor and kGray use the original M=CGRAY/C=JPEG and M=GRAY64/C=NONE
+// flow. kBlackWhite (M=TEXT), kErrorDiffusion (M=ERRDIF), and kTrueGray
+// (M=GRAY256) all use the newer C=RLENGTH per-row run-length payload
+// (see docs/PROTOCOL.md's "RLENGTH" section and decode_rlength.h):
+// kBlackWhite/kErrorDiffusion decode to 1-bit-per-pixel images
+// (PixelFormat::kBitonal), kTrueGray to 8-bit gray (PixelFormat::kGray,
+// same representation as kGray's raw payload).
+enum class ScanMode { kColor, kGray, kBlackWhite, kErrorDiffusion, kTrueGray };
 
 // Physical source to scan from.
 enum class Source { kFlatbed, kAdf };
@@ -58,11 +65,19 @@ struct Offer {
 };
 
 // Pixel layout of a decoded Image.
-enum class PixelFormat { kRgb, kGray };
+//
+// kBitonal is 1 bit per pixel, packed 8 pixels to a byte, most-significant
+// bit first, one bit value per pixel where 1 = black and 0 = white (the
+// same convention as a PBM P4 file, and the standard fax/TIFF Group 3
+// packing this codebase's RLENGTH decoder does not need to re-derive --
+// see decode_rlength.h). Each row is padded to a whole byte, so a
+// kBitonal Image's row stride is (width + 7) / 8 bytes.
+enum class PixelFormat { kRgb, kGray, kBitonal };
 
 // A fully decoded scan image: interleaved RGB (3 bytes/pixel) for a
-// decoded JPEG, or raw 8-bit samples (1 byte/pixel) for a GRAY64/C=NONE
-// payload.
+// decoded JPEG, raw 8-bit samples (1 byte/pixel) for a GRAY64/C=NONE or
+// GRAY256/C=RLENGTH payload, or packed 1-bit-per-pixel samples (see
+// PixelFormat::kBitonal) for a TEXT or ERRDIF/C=RLENGTH payload.
 struct Image {
   int width;
   int height;

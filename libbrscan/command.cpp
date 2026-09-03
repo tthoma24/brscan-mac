@@ -24,10 +24,34 @@ std::vector<uint8_t> Frame(char letter, const std::string& body) {
 }
 
 const char* ModeToken(ScanMode mode) {
-  return mode == ScanMode::kColor ? "CGRAY" : "GRAY64";
+  switch (mode) {
+    case ScanMode::kColor:
+      return "CGRAY";
+    case ScanMode::kGray:
+      return "GRAY64";
+    case ScanMode::kBlackWhite:
+      return "TEXT";
+    case ScanMode::kErrorDiffusion:
+      return "ERRDIF";
+    case ScanMode::kTrueGray:
+      return "GRAY256";
+  }
+  return "GRAY64";  // unreachable
 }
 
 const char* DuplexToken(bool duplex) { return duplex ? "DUP" : "SIN"; }
+
+// True for the modes that use the newer C=RLENGTH payload (see
+// docs/PROTOCOL.md's "RLENGTH" section): these were captured from Brother
+// iPrint&Scan rather than Image Capture, and that flow carries a distinct
+// param set -- S=NORMAL_SCAN in both ESC I and ESC X, L=0 and E=0 (not
+// E=1) in ESC X, and a different field order -- that reference/streams/
+// modes_{text,errdif,gray256}_out.bin confirm the device accepts. See
+// EncodeInfo and EncodeExecute below.
+bool UsesRlength(ScanMode mode) {
+  return mode == ScanMode::kBlackWhite || mode == ScanMode::kErrorDiffusion ||
+         mode == ScanMode::kTrueGray;
+}
 
 }  // namespace
 
@@ -45,13 +69,48 @@ std::vector<uint8_t> EncodeInfo(int x_dpi, int y_dpi, ScanMode mode,
   body += "R=" + std::to_string(x_dpi) + "," + std::to_string(y_dpi) + "\n";
   body += "M=" + std::string(ModeToken(mode)) + "\n";
   body += "D=" + std::string(DuplexToken(duplex)) + "\n";
+  // Confirmed in the ESC I bytes of reference/streams/modes_{text,errdif,
+  // gray256}_out.bin: iPrint&Scan's RLENGTH flow also carries S=NORMAL_SCAN
+  // here, appended after D= (the existing R,M,D order is unchanged).
+  if (UsesRlength(mode)) body += "S=NORMAL_SCAN\n";
   return Frame('I', body);
 }
 
 std::vector<uint8_t> EncodeExecute(const Params& params) {
   const bool color = params.mode == ScanMode::kColor;
+  const bool rlength = UsesRlength(params.mode);
 
   std::string body;
+  if (rlength) {
+    // Field order and param set here replicate iPrint&Scan's ESC X for the
+    // RLENGTH modes byte-for-byte (reference/streams/modes_{text,errdif,
+    // gray256}_out.bin all share this exact shape, differing only in the
+    // M= token): R,M,C,J,B,N,A,D,S,P,E,G,L -- a different order from the
+    // CGRAY/GRAY64 branch below, and with S=NORMAL_SCAN, L=0, and E=0
+    // (not E=1) that the older flow never sent. The device is documented
+    // (docs/PROTOCOL.md) to accept either field order, so this is kept
+    // byte-identical to the captured, known-working command rather than
+    // merged into the older branch's ordering.
+    body += "R=" + std::to_string(params.x_dpi) + "," +
+            std::to_string(params.y_dpi) + "\n";
+    body += "M=" + std::string(ModeToken(params.mode)) + "\n";
+    body += "C=RLENGTH\n";
+    body += "J=MID\n";
+    body += "B=" + std::to_string(params.brightness) + "\n";
+    body += "N=" + std::to_string(params.contrast) + "\n";
+    body += "A=" + std::to_string(params.area.x0) + "," +
+            std::to_string(params.area.y0) + "," +
+            std::to_string(params.area.x1) + "," +
+            std::to_string(params.area.y1) + "\n";
+    body += "D=" + std::string(DuplexToken(params.duplex)) + "\n";
+    body += "S=NORMAL_SCAN\n";
+    body += "P=0\n";
+    body += "E=0\n";
+    body += "G=0\n";
+    body += "L=0\n";
+    return Frame('X', body);
+  }
+
   body += "B=" + std::to_string(params.brightness) + "\n";
   body += "N=" + std::to_string(params.contrast) + "\n";
   body += "M=" + std::string(ModeToken(params.mode)) + "\n";

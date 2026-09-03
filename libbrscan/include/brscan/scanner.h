@@ -9,11 +9,19 @@
 namespace brscan {
 
 // The result of a completed scan: the pixel dimensions the device actually
-// delivered, and the payload in its native on-the-wire encoding -- a
-// baseline JPEG stream for PixelFormat::kRgb (M=CGRAY, C=JPEG), or raw
-// 8-bit samples for PixelFormat::kGray (M=GRAY64, C=NONE). Callers that
-// want decoded RGB pixels run color `data` through DecodeJpeg; gray `data`
-// is already the same bytes DecodeGrayRaw would wrap.
+// delivered, and the payload already decoded to a form ready to write out
+// (or, for color, still the native encoding) --
+//   - PixelFormat::kRgb (M=CGRAY, C=JPEG): a baseline JPEG stream, as the
+//     device sent it. Run it through DecodeJpeg for decoded RGB pixels.
+//   - PixelFormat::kGray (M=GRAY64, C=NONE -- or M=GRAY256, C=RLENGTH):
+//     raw 8-bit samples, one byte per pixel, already the same bytes
+//     DecodeGrayRaw would wrap. GRAY256 arrives per-row RLENGTH-
+//     compressed on the wire; RunScan decodes it before this struct is
+//     filled in, so both cases look identical here.
+//   - PixelFormat::kBitonal (M=TEXT or M=ERRDIF, C=RLENGTH): decoded
+//     1-bit-per-pixel samples packed per PixelFormat::kBitonal's
+//     convention in types.h, already decompressed from the wire's
+//     RLENGTH payload -- ready to write out as a PBM P4, for instance.
 struct ScanResult {
   PixelFormat format;
   int width;

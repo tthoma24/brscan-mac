@@ -5,6 +5,7 @@
 #include "brscan/session.h"
 #include "command.h"
 #include "decode_jpeg.h"
+#include "decode_rlength.h"
 #include "response.h"
 
 namespace brscan {
@@ -235,6 +236,77 @@ Status ReadRawGray(Framer* framer, size_t total_bytes, int timeout_ms,
   return framer->ReadExact(total_bytes, timeout_ms, raw);
 }
 
+// BlockHeader::type values relevant to a C=RLENGTH scan (TEXT, ERRDIF,
+// GRAY256; see response.h's doc comment on BlockHeader::type).
+constexpr int kBlockTypeRaw = 0x40;
+constexpr int kBlockTypeRlength = 0x42;
+
+// Reads `height` per-row blocks for a C=RLENGTH scan (TEXT/ERRDIF/
+// GRAY256) and returns their decoded pixel bytes concatenated row-major,
+// `row_bytes` bytes per row.
+//
+// Each row's block header (already read once, as `first_header`, by the
+// caller before it knew this was an RLENGTH scan -- mirroring how the
+// color/gray branches below reuse their own first header read) declares
+// that row's on-the-wire payload length in BlockHeader::width, and its
+// on-the-wire shape in BlockHeader::type: kBlockTypeRlength (0x42) is a
+// PackBits-compressed row, decoded here with DecodeRlengthRow;
+// kBlockTypeRaw (0x40) is an uncompressed row of exactly `row_bytes`
+// bytes -- observed for the large majority of rows in this project's own
+// GRAY256 capture (see decode_rlength.h and the issue #4 report), so a
+// real device response must not be rejected just for arriving raw. A
+// header of any other type (e.g. the 0x82 end-of-page/status marker
+// documented in reference/protocol-notes-modes.md) before `height` rows
+// have been read is a protocol error rather than the well-formed image
+// this function expects to reconstruct.
+//
+// Residual risk: this trusts each row's declared length even though this
+// project's own captures show it can occasionally be wrong on real
+// hardware (a single row, out of several thousand, with a declared
+// length longer than the bytes actually sent for it before the next
+// row's header began -- see the issue #4 report). Reading that many
+// bytes then swallows the start of the next row's header, desynchronizing
+// the rest of the image; there is no self-describing way to detect this
+// from the header alone, so -- like ReadChunkedJpeg's analogous residual
+// risk above -- it surfaces as a decode failure (a row that doesn't
+// decompress to exactly `row_bytes`) or a timeout waiting for a header
+// that isn't at the expected offset, not silent corruption.
+Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
+                        int height, size_t row_bytes, int timeout_ms,
+                        std::vector<uint8_t>* pixels) {
+  pixels->clear();
+  pixels->reserve(row_bytes * static_cast<size_t>(height));
+
+  BlockHeader header = first_header;
+  for (int row = 0; row < height; ++row) {
+    if (row > 0) {
+      const Status s = ReadBlockHeader(framer, timeout_ms, &header);
+      if (s != Status::kOk) return s;
+    }
+    if (header.type != kBlockTypeRaw && header.type != kBlockTypeRlength) {
+      return Status::kProtocolError;
+    }
+    if (header.width < 0) return Status::kProtocolError;
+
+    std::vector<uint8_t> payload;
+    const Status s =
+        framer->ReadExact(static_cast<size_t>(header.width), timeout_ms, &payload);
+    if (s != Status::kOk) return s;
+
+    if (header.type == kBlockTypeRaw) {
+      if (payload.size() != row_bytes) return Status::kProtocolError;
+      pixels->insert(pixels->end(), payload.begin(), payload.end());
+    } else {
+      std::vector<uint8_t> row_out(row_bytes);
+      const Status ds = DecodeRlengthRow(payload.data(), payload.size(),
+                                          row_out.data(), row_out.size());
+      if (ds != Status::kOk) return ds;
+      pixels->insert(pixels->end(), row_out.begin(), row_out.end());
+    }
+  }
+  return Status::kOk;
+}
+
 }  // namespace
 
 Status RunScan(Transport& transport, const Params& params, ScanResult* out) {
@@ -350,6 +422,34 @@ Status RunScan(Transport& transport, const Params& params, ScanResult* out) {
     out->width = image.width;
     out->height = image.height;
     out->data = std::move(jpeg);
+    return Status::kOk;
+  }
+
+  if (params.mode == ScanMode::kBlackWhite ||
+      params.mode == ScanMode::kErrorDiffusion ||
+      params.mode == ScanMode::kTrueGray) {
+    const bool bitonal = params.mode != ScanMode::kTrueGray;
+    const int width = exec_params.area.x1 - exec_params.area.x0;
+    const int height = exec_params.area.y1 - exec_params.area.y0;
+    if (width <= 0 || height <= 0) return Status::kProtocolError;
+    const size_t row_bytes = RlengthRowBytes(width, bitonal);
+
+    std::vector<uint8_t> pixels;
+    status = ReadRlengthRows(&framer, header, height, row_bytes,
+                              kScanTimeoutMs, &pixels);
+    if (status != Status::kOk) return status;
+
+    Image image;
+    const Status decode_status =
+        bitonal ? WrapBitonalImage(width, height, pixels, &image)
+                : DecodeGrayRaw(width, height, pixels.data(), pixels.size(),
+                                &image);
+    if (decode_status != Status::kOk) return decode_status;
+
+    out->format = bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
+    out->width = width;
+    out->height = height;
+    out->data = std::move(pixels);
     return Status::kOk;
   }
 
