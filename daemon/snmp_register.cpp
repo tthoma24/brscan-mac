@@ -31,21 +31,26 @@ const std::vector<uint8_t>& ButtonOidTlv() {
 }
 
 // Appends a BER length octet (or octets) for `len` to `out`: short form
-// (one byte) below 128, long form (0x81 <len>, then 0x82 <hi> <lo>) at or
-// above it. Every length this encoder produces (community/value strings,
-// nested SEQUENCEs) comfortably fits in two-byte long form, so a
-// three-byte form is not implemented.
+// (one byte) below 128, otherwise minimal-length long form -- a leading
+// `0x80 | <number of length octets>` byte followed by the big-endian
+// length. Every length a real registration produces fits in one or two
+// long-form octets (the capture's outer SEQUENCE is 0x81 0x97), but the
+// general long-form keeps the encoder correct rather than truncating a
+// larger length while still claiming the shorter form: an earlier
+// two-byte-max version silently emitted a corrupt `0x82 <hi> <lo>` for any
+// length above 0xffff.
 void AppendLength(std::vector<uint8_t>* out, size_t len) {
   if (len < 0x80) {
     out->push_back(static_cast<uint8_t>(len));
-  } else if (len <= 0xff) {
-    out->push_back(0x81);
-    out->push_back(static_cast<uint8_t>(len));
-  } else {
-    out->push_back(0x82);
-    out->push_back(static_cast<uint8_t>((len >> 8) & 0xff));
-    out->push_back(static_cast<uint8_t>(len & 0xff));
+    return;
   }
+  uint8_t octets[sizeof(size_t)];
+  int count = 0;
+  for (size_t v = len; v != 0; v >>= 8) {
+    octets[count++] = static_cast<uint8_t>(v & 0xff);
+  }
+  out->push_back(static_cast<uint8_t>(0x80 | count));
+  for (int i = count - 1; i >= 0; --i) out->push_back(octets[i]);
 }
 
 // Appends a full tag-length-value to `out`.
