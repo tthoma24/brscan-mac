@@ -80,6 +80,14 @@ std::vector<uint8_t> ToBytes(const std::string& s) {
 
 }  // namespace
 
+std::optional<std::string> SanitizeDisplayName(const std::string& name) {
+  if (name.find('"') != std::string::npos ||
+      name.find(';') != std::string::npos) {
+    return std::nullopt;
+  }
+  return name;
+}
+
 std::string BuildRegisterValue(const std::string& ip, uint16_t port,
                                 const std::string& name,
                                 const std::string& func, int appnum,
