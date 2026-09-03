@@ -62,6 +62,8 @@ if(BUILD_TESTING)
     tests/scanner_test.cpp
     daemon/snmp_register.cpp
     tests/snmp_register_test.cpp
+    daemon/button_listener.cpp
+    tests/button_listener_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests daemon)
