@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -97,6 +98,35 @@ bool Contains(const std::vector<uint8_t>& haystack, const std::string& needle) {
   return it != haystack.end();
 }
 
+// A fake CommandRunner for every pipeline test below. HandleButtonEvent
+// ends by calling PerformAction (daemon/actions.h), whose IMAGE and EMAIL
+// destinations spawn a real external process (`/usr/bin/open`,
+// `/usr/bin/osascript`) unless a CommandRunner is injected. These
+// pipeline tests are about FUNC-driven scan/save behavior -- which Params
+// got used, what got written, path handling -- not about the destination
+// action itself (that's covered in isolation, with its own fake runner,
+// in tests/actions_test.cpp). Every HandleButtonEvent call below must go
+// through this fake and the 5-argument overload, never the production
+// (DefaultCommandRunner) overload: driving an IMAGE- or EMAIL-destination
+// ButtonEvent through the production overload spawns the real command
+// against a real file this test just wrote to a real temp directory --
+// concretely, `open` on that file launches Preview.app for real. This bit
+// once already (see ImageFuncUsesImageParamsDistinctFromFile below).
+class RecordingRunner {
+ public:
+  int operator()(const std::vector<std::string>& argv) {
+    calls_.push_back(argv);
+    return 0;
+  }
+
+  const std::vector<std::vector<std::string>>& calls() const {
+    return calls_;
+  }
+
+ private:
+  std::vector<std::vector<std::string>> calls_;
+};
+
 class HandleButtonEventTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -109,6 +139,7 @@ class HandleButtonEventTest : public ::testing::Test {
   void TearDown() override { std::filesystem::remove_all(save_dir_); }
 
   std::string save_dir_;
+  RecordingRunner runner_;
 };
 
 TEST_F(HandleButtonEventTest, FileFuncUsesFileParamsAndSavesJpeg) {
@@ -126,7 +157,8 @@ TEST_F(HandleButtonEventTest, FileFuncUsesFileParamsAndSavesJpeg) {
 
   const ButtonEvent event = MakeEvent("FILE", "1001");
   std::string saved_path;
-  const Status status = HandleButtonEvent(event, cfg, t, &saved_path);
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
 
   ASSERT_EQ(status, Status::kOk);
   ASSERT_FALSE(saved_path.empty());
@@ -143,6 +175,10 @@ TEST_F(HandleButtonEventTest, FileFuncUsesFileParamsAndSavesJpeg) {
   // commands sent to the transport.
   EXPECT_TRUE(Contains(t.written(), "R=300,300"));
   EXPECT_TRUE(Contains(t.written(), "M=CGRAY"));
+
+  // FILE is a no-op action (saving the file *is* the FILE action -- see
+  // daemon/actions.h) and must never touch the runner at all.
+  EXPECT_TRUE(runner_.calls().empty());
 }
 
 TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
@@ -167,7 +203,8 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
 
   const ButtonEvent event = MakeEvent("IMAGE", "2002");
   std::string saved_path;
-  const Status status = HandleButtonEvent(event, cfg, t, &saved_path);
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
 
   ASSERT_EQ(status, Status::kOk);
   EXPECT_TRUE(saved_path.size() >= 4 &&
@@ -191,6 +228,13 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
   EXPECT_TRUE(Contains(t.written(), "R=100,100"));
   EXPECT_TRUE(Contains(t.written(), "M=GRAY64"));
   EXPECT_FALSE(Contains(t.written(), "R=300,300"));
+
+  // IMAGE's action really does invoke the runner (unlike FILE above) --
+  // confirm it went through the injected fake, with the expected argv,
+  // and not through a real `/usr/bin/open` process.
+  ASSERT_EQ(runner_.calls().size(), 1u);
+  EXPECT_EQ(runner_.calls()[0][0], "/usr/bin/open");
+  EXPECT_EQ(runner_.calls()[0].back(), saved_path);
 }
 
 TEST_F(HandleButtonEventTest, ScanFailurePropagatesStatusAndSavesNothing) {
@@ -202,7 +246,8 @@ TEST_F(HandleButtonEventTest, ScanFailurePropagatesStatusAndSavesNothing) {
 
   const ButtonEvent event = MakeEvent("FILE", "3003");
   std::string saved_path;
-  const Status status = HandleButtonEvent(event, cfg, t, &saved_path);
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
 
   EXPECT_EQ(status, Status::kBusy);
   EXPECT_TRUE(saved_path.empty());
@@ -210,6 +255,7 @@ TEST_F(HandleButtonEventTest, ScanFailurePropagatesStatusAndSavesNothing) {
   // save_dir is either never created, or created but left empty.
   EXPECT_TRUE(!std::filesystem::exists(save_dir_) ||
               std::filesystem::is_empty(save_dir_));
+  EXPECT_TRUE(runner_.calls().empty());
 }
 
 TEST_F(HandleButtonEventTest, RejectsUnknownFuncWithoutScanning) {
@@ -224,13 +270,15 @@ TEST_F(HandleButtonEventTest, RejectsUnknownFuncWithoutScanning) {
 
   const ButtonEvent event = MakeEvent("../../../../etc/passwd", "1234");
   std::string saved_path;
-  const Status status = HandleButtonEvent(event, cfg, t, &saved_path);
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
 
   EXPECT_EQ(status, Status::kProtocolError);
   EXPECT_TRUE(saved_path.empty());
   EXPECT_TRUE(t.written().empty());
   EXPECT_TRUE(!std::filesystem::exists(save_dir_) ||
               std::filesystem::is_empty(save_dir_));
+  EXPECT_TRUE(runner_.calls().empty());
 }
 
 TEST_F(HandleButtonEventTest, SanitizesPathTraversalInRegidAndStaysInsideSaveDir) {
@@ -252,7 +300,8 @@ TEST_F(HandleButtonEventTest, SanitizesPathTraversalInRegidAndStaysInsideSaveDir
   // from the FUNC-rejection test above.
   const ButtonEvent event = MakeEvent("FILE", "../../../../../../tmp/evil");
   std::string saved_path;
-  const Status status = HandleButtonEvent(event, cfg, t, &saved_path);
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
 
   ASSERT_EQ(status, Status::kOk);
   ASSERT_FALSE(saved_path.empty());
@@ -268,6 +317,7 @@ TEST_F(HandleButtonEventTest, SanitizesPathTraversalInRegidAndStaysInsideSaveDir
   EXPECT_EQ(filename.find(".."), std::string::npos);
 
   EXPECT_FALSE(std::filesystem::exists("/tmp/evil"));
+  EXPECT_TRUE(runner_.calls().empty());
 }
 
 TEST_F(HandleButtonEventTest, UnwritableSaveDirReturnsIoErrorNotCrash) {
@@ -291,13 +341,15 @@ TEST_F(HandleButtonEventTest, UnwritableSaveDirReturnsIoErrorNotCrash) {
 
   const ButtonEvent event = MakeEvent("FILE", "6006");
   std::string saved_path;
-  const Status status = HandleButtonEvent(event, cfg, t, &saved_path);
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
 
   // Restore permissions so TearDown's remove_all can clean up.
   ::chmod(save_dir_.c_str(), 0700);
 
   EXPECT_EQ(status, Status::kIoError);
   EXPECT_TRUE(saved_path.empty());
+  EXPECT_TRUE(runner_.calls().empty());
 }
 
 TEST(ExtensionForFormatTest, MapsEachPixelFormat) {

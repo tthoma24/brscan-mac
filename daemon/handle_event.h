@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "actions.h"
 #include "brscan/transport.h"
 #include "brscan/types.h"
 #include "button_listener.h"
@@ -62,8 +63,27 @@ std::string BuildOutputPath(const std::string& save_dir,
 // unchanged if the scan itself failed, or Status::kIoError if the scan
 // succeeded but the file could not be written (including the
 // save_dir-escape refusal above).
+//
+// This overload runs PerformAction()'s IMAGE/EMAIL external commands
+// through DefaultCommandRunner (see daemon/actions.h) -- i.e. this is the
+// real, production behavior: an IMAGE-destination press really does spawn
+// `/usr/bin/open` on the saved file, an EMAIL-destination press really
+// does spawn `/usr/bin/osascript` against Mail.app.
 Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
                           brscan::Transport& transport,
                           std::string* saved_path);
+
+// Same as above, but runs PerformAction()'s external commands through
+// `runner` instead of DefaultCommandRunner. Tests that exercise this
+// full FUNC -> scan -> save -> action pipeline (as opposed to
+// PerformAction in isolation -- see tests/actions_test.cpp) must use
+// this overload with a fake runner: an IMAGE- or EMAIL-destination
+// ButtonEvent driven through the other, no-runner-argument overload
+// will, in production fashion, actually spawn `/usr/bin/open` or
+// `/usr/bin/osascript` -- e.g. actually launching Preview.app on
+// whatever file the test just wrote to a real temp directory.
+Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
+                          brscan::Transport& transport,
+                          std::string* saved_path, const CommandRunner& runner);
 
 }  // namespace brscan::scand
