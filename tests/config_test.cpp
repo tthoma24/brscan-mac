@@ -75,6 +75,20 @@ TEST(ParseConfigTest, AppliesTopLevelOverrides) {
   EXPECT_EQ(cfg.save_dir, ExpandHome("~/MyScans"));
 }
 
+TEST(ParseConfigTest, AppliesActionSettingOverrides) {
+  const Config cfg = ParseConfig(
+      "image_app=Preview\n"
+      "email_to=someone@example.com\n");
+  EXPECT_EQ(cfg.image_app, "Preview");
+  EXPECT_EQ(cfg.email_to, "someone@example.com");
+}
+
+TEST(DefaultConfigTest, ActionSettingsDefaultToEmpty) {
+  const Config cfg = DefaultConfig();
+  EXPECT_TRUE(cfg.image_app.empty());
+  EXPECT_TRUE(cfg.email_to.empty());
+}
+
 TEST(ParseConfigTest, AppliesPerFuncOverrides) {
   const std::string text =
       "file.mode=gray\n"

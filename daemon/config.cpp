@@ -76,6 +76,14 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
     cfg->save_dir = ExpandHome(value);
     return;
   }
+  if (key == "image_app") {
+    cfg->image_app = value;
+    return;
+  }
+  if (key == "email_to") {
+    cfg->email_to = value;
+    return;
+  }
 
   const size_t dot = key.find('.');
   if (dot == std::string::npos) return;
