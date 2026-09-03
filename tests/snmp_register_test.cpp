@@ -161,6 +161,30 @@ TEST(BuildSnmpSetRegisterTest, EncodesShortFormLengths) {
   EXPECT_EQ(actual, expected);
 }
 
+// A value large enough to push the enclosing lengths past 0xffff exercises
+// AppendLength's three-octet long form (0x83 <hi> <mid> <lo>), which the
+// capture-sized packets never reach. Regression guard: a two-byte-max
+// encoder silently truncated any length above 0xffff to two octets while
+// still emitting the 0x82 marker, corrupting the packet.
+TEST(BuildSnmpSetRegisterTest, EncodesThreeOctetLongFormForLargeValues) {
+  const std::string big_value(70000, 'X');
+  const std::vector<uint8_t> packet =
+      BuildSnmpSetRegister("internal", 1, big_value);
+
+  // Outer SEQUENCE: tag 0x30, then a long-form length. ~70 KB of content
+  // needs three length octets, so the length-of-length byte is 0x83 and the
+  // three that follow are the big-endian content length.
+  ASSERT_GE(packet.size(), 5u);
+  EXPECT_EQ(packet[0], 0x30);
+  EXPECT_EQ(packet[1], 0x83);
+  const size_t declared = (static_cast<size_t>(packet[2]) << 16) |
+                          (static_cast<size_t>(packet[3]) << 8) |
+                          static_cast<size_t>(packet[4]);
+  // The declared length must match the actual bytes after the 5-byte
+  // tag+length header -- i.e. the length wasn't truncated.
+  EXPECT_EQ(declared, packet.size() - 5);
+}
+
 TEST(BuildSnmpSetRegisterTest, RequestIdVariesOtherFieldsDoNot) {
   const std::string value = "TYPE=BR;BUTTON=SCAN;DURATION=60;CC=1;"
                              "HOST=1.2.3.4:1;USER=\"A\";FUNC=OCR;APPNUM=3;";

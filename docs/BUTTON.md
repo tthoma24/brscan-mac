@@ -100,11 +100,12 @@ sudo cp config/com.brscan.scand.plist.example /Library/LaunchAgents/com.brscan.s
 ```
 
 Open the copied plist and set the first `ProgramArguments` entry to the path
-where you installed the binary in step 2. Load it only after your config from
-step 3 is in place: the agent is set to relaunch if it exits, so with a missing
-or invalid `printer_host` it exits at startup and launchd keeps restarting it
-(every few seconds) until the config is valid. The log names the reason each
-time.
+where you installed the binary in step 2, and replace `YOUR_USERNAME` in the
+two log paths with your short user name (launchd doesn't expand `~`). Load it
+only after your config from step 3 is in place: the agent is set to relaunch if
+it exits, so with a missing or invalid `printer_host` it exits at startup and
+launchd keeps restarting it (every few seconds) until the config is valid. The
+log names the reason each time.
 
 Then load it, using whichever path you copied the plist to in step 4:
 
@@ -145,8 +146,8 @@ the Scan menu, but button presses never arrive and nothing scans.
   reaching the daemon — check the inbound UDP 54925 firewall path above, and
   that both devices are on the same network.
 - **Nothing in the logs at all.** Confirm the plist's `ProgramArguments` path
-  points at the actual binary, and check `StandardErrorPath` (the example logs
-  to `/tmp/brscan-scand.log`).
+  points at the actual binary, and check the `StandardErrorPath` you set (the
+  example uses `~/Library/Logs/brscan-scand.log`).
 - **A press is logged but the scan fails.** The log line names the reason (for
   example, the scanner is busy or the document feeder is empty). The daemon
   keeps running and handles the next press.

@@ -396,5 +396,20 @@ TEST(BuildOutputPathTest, SanitizesTraversalCharactersInFunc) {
   EXPECT_EQ(filename.find('/'), std::string::npos);
 }
 
+TEST(BuildOutputPathTest, CapsOverlongRegidLength) {
+  // REGID arrives off an untrusted UDP datagram and could be thousands of
+  // bytes; the built filename must still stay within the filesystem's
+  // per-component limit (255 on macOS) rather than failing the write with
+  // ENAMETOOLONG.
+  const std::string huge_regid(4000, 'A');
+  const ButtonEvent event = MakeEvent("FILE", huge_regid);
+  const std::string path =
+      BuildOutputPath("/tmp/somewhere", event, brscan::PixelFormat::kRgb);
+
+  const std::string filename = std::filesystem::path(path).filename().string();
+  EXPECT_LE(filename.size(), 255u);
+  EXPECT_EQ(std::filesystem::path(path).parent_path(), "/tmp/somewhere");
+}
+
 }  // namespace
 }  // namespace brscan::scand

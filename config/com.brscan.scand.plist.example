@@ -39,12 +39,14 @@
     <key>ProcessType</key>
     <string>Background</string>
 
-    <!-- Logs. The path must be absolute (no ~). For an all-users install,
-         give each user a distinct absolute path instead of this shared one,
-         so two users' agents don't write the same file. -->
+    <!-- Logs. Replace YOUR_USERNAME with your short user name: launchd does
+         not expand ~, so the path must be absolute, and a per-user path
+         under your home directory avoids the world-writable /tmp (where a
+         pre-planted symlink could redirect the log) and, for an all-users
+         install, keeps each user's log separate. -->
     <key>StandardOutPath</key>
-    <string>/tmp/brscan-scand.log</string>
+    <string>/Users/YOUR_USERNAME/Library/Logs/brscan-scand.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/brscan-scand.log</string>
+    <string>/Users/YOUR_USERNAME/Library/Logs/brscan-scand.log</string>
 </dict>
 </plist>

@@ -83,6 +83,18 @@ std::string BuildOutputPath(const std::string& save_dir,
   std::string safe_regid = SanitizeForFilename(event.regid);
   if (safe_regid.empty()) safe_regid = "0";
 
+  // Bound the wire-supplied contributions so the assembled filename can't
+  // exceed the filesystem's per-component limit (NAME_MAX, 255 on macOS).
+  // REGID in particular arrives off the network and could be as large as
+  // the whole datagram; without this cap a long REGID would build a
+  // >255-byte name that fails to open with ENAMETOOLONG. The timestamp and
+  // fixed text keep the full name well under NAME_MAX once these are
+  // bounded.
+  constexpr size_t kMaxFuncChars = 32;
+  constexpr size_t kMaxRegidChars = 64;
+  if (safe_func.size() > kMaxFuncChars) safe_func.resize(kMaxFuncChars);
+  if (safe_regid.size() > kMaxRegidChars) safe_regid.resize(kMaxRegidChars);
+
   std::ostringstream name;
   name << "scan-" << std::put_time(&local_tm, "%Y%m%d-%H%M%S") << "-"
        << safe_func << "-" << safe_regid << "."
