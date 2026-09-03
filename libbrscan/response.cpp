@@ -86,6 +86,10 @@ std::optional<BlockHeader> ParseBlockHeader(const uint8_t* data, size_t len) {
   // Byte 1: the payload-type marker. See the doc comment on
   // BlockHeader::type in response.h.
   header.type = static_cast<int>(data[1]);
+  // Byte 4: the 1-based page index (the 12-byte wire header's byte[3],
+  // normalized one byte later here). See BlockHeader::page_index in
+  // response.h; used to de-interleave duplex color ADF pages.
+  header.page_index = static_cast<int>(data[4]);
   return header;
 }
 

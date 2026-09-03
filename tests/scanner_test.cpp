@@ -49,9 +49,11 @@ std::vector<uint8_t> EncodeBlockHeader(uint16_t width, uint8_t pidx = 1) {
 // scanner.cpp). The 13-byte shape above is the one
 // reference/streams/s0_in.bin (an older vendor-driver capture) shows;
 // this one is what a live probe against the real device for this task
-// found instead.
-std::vector<uint8_t> EncodeBlockHeader12(uint16_t width) {
-  return {0x64, 0x07, 0x00, 0x01, 0x00, 0x84, 0xc0, 0x01, 0x00, 0x00,
+// found instead. `pidx` (default 1) is byte[3] -- the 1-based page index,
+// the same field the 13-byte EncodeBlockHeader exposes at byte[4] (one
+// later, because of that shape's leading 0x00).
+std::vector<uint8_t> EncodeBlockHeader12(uint16_t width, uint8_t pidx = 1) {
+  return {0x64, 0x07, 0x00, pidx, 0x00, 0x84, 0xc0, 0x01, 0x00, 0x00,
           static_cast<uint8_t>(width & 0xff),
           static_cast<uint8_t>((width >> 8) & 0xff)};
 }
@@ -717,12 +719,14 @@ TEST(RunScan, ColorAdfSentinelChunkEndingAtMarkerReturnsAllPages) {
 
   // Header declares the 0xfff4 sentinel (12-byte shape) though the payload
   // is far shorter and is immediately followed by the end-of-page marker.
-  auto block1 = EncodeBlockHeader12(static_cast<uint16_t>(0xfff4));
+  // Each page's header pidx matches its end-of-page marker so the
+  // de-interleaving reader routes and finalizes each page correctly.
+  auto block1 = EncodeBlockHeader12(static_cast<uint16_t>(0xfff4), 1);
   block1.insert(block1.end(), jpeg1.begin(), jpeg1.end());
   t.QueueRead(block1);
   t.QueueRead(EncodeEndOfPageMarker(1));  // tail after marker: `64 07`.
 
-  auto block2 = EncodeBlockHeader12(static_cast<uint16_t>(0xfff4));
+  auto block2 = EncodeBlockHeader12(static_cast<uint16_t>(0xfff4), 2);
   block2.insert(block2.end(), jpeg2.begin(), jpeg2.end());
   t.QueueRead(block2);
   t.QueueRead(EncodeJobFinalTerminator(2));  // tail: `80 80`, job done.
@@ -737,6 +741,77 @@ TEST(RunScan, ColorAdfSentinelChunkEndingAtMarkerReturnsAllPages) {
     EXPECT_EQ(page.height, 8);
   }
   EXPECT_EQ(pages[0].data, jpeg1);
+  EXPECT_EQ(pages[1].data, jpeg2);
+}
+
+// A 2-page synthetic DUPLEX color ADF scan whose two pages' chunks are
+// INTERLEAVED on the wire, each block header tagged with its 1-based page
+// index (pidx) and each page closed by its own end-of-page marker carrying
+// that index -- the framing a real duplex feed uses (see
+// reference/protocol-notes-adf-multipage.md and docs/PROTOCOL.md's
+// "Multi-page (ADF)" duplex note). The chunk order here is p1a, p2a, p1b,
+// EOP(1), p2b, EOP(2)+`80 80`: page 1 completes and its marker arrives while
+// page 2 is still mid-stream, so this proves the reader keeps a separate
+// per-page accumulator (page 2's bytes survive page 1's finalization) and
+// de-interleaves by pidx rather than assuming one whole page at a time. The
+// pages have different dimensions so a mis-routed chunk would fail the
+// per-page dimension/byte-exact assertions. Synthetic JPEGs only -- no
+// captured scan content (the real interleaved capture stays out of the tree;
+// see PROVENANCE.md).
+TEST(RunScan, ColorAdfDuplexInterleavedPagesDeinterleave) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC D ADF ack
+  t.QueueTimeout();                               // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.duplex = true;
+  params.area = brscan::Area{0, 0, 24, 12};
+
+  // Distinct dimensions so a chunk routed to the wrong page is caught.
+  const auto jpeg1 = MakeSyntheticJpeg(16, 8);
+  const auto jpeg2 = MakeSyntheticJpeg(24, 12);
+  ASSERT_GT(jpeg1.size(), 4u);
+  ASSERT_GT(jpeg2.size(), 4u);
+
+  // Split each page's JPEG into two chunks so each page genuinely spans more
+  // than one interleaved block.
+  const size_t split1 = jpeg1.size() / 2;
+  const size_t split2 = jpeg2.size() / 2;
+
+  const auto chunk = [](const std::vector<uint8_t>& jpeg, size_t begin,
+                        size_t end, uint8_t pidx) {
+    auto block = EncodeBlockHeader(static_cast<uint16_t>(end - begin), pidx);
+    block.insert(block.end(), jpeg.begin() + begin, jpeg.begin() + end);
+    return block;
+  };
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  append(chunk(jpeg1, 0, split1, 1));               // page 1, chunk A.
+  append(chunk(jpeg2, 0, split2, 2));               // page 2, chunk A.
+  append(chunk(jpeg1, split1, jpeg1.size(), 1));    // page 1, chunk B (done).
+  append(EncodeEndOfPageMarker(1));                 // finalize page 1.
+  append(chunk(jpeg2, split2, jpeg2.size(), 2));    // page 2, chunk B (done).
+  append(EncodeJobFinalTerminator(2));              // finalize page 2, `80 80`.
+  t.QueueRead(stream);
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  // Pages come out in end-of-page (page) order: 1 then 2.
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kRgb);
+  EXPECT_EQ(pages[0].width, 16);
+  EXPECT_EQ(pages[0].height, 8);
+  EXPECT_EQ(pages[0].data, jpeg1);
+  EXPECT_EQ(pages[1].format, brscan::PixelFormat::kRgb);
+  EXPECT_EQ(pages[1].width, 24);
+  EXPECT_EQ(pages[1].height, 12);
   EXPECT_EQ(pages[1].data, jpeg2);
 }
 

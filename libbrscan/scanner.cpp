@@ -1,6 +1,7 @@
 #include "brscan/scanner.h"
 
 #include <algorithm>
+#include <map>
 #include <string>
 
 #include "brscan/session.h"
@@ -246,19 +247,25 @@ bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
   return false;
 }
 
-// Reads a full JPEG payload, which may span multiple network blocks.
+// Reads exactly ONE chunk's image bytes, given its already-parsed block
+// header, appending them to *out. This is the per-chunk core of a JPEG
+// payload's reassembly, factored out so a caller can read a single chunk
+// at a time and route it (a whole page's worth of chunks assembled
+// elsewhere) -- which the duplex de-interleaving loop in RunColorScan
+// relies on, since a duplex feed multiplexes two pages' chunks and each
+// chunk must go to its own page's buffer by the header's page index.
 //
-// This is the key discovery of this task, found by scanning a real
-// 1153x1684 color flatbed scan for its JPEG EOI and getting a file that
-// decoded its header fine but failed full decompression with "Unsupported
-// marker type" at libjpeg-turbo's actual entropy-decode step -- while the
-// same bytes read back as a well-formed 345555-byte JPEG to `sips`/`file`.
-// The bad marker sat at byte offset 65535, and dumping the raw stream
-// around every 0x10000-ish boundary showed a repeating pattern: a second
-// 12-byte block header (same anchors as the first) spliced into the
-// stream every exactly 65524 bytes. BlockHeader::width's confirmed
-// "JPEG-length sentinel" behavior from Task 6 (response.h) is this same
-// mechanism seen from a single-block sample.
+// The framing this reads was the key discovery of the multi-page task,
+// found by scanning a real 1153x1684 color flatbed scan for its JPEG EOI
+// and getting a file that decoded its header fine but failed full
+// decompression with "Unsupported marker type" at libjpeg-turbo's actual
+// entropy-decode step -- while the same bytes read back as a well-formed
+// 345555-byte JPEG to `sips`/`file`. The bad marker sat at byte offset
+// 65535, and dumping the raw stream around every 0x10000-ish boundary
+// showed a repeating pattern: a second 12-byte block header (same anchors
+// as the first) spliced into the stream every exactly 65524 bytes.
+// BlockHeader::width's confirmed "JPEG-length sentinel" behavior from Task
+// 6 (response.h) is this same mechanism seen from a single-block sample.
 //
 // Crucially, 0xfff4 (kMaxChunkBytes) is a "MORE DATA FOLLOWS" sentinel,
 // NOT an exact per-block byte count. Real ADF hardware sends chunks that
@@ -271,73 +278,161 @@ bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
 // happened to use only exact-0xfff4 chunks plus an honest short final
 // chunk, so it worked and hid this until multi-page ADF exercised it.)
 //
-// So each chunk is read by its declared length's MEANING:
-//   - width < kMaxChunkBytes: an honest final-chunk length -- read exactly
-//     that many bytes; this is the last chunk of the payload.
+// So the chunk is read by its declared length's MEANING:
+//   - width < kMaxChunkBytes: an honest length -- read exactly that many
+//     bytes. (For a single-side page this is its final chunk, ending at
+//     `ff d9`; for an interleaved page it may simply be a short chunk.)
 //   - width == kMaxChunkBytes: a sentinel -- the chunk's real data ends at
-//     the next boundary (FindChunkBoundary), capped at kMaxChunkBytes.
-//     Read up to that boundary. If the boundary is a block header, read it
-//     and continue. If it is the end-of-page marker, STOP and return with
-//     the marker still unconsumed, because RunScan's page loop reads that
-//     10-byte marker itself. If no boundary appears within kMaxChunkBytes,
-//     the chunk is genuinely full: read exactly kMaxChunkBytes and read
-//     the next header, as before.
-Status ReadChunkedJpeg(Framer* framer, const BlockHeader& first_header, int timeout_ms,
-                        std::vector<uint8_t>* jpeg) {
-  jpeg->clear();
-  BlockHeader header = first_header;
-  for (;;) {
-    if (header.width <= 0) return Status::kProtocolError;
+//     the next boundary (FindChunkBoundary: the next block header OR the
+//     end-of-page marker), capped at kMaxChunkBytes. Read up to that
+//     boundary WITHOUT consuming it -- the caller's loop reads whatever
+//     comes next (another header, or the 10-byte marker) itself. If no
+//     boundary appears within kMaxChunkBytes, the chunk is genuinely full:
+//     read exactly kMaxChunkBytes.
+// Either way this consumes exactly one chunk's data and returns; it never
+// reads the following header or marker, and it does NOT check for a JPEG
+// EOI (that is a per-page finalization check the caller does once the page's
+// end-of-page marker arrives).
+Status ReadOneChunkBody(Framer* framer, const BlockHeader& header,
+                        int timeout_ms, std::vector<uint8_t>* out) {
+  if (header.width <= 0) return Status::kProtocolError;
 
-    if (header.width != kMaxChunkBytes) {
-      // Honest final-chunk length: read exactly that many bytes and stop.
-      std::vector<uint8_t> chunk;
-      const Status s = framer->ReadExact(static_cast<size_t>(header.width),
-                                         timeout_ms, &chunk);
-      if (s != Status::kOk) return s;
-      jpeg->insert(jpeg->end(), chunk.begin(), chunk.end());
-      break;
-    }
-
-    // Sentinel: the real chunk length isn't the header's 0xfff4. Look
-    // ahead (without consuming) far enough to cover a full chunk plus the
-    // boundary anchors that follow it, tolerating a short tail at the end
-    // of the payload, and find where this chunk's data actually ends.
-    std::vector<uint8_t> window;
-    Status s = framer->PeekUpTo(static_cast<size_t>(kMaxChunkBytes) + 13,
-                                timeout_ms, &window);
-    if (s != Status::kOk) return s;
-
-    size_t boundary = 0;
-    bool is_end_of_page = false;
-    if (FindChunkBoundary(window, &boundary, &is_end_of_page)) {
-      std::vector<uint8_t> chunk;
-      s = framer->ReadExact(boundary, timeout_ms, &chunk);
-      if (s != Status::kOk) return s;
-      jpeg->insert(jpeg->end(), chunk.begin(), chunk.end());
-      if (is_end_of_page) break;  // Leave the marker for RunScan's loop.
-      const Status header_status = ReadBlockHeader(framer, timeout_ms, &header);
-      if (header_status != Status::kOk) return header_status;
-      continue;
-    }
-
-    // No boundary within kMaxChunkBytes: a genuinely full chunk that
-    // continues. Read exactly kMaxChunkBytes and read the next header.
+  if (header.width != kMaxChunkBytes) {
+    // Honest length: read exactly that many bytes.
     std::vector<uint8_t> chunk;
-    s = framer->ReadExact(static_cast<size_t>(kMaxChunkBytes), timeout_ms,
-                          &chunk);
+    const Status s =
+        framer->ReadExact(static_cast<size_t>(header.width), timeout_ms, &chunk);
     if (s != Status::kOk) return s;
-    jpeg->insert(jpeg->end(), chunk.begin(), chunk.end());
-    const Status header_status = ReadBlockHeader(framer, timeout_ms, &header);
-    if (header_status != Status::kOk) return header_status;
+    out->insert(out->end(), chunk.begin(), chunk.end());
+    return Status::kOk;
   }
-  // Defensive cross-check on top of the boundary-driven read above: a
-  // well-formed payload always ends at the JPEG EOI marker.
-  if (jpeg->size() < 2 || (*jpeg)[jpeg->size() - 2] != 0xff ||
-      (*jpeg)[jpeg->size() - 1] != 0xd9) {
-    return Status::kProtocolError;
+
+  // Sentinel: the real chunk length isn't the header's 0xfff4. Look ahead
+  // (without consuming) far enough to cover a full chunk plus the boundary
+  // anchors that follow it, tolerating a short tail at the end of the
+  // payload, and find where this chunk's data actually ends.
+  std::vector<uint8_t> window;
+  Status s = framer->PeekUpTo(static_cast<size_t>(kMaxChunkBytes) + 13,
+                              timeout_ms, &window);
+  if (s != Status::kOk) return s;
+
+  size_t boundary = 0;
+  bool is_end_of_page = false;
+  if (FindChunkBoundary(window, &boundary, &is_end_of_page)) {
+    std::vector<uint8_t> chunk;
+    s = framer->ReadExact(boundary, timeout_ms, &chunk);
+    if (s != Status::kOk) return s;
+    out->insert(out->end(), chunk.begin(), chunk.end());
+    return Status::kOk;  // Leave the boundary (header or marker) for the caller.
   }
+
+  // No boundary within kMaxChunkBytes: a genuinely full chunk that
+  // continues. Read exactly kMaxChunkBytes; the caller reads the next
+  // header.
+  std::vector<uint8_t> chunk;
+  s = framer->ReadExact(static_cast<size_t>(kMaxChunkBytes), timeout_ms, &chunk);
+  if (s != Status::kOk) return s;
+  out->insert(out->end(), chunk.begin(), chunk.end());
   return Status::kOk;
+}
+
+// Runs the color (CGRAY/C=JPEG) readout for an ADF or flatbed job,
+// de-interleaving the pages the device multiplexes on the wire, and
+// appends one ScanResult per page to *out in page (end-of-page) order.
+//
+// A duplex ADF feed does NOT stream each page contiguously: it interleaves
+// the two sides' chunks, tagging every block header with its 1-based page
+// index (BlockHeader::page_index) and closing each page with its own
+// 10-byte end-of-page marker carrying that same index (see
+// reference/protocol-notes-adf-multipage.md and docs/PROTOCOL.md). So this
+// keeps a per-page-index accumulator and, on each element of the stream,
+// peeks the leading anchor to decide:
+//   - a block header (leading byte != 0x82): read its ONE chunk body
+//     (ReadOneChunkBody) and append to that page index's buffer;
+//   - the end-of-page marker (`82 07 00 <pidx> 00 84 00 00 00 00`): finalize
+//     page <pidx> -- EOI cross-check, DecodeJpeg, push a ScanResult -- then
+//     peek the 2 bytes after it: `80 80` ends the job, anything else is the
+//     next chunk's header (loop, do NOT consume it).
+// Simplex (and flatbed, the single-page case) is the degenerate case where
+// only one page index is ever active: the same loop handles it unchanged.
+//
+// The next element is classified by peeking its leading bytes, and the
+// end-of-page marker MUST be recognized here BEFORE ReadBlockHeader is
+// called: its `82 07 ... 84` bytes collide with the 12-byte header shape
+// DetectHeaderLength keys on, so routing it through the header parser would
+// consume the 2 bytes after it and desync the stream (see the marker note
+// in reference/protocol-notes-adf-multipage.md). A color block header is
+// `64 07 ..` (12-byte wire shape) or `00 64 07 ..` (legacy 13-byte shape);
+// the marker is `82 07 ..`. Anything else at a decision point is a corrupt
+// or unexpected element -- reported as a protocol error rather than fed to
+// the header parser, which would misframe it.
+constexpr int kBlockTypeColor = 0x64;
+
+Status RunColorScan(Framer* framer, int timeout_ms,
+                    std::vector<ScanResult>* out) {
+  std::map<int, std::vector<uint8_t>> in_progress;  // page index -> JPEG bytes.
+  for (;;) {
+    std::vector<uint8_t> lead;
+    Status s = framer->Peek(2, timeout_ms, &lead);
+    if (s != Status::kOk) return s;
+
+    const bool is_marker = lead[0] == 0x82;
+    const bool is_header = lead[0] == kBlockTypeColor ||
+                           (lead[0] == 0x00 && lead[1] == kBlockTypeColor);
+    if (!is_marker && !is_header) return Status::kProtocolError;
+
+    if (is_marker) {
+      // End-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00 (10 bytes).
+      std::vector<uint8_t> marker;
+      s = framer->ReadExact(10, timeout_ms, &marker);
+      if (s != Status::kOk) return s;
+      if (marker[1] != 0x07 || marker[5] != 0x84) return Status::kProtocolError;
+      const int pidx = marker[3];
+
+      auto it = in_progress.find(pidx);
+      if (it == in_progress.end()) return Status::kProtocolError;
+      std::vector<uint8_t>& jpeg = it->second;
+      // A well-formed page always ends at the JPEG EOI marker.
+      if (jpeg.size() < 2 || jpeg[jpeg.size() - 2] != 0xff ||
+          jpeg[jpeg.size() - 1] != 0xd9) {
+        return Status::kProtocolError;
+      }
+      Image image;
+      const Status decode_status = DecodeJpeg(jpeg.data(), jpeg.size(), &image);
+      if (decode_status != Status::kOk) return decode_status;
+
+      ScanResult page;
+      page.format = PixelFormat::kRgb;
+      page.width = image.width;
+      page.height = image.height;
+      page.data = std::move(jpeg);
+      out->push_back(std::move(page));
+      in_progress.erase(it);
+
+      std::vector<uint8_t> tail;
+      s = framer->Peek(2, timeout_ms, &tail);
+      if (s != Status::kOk) return s;
+      if (tail[0] == 0x80 && tail[1] == 0x80) {
+        std::vector<uint8_t> consumed;
+        s = framer->ReadExact(2, timeout_ms, &consumed);
+        if (s != Status::kOk) return s;
+        // Job done. Any page still accumulating never got its marker: a
+        // truncated/desynced stream, not a clean finish.
+        if (!in_progress.empty()) return Status::kProtocolError;
+        return Status::kOk;
+      }
+      continue;  // `tail` is the next chunk's block header -- do not consume.
+    }
+
+    // Otherwise a block header: read it and route its one chunk by page
+    // index.
+    BlockHeader header;
+    s = ReadBlockHeader(framer, timeout_ms, &header);
+    if (s != Status::kOk) return s;
+    s = ReadOneChunkBody(framer, header, timeout_ms,
+                         &in_progress[header.page_index]);
+    if (s != Status::kOk) return s;
+  }
 }
 
 // Reads a full raw gray payload: exactly `total_bytes`, with no embedded
@@ -546,6 +641,26 @@ Status RunScan(Transport& transport, const Params& params,
     return s;
   };
 
+  // Color (CGRAY/C=JPEG) has its own de-interleaving readout: a duplex feed
+  // multiplexes the two sides' chunks by page index, so it cannot use the
+  // one-whole-page-at-a-time sequential loop below. RunColorScan handles
+  // simplex, duplex, and single-page flatbed alike.
+  if (params.mode == ScanMode::kColor) {
+    status = RunColorScan(&framer, kScanTimeoutMs, out);
+    if (status != Status::kOk) return fail(status);
+    return Status::kOk;
+  }
+
+  // TODO(duplex gray/RLENGTH): the gray (GRAY64/C=NONE) and RLENGTH
+  // (Black & White/Error Diffusion/True Gray) paths below read one whole
+  // page at a time in EOP order. That is correct for simplex ADF and
+  // flatbed, and matches every gray/RLENGTH sample captured (all
+  // simplex/single-page -- see PROVENANCE.md), but duplex interleaving has
+  // only ever been observed and captured for color. If the device also
+  // interleaves duplex gray/RLENGTH chunks by page index, this loop would
+  // desync; that case is uncaptured and out of scope here. Generalizing
+  // these modes to the same page-index de-interleaving RunColorScan does
+  // would require a real duplex gray/RLENGTH capture to confirm the framing.
   for (;;) {
     BlockHeader header;
     status = ReadBlockHeader(&framer, kScanTimeoutMs, &header);
@@ -553,26 +668,9 @@ Status RunScan(Transport& transport, const Params& params,
 
     ScanResult page;
 
-    if (params.mode == ScanMode::kColor) {
-      // Each ADF page is its own independent baseline JPEG (own JFIF/DQT/
-      // SOF/DHT/EOI), chunked exactly like a single flatbed scan -- so it
-      // gets its own ReadChunkedJpeg/DecodeJpeg call per iteration of this
-      // loop, not one shared across pages.
-      std::vector<uint8_t> jpeg;
-      status = ReadChunkedJpeg(&framer, header, kScanTimeoutMs, &jpeg);
-      if (status != Status::kOk) return fail(status);
-
-      Image image;
-      const Status decode_status = DecodeJpeg(jpeg.data(), jpeg.size(), &image);
-      if (decode_status != Status::kOk) return fail(decode_status);
-
-      page.format = PixelFormat::kRgb;
-      page.width = image.width;
-      page.height = image.height;
-      page.data = std::move(jpeg);
-    } else if (params.mode == ScanMode::kBlackWhite ||
-               params.mode == ScanMode::kErrorDiffusion ||
-               params.mode == ScanMode::kTrueGray) {
+    if (params.mode == ScanMode::kBlackWhite ||
+        params.mode == ScanMode::kErrorDiffusion ||
+        params.mode == ScanMode::kTrueGray) {
       const bool bitonal = params.mode != ScanMode::kTrueGray;
       const int width = exec_params.area.x1 - exec_params.area.x0;
       const int height = exec_params.area.y1 - exec_params.area.y0;
