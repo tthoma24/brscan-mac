@@ -115,6 +115,35 @@ brscan::Params GrayParams() {
   return p;
 }
 
+// A 12-byte block header (the shape the real device sends -- see
+// EncodeBlockHeader12) with `type` at byte 0 and the little-endian
+// `length` in the last two bytes, matching BlockHeader::type/width in
+// response.h. Used for the RLENGTH modes (TEXT/ERRDIF/GRAY256): `type` is
+// 0x42 for a PackBits-compressed row or 0x40 for an uncompressed one.
+std::vector<uint8_t> EncodeRlengthBlockHeader(uint8_t type, uint16_t length) {
+  return {type, 0x07, 0x00, 0x01, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00,
+          static_cast<uint8_t>(length & 0xff),
+          static_cast<uint8_t>((length >> 8) & 0xff)};
+}
+
+brscan::Params BlackWhiteParams() {
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kBlackWhite;
+  p.source = brscan::Source::kFlatbed;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  return p;
+}
+
+brscan::Params TrueGrayParams() {
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kTrueGray;
+  p.source = brscan::Source::kFlatbed;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  return p;
+}
+
 // Queues the connection preamble common to every successful scan: a ready
 // greeting, an ESC Q reply (arbitrary content, drained and discarded), and
 // the flatbed select ack.
@@ -241,6 +270,147 @@ TEST(RunScan, GrayFlatbedRoundTrips) {
   EXPECT_EQ(result.width, 4);
   EXPECT_EQ(result.height, 3);
   EXPECT_EQ(result.data, raw);
+}
+
+// --- RLENGTH modes (TEXT/ERRDIF -> kBitonal, GRAY256 -> kGray) ----------
+
+TEST(RunScan, BlackWhiteFlatbedRoundTrips) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=9 (row_bytes = ceil(9/8) = 2), height_px=2.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,2,"));
+
+  // Row 0: PackBits literal run of 2 bytes -> {0xAA, 0xBB}.
+  auto row0 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row0_payload = {0x01, 0xAA, 0xBB};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  // Row 1: PackBits literal run of 2 bytes -> {0xCC, 0xDD}.
+  auto row1 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row1_payload = {0x01, 0xCC, 0xDD};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  brscan::ScanResult result;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &result);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  EXPECT_EQ(result.format, brscan::PixelFormat::kBitonal);
+  EXPECT_EQ(result.width, 9);
+  EXPECT_EQ(result.height, 2);
+  const std::vector<uint8_t> want = {0xAA, 0xBB, 0xCC, 0xDD};
+  EXPECT_EQ(result.data, want);
+}
+
+TEST(RunScan, TrueGrayFlatbedRawFallbackRowsRoundTrip) {
+  // GRAY256/C=RLENGTH rows can arrive uncompressed (type 0x40) instead of
+  // PackBits-compressed (type 0x42) -- confirmed the dominant shape in
+  // this project's own True Gray capture (reference/streams/
+  // modes_gray256_in.bin; see the issue #4 report), so RunScan must
+  // accept it rather than only ever expecting type 0x42 for these modes.
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  const std::vector<std::vector<uint8_t>> rows = {
+      {0x10, 0x11, 0x12, 0x13},
+      {0x20, 0x21, 0x22, 0x23},
+      {0x30, 0x31, 0x32, 0x33},
+  };
+  for (const auto& row : rows) {
+    auto block = EncodeRlengthBlockHeader(0x40, static_cast<uint16_t>(row.size()));
+    block.insert(block.end(), row.begin(), row.end());
+    t.QueueRead(block);
+  }
+
+  brscan::ScanResult result;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &result);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  EXPECT_EQ(result.format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(result.width, 4);
+  EXPECT_EQ(result.height, 3);
+  std::vector<uint8_t> want;
+  for (const auto& row : rows) want.insert(want.end(), row.begin(), row.end());
+  EXPECT_EQ(result.data, want);
+}
+
+TEST(RunScan, TrueGrayFlatbedCompressedRowsRoundTrip) {
+  // Companion to TrueGrayFlatbedRawFallbackRowsRoundTrip: this project's
+  // own True Gray capture happened to arrive entirely as raw (0x40) rows
+  // (see the issue #4 report), so the 0x42/PackBits decode path for an
+  // 8-bit-per-pixel row is only proven at the DecodeRlengthRow unit level
+  // and via the 1-bit (TEXT/ERRDIF) RunScan tests above. This test drives
+  // that same path end to end for GRAY256 with synthetic PackBits rows
+  // (literal, repeat, and a mixed literal+repeat row) so the assembly
+  // logic in ReadRlengthRows -- re-reading a block header per row -- is
+  // exercised for a compressed True Gray scan too, not just raw.
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  // Row 0: literal run of 4 bytes -> {0x10, 0x11, 0x12, 0x13}.
+  auto row0 = EncodeRlengthBlockHeader(0x42, 5);
+  const std::vector<uint8_t> row0_payload = {0x03, 0x10, 0x11, 0x12, 0x13};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  // Row 1: repeat run of 4 bytes -> {0x22, 0x22, 0x22, 0x22}.
+  auto row1 = EncodeRlengthBlockHeader(0x42, 2);
+  const std::vector<uint8_t> row1_payload = {0xFD, 0x22};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  // Row 2: literal run of 2 then repeat run of 2 -> {0x30, 0x31, 0x32, 0x32}.
+  auto row2 = EncodeRlengthBlockHeader(0x42, 5);
+  const std::vector<uint8_t> row2_payload = {0x01, 0x30, 0x31, 0xFF, 0x32};
+  row2.insert(row2.end(), row2_payload.begin(), row2_payload.end());
+  t.QueueRead(row2);
+
+  brscan::ScanResult result;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &result);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  EXPECT_EQ(result.format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(result.width, 4);
+  EXPECT_EQ(result.height, 3);
+  const std::vector<uint8_t> want = {0x10, 0x11, 0x12, 0x13,   // row 0
+                                      0x22, 0x22, 0x22, 0x22,   // row 1
+                                      0x30, 0x31, 0x32, 0x32};  // row 2
+  EXPECT_EQ(result.data, want);
+}
+
+TEST(RunScan, TruncatedRlengthPayloadIsErrorNotHang) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,2,"));
+
+  // Header declares a 3-byte payload; only 1 byte arrives, then the queue
+  // runs dry (models a device-panel cancel mid-scan).
+  auto row0 = EncodeRlengthBlockHeader(0x42, 3);
+  row0.push_back(0x01);
+  t.QueueRead(row0);
+
+  brscan::ScanResult result;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &result);
+  EXPECT_NE(status, brscan::Status::kOk);
+}
+
+TEST(RunScan, RlengthRowDecodingToWrongWidthIsError) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // row_bytes = ceil(9/8) = 2, but this row's payload decodes to only 1
+  // byte (a control byte the device would never legitimately send for a
+  // 9px-wide row): RunScan must surface this as a protocol error rather
+  // than silently building a mis-sized image.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,2,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x42, 2);
+  const std::vector<uint8_t> row0_payload = {0x00, 0xAA};  // literal, 1 byte.
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  brscan::ScanResult result;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &result);
+  EXPECT_EQ(status, brscan::Status::kProtocolError);
 }
 
 TEST(RunScan, BusyGreetingReportsBusy) {

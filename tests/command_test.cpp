@@ -155,6 +155,129 @@ TEST(Command, EncodeInfoColor300) {
   EXPECT_EQ(got, ReadFixture("info-300.bin"));
 }
 
+// --- RLENGTH modes (TEXT, ERRDIF, GRAY256) ------------------------------
+//
+// Expected bytes below are transcribed directly from the ESC X and ESC I
+// captures in reference/streams/modes_{text,errdif,gray256}_out.bin (see
+// reference/protocol-notes-modes.md); those streams are git-ignored (they
+// sit alongside the *_in.bin scan payloads under the same privacy rule),
+// so the tests assert against literal byte strings rather than fixture
+// files, mirroring EncodeInfoGrayUsesGray64Token below.
+
+TEST(Command, EncodeExecuteTextMatchesCapturedBytes) {
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kBlackWhite;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  p.brightness = 50;
+  p.contrast = 50;
+  p.area = {0, 0, 3472, 4913};
+  p.duplex = false;
+
+  const std::string want =
+      "\x1b" "X\n"
+      "R=300,300\n"
+      "M=TEXT\n"
+      "C=RLENGTH\n"
+      "J=MID\n"
+      "B=50\n"
+      "N=50\n"
+      "A=0,0,3472,4913\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "P=0\n"
+      "E=0\n"
+      "G=0\n"
+      "L=0\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeExecute(p), want_bytes);
+}
+
+TEST(Command, EncodeExecuteErrdifMatchesCapturedBytes) {
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kErrorDiffusion;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  p.brightness = 50;
+  p.contrast = 50;
+  p.area = {0, 0, 3472, 4913};
+  p.duplex = false;
+
+  const std::string want =
+      "\x1b" "X\n"
+      "R=300,300\n"
+      "M=ERRDIF\n"
+      "C=RLENGTH\n"
+      "J=MID\n"
+      "B=50\n"
+      "N=50\n"
+      "A=0,0,3472,4913\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "P=0\n"
+      "E=0\n"
+      "G=0\n"
+      "L=0\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeExecute(p), want_bytes);
+}
+
+TEST(Command, EncodeExecuteTrueGrayMatchesCapturedBytes) {
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kTrueGray;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  p.brightness = 50;
+  p.contrast = 50;
+  p.area = {0, 0, 3472, 4913};
+  p.duplex = false;
+
+  const std::string want =
+      "\x1b" "X\n"
+      "R=300,300\n"
+      "M=GRAY256\n"
+      "C=RLENGTH\n"
+      "J=MID\n"
+      "B=50\n"
+      "N=50\n"
+      "A=0,0,3472,4913\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "P=0\n"
+      "E=0\n"
+      "G=0\n"
+      "L=0\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeExecute(p), want_bytes);
+}
+
+TEST(Command, EncodeInfoTextIncludesNormalScan) {
+  // Captured ESC I for M=TEXT: "R=300,300\nM=TEXT\nD=SIN\nS=NORMAL_SCAN\n".
+  const std::string want =
+      "\x1b" "I\n"
+      "R=300,300\n"
+      "M=TEXT\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeInfo(300, 300, brscan::ScanMode::kBlackWhite,
+                                /*duplex=*/false),
+            want_bytes);
+}
+
+TEST(Command, EncodeInfoColorHasNoNormalScan) {
+  // The older Image Capture flow (kColor/kGray) must not gain S= just
+  // because the RLENGTH modes now do -- see UsesRlength in command.cpp.
+  const auto got = brscan::EncodeInfo(300, 300, brscan::ScanMode::kColor,
+                                       /*duplex=*/false);
+  const std::string body(reinterpret_cast<const char*>(got.data()), got.size());
+  EXPECT_EQ(body.find("S="), std::string::npos);
+}
+
 TEST(Command, EncodeInfoGrayUsesGray64Token) {
   // No ESC I fixture was captured for grayscale, so this asserts against
   // literal expected bytes (mirroring EncodeExecuteGray300A3's mode-token
