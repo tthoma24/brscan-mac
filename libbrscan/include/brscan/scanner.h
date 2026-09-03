@@ -3,8 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "brscan/transport.h"
 #include "brscan/types.h"
-#include "transport.h"
 
 namespace brscan {
 

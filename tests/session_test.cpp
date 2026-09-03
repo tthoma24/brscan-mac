@@ -1,9 +1,9 @@
 #include <cstdlib>
 
 #include <gtest/gtest.h>
+#include "brscan/session.h"
+#include "brscan/transport_tcp.h"
 #include "fake_transport.h"
-#include "session.h"
-#include "transport_tcp.h"
 
 TEST(Session, AcceptsReadyGreeting) {
   brscan::FakeTransport t;
