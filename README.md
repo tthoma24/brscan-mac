@@ -91,6 +91,16 @@ binary PGM. `brscan-cli` exits with a non-zero status and a message on
 `stderr` if the scan fails -- for example, if the scanner is busy or the
 document feeder is empty.
 
+## Scanning from the printer's Scan button
+
+`brscan-scand` is a background agent that lets the printer's physical **Scan**
+button send a scan to this Mac. Press Scan on the device, pick this Mac and a
+destination -- File, Image, OCR, or E-mail -- and the daemon pulls the scan and
+handles it: saving it, opening it, producing a searchable PDF, or attaching it
+to a new Mail message. See [docs/BUTTON.md](docs/BUTTON.md) for setup, and
+[config/brscan-scand.conf.example](config/brscan-scand.conf.example) for the
+configuration options.
+
 ## Trademark and affiliation
 
 This project is unofficial and not affiliated with, authorized by, or
