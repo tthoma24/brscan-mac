@@ -8,6 +8,17 @@ namespace brscan {
 // Returns the library version as a semantic version string.
 const char* Version();
 
+// Outcome of a Transport or protocol operation.
+enum class Status {
+  kOk,
+  kIoError,
+  kProtocolError,
+  kBusy,
+  kNoPaper,
+  kCancelled,
+  kTimeout,
+};
+
 // Scan color mode. Text/black-and-white modes are not yet in scope; see
 // docs/PROTOCOL.md.
 enum class ScanMode { kColor, kGray };

@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "transport.h"
+#include "brscan/transport.h"
 
 namespace brscan {
 

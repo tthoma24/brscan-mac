@@ -1,4 +1,4 @@
-#include "scanner.h"
+#include "brscan/scanner.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -10,9 +10,9 @@
 #include <gtest/gtest.h>
 #include <turbojpeg.h>
 
+#include "brscan/transport_tcp.h"
 #include "brscan/types.h"
 #include "fake_transport.h"
-#include "transport_tcp.h"
 
 namespace {
 

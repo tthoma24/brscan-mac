@@ -21,7 +21,7 @@ add_library(brscan
   libbrscan/scanner.cpp
 )
 target_include_directories(brscan PUBLIC libbrscan/include)
-target_include_directories(brscan PUBLIC libbrscan)
+target_include_directories(brscan PRIVATE libbrscan)
 
 # libturbojpeg, for DecodeJpeg. Installed under MacPorts; located via
 # pkg-config rather than assuming a fixed prefix.
