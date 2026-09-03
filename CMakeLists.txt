@@ -72,7 +72,9 @@ set(OCR_FRAMEWORKS
 # extension on its own.
 set_source_files_properties(
   daemon/action_ocr.mm
+  daemon/output_writer.mm
   tests/action_ocr_test.mm
+  tests/output_writer_test.mm
   PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
 )
 
@@ -89,6 +91,7 @@ add_executable(brscan-scand
   daemon/config.cpp
   daemon/actions.cpp
   daemon/action_ocr.mm
+  daemon/output_writer.mm
   daemon/handle_event.cpp
   daemon/sender_check.cpp
   daemon/notification_deduper.cpp
@@ -130,6 +133,8 @@ if(BUILD_TESTING)
     tests/actions_test.cpp
     daemon/action_ocr.mm
     tests/action_ocr_test.mm
+    daemon/output_writer.mm
+    tests/output_writer_test.mm
     daemon/handle_event.cpp
     tests/handle_event_test.cpp
     daemon/sender_check.cpp

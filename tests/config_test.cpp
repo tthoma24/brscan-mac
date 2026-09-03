@@ -229,6 +229,100 @@ TEST(IsKnownFuncTest, RejectsAnythingElse) {
   EXPECT_FALSE(IsKnownFunc("FILE;rm -rf /"));
 }
 
+// ---------------------------------------------------------------------
+// Output settings (format / tiff_compression / separation).
+// ---------------------------------------------------------------------
+
+void ExpectDefaultOutput(const OutputSettings& o) {
+  EXPECT_EQ(o.format, OutputFormat::kNative);
+  EXPECT_EQ(o.tiff_compression, TiffCompression::kLzw);
+  EXPECT_EQ(o.separation, OutputSeparation::kCombine);
+  EXPECT_FALSE(o.searchable);
+}
+
+TEST(DefaultConfigTest, OutputSettingsDefault) {
+  const Config cfg = DefaultConfig();
+  ExpectDefaultOutput(cfg.file_output);
+  ExpectDefaultOutput(cfg.image_output);
+  ExpectDefaultOutput(cfg.ocr_output);
+  ExpectDefaultOutput(cfg.email_output);
+}
+
+TEST(ParseConfigTest, AppliesOutputFormatForEachDest) {
+  const Config cfg = ParseConfig(
+      "file.format=pdf\n"
+      "image.format=tiff\n"
+      "ocr.format=jpeg\n"
+      "email.format=png\n");
+  EXPECT_EQ(cfg.file_output.format, OutputFormat::kPdf);
+  EXPECT_EQ(cfg.image_output.format, OutputFormat::kTiff);
+  EXPECT_EQ(cfg.ocr_output.format, OutputFormat::kJpeg);
+  EXPECT_EQ(cfg.email_output.format, OutputFormat::kPng);
+}
+
+TEST(ParseConfigTest, AppliesNativeFormatExplicitly) {
+  const Config cfg = ParseConfig("file.format=native\n");
+  EXPECT_EQ(cfg.file_output.format, OutputFormat::kNative);
+}
+
+TEST(ParseConfigTest, AppliesTiffCompression) {
+  EXPECT_EQ(ParseConfig("file.tiff_compression=lzw\n").file_output.tiff_compression,
+            TiffCompression::kLzw);
+  EXPECT_EQ(ParseConfig("file.tiff_compression=g3\n").file_output.tiff_compression,
+            TiffCompression::kG3);
+  EXPECT_EQ(ParseConfig("file.tiff_compression=g4\n").file_output.tiff_compression,
+            TiffCompression::kG4);
+}
+
+TEST(ParseConfigTest, AppliesSeparationCombineAndEveryN) {
+  const Config combine = ParseConfig("file.separation=combine\n");
+  EXPECT_EQ(combine.file_output.separation, OutputSeparation::kCombine);
+
+  const Config every = ParseConfig("file.separation=every:3\n");
+  EXPECT_EQ(every.file_output.separation, OutputSeparation::kEveryN);
+  EXPECT_EQ(every.file_output.separate_n, 3);
+}
+
+TEST(ParseConfigTest, IgnoresBadOutputValuesLeavingDefaults) {
+  const Config cfg = ParseConfig(
+      "file.format=bogus\n"
+      "file.tiff_compression=zip\n"
+      "file.separation=every:0\n"
+      "file.separation=every:-1\n"
+      "file.separation=every:abc\n"
+      "file.separation=weird\n");
+  ExpectDefaultOutput(cfg.file_output);
+}
+
+TEST(ParseConfigTest, OutputAndScanKeysCoexistPerDest) {
+  // A destination can set both a scan param and an output key without one
+  // clobbering the other.
+  const Config cfg = ParseConfig(
+      "file.mode=gray\n"
+      "file.format=pdf\n");
+  EXPECT_EQ(cfg.file_params.mode, brscan::ScanMode::kGray);
+  EXPECT_EQ(cfg.file_output.format, OutputFormat::kPdf);
+}
+
+TEST(OutputSettingsForFuncTest, MapsEachKnownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_output.format = OutputFormat::kPdf;
+  cfg.image_output.format = OutputFormat::kTiff;
+  cfg.ocr_output.format = OutputFormat::kJpeg;
+  cfg.email_output.format = OutputFormat::kPng;
+
+  EXPECT_EQ(OutputSettingsForFunc(cfg, "FILE").format, OutputFormat::kPdf);
+  EXPECT_EQ(OutputSettingsForFunc(cfg, "IMAGE").format, OutputFormat::kTiff);
+  EXPECT_EQ(OutputSettingsForFunc(cfg, "OCR").format, OutputFormat::kJpeg);
+  EXPECT_EQ(OutputSettingsForFunc(cfg, "EMAIL").format, OutputFormat::kPng);
+}
+
+TEST(OutputSettingsForFuncTest, FallsBackToFileOutputForUnknownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_output.format = OutputFormat::kPdf;
+  EXPECT_EQ(OutputSettingsForFunc(cfg, "BOGUS").format, OutputFormat::kPdf);
+}
+
 TEST(DefaultConfigPathTest, EndsWithExpectedFilename) {
   const std::string path = DefaultConfigPath();
   const std::string suffix = ".config/brscan-scand.conf";

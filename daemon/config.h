@@ -3,6 +3,7 @@
 #include <string>
 
 #include "brscan/types.h"
+#include "output_writer.h"
 
 // The daemon's configuration: where the printer is, what to call this Mac
 // in the printer's Scan menu, where FILE-destination scans land, and the
@@ -55,6 +56,18 @@ struct Config {
   brscan::Params image_params;
   brscan::Params ocr_params;
   brscan::Params email_params;
+
+  // Per-FUNC output settings (see output_writer.h): the file format each
+  // destination writes its scanned pages as, plus TIFF compression and
+  // document separation. OutputSettings's own defaults (native format,
+  // LZW, combine-all) are this project's default for every FUNC absent a
+  // config override. The `searchable` flag is never set from the config
+  // file (Task 1c.2b's OCR action sets it on the caller side); it stays at
+  // its false default here.
+  OutputSettings file_output;
+  OutputSettings image_output;
+  OutputSettings ocr_output;
+  OutputSettings email_output;
 
   // IMAGE-destination action setting (see daemon/actions.cpp's
   // PerformImageAction): the app name passed to `open -a <image_app>`
@@ -115,6 +128,12 @@ Config DefaultConfig();
 //   <dest>.mode         color | gray | bw | errdiff | truegray
 //   <dest>.dpi          positive integer, sets both x_dpi and y_dpi
 //   <dest>.source       flatbed | adf | adf-duplex
+//   <dest>.format       pdf | tiff | jpeg | png | native
+//                        (default native; see output_writer.h)
+//   <dest>.tiff_compression
+//                        lzw | g3 | g4 (default lzw; only affects TIFF)
+//   <dest>.separation   combine | every:N (N a positive int; default
+//                        combine -- one container for all pages)
 // where <dest> is one of file, image, ocr, email.
 Config ParseConfig(const std::string& text);
 
@@ -131,6 +150,14 @@ std::string DefaultConfigPath();
 // daemon/button_listener.h's ButtonEvent::func). Returns cfg.file_params
 // for any other string, since FILE's settings are always a safe fallback.
 const brscan::Params& ParamsForFunc(const Config& cfg, const std::string& func);
+
+// The OutputSettings to use for a button event's FUNC (FILE/IMAGE/OCR/
+// EMAIL, matched case-sensitively per the wire protocol -- see
+// daemon/button_listener.h's ButtonEvent::func). Returns cfg.file_output
+// for any other string, mirroring ParamsForFunc's FILE-as-safe-fallback
+// behavior.
+const OutputSettings& OutputSettingsForFunc(const Config& cfg,
+                                            const std::string& func);
 
 // True if `func` is one of the four known FUNCs (kFuncFile/kFuncImage/
 // kFuncOcr/kFuncEmail above), false for anything else. `func` comes

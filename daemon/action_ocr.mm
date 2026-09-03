@@ -164,6 +164,22 @@ CGImageRef CreateCGImageFromGray8(const uint8_t* pixels, int width,
   return image;
 }
 
+// Decodes an encoded image byte stream (in practice the baseline JPEG a
+// color scan is delivered as) to a CGImageRef via ImageIO, from an
+// in-memory buffer -- no file round-trip. Returns nullptr if ImageIO
+// cannot make a source or decode the first image. Shared by both
+// LoadImageAsCGImage (its non-PNM branch) and CreateCGImageFromScanResult
+// (its kRgb branch) so the ImageIO decode lives in exactly one place.
+CGImageRef CreateCGImageFromEncodedBytes(const uint8_t* data, size_t len) {
+  NSData* ns_data = [NSData dataWithBytes:data length:len];
+  CGImageSourceRef source =
+      CGImageSourceCreateWithData((__bridge CFDataRef)ns_data, nullptr);
+  if (source == nullptr) return nullptr;
+  CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+  CFRelease(source);
+  return image;
+}
+
 CGImageRef LoadPnmAsCGImage(const std::vector<uint8_t>& data) {
   PnmHeader hdr;
   if (!ParsePnmHeader(data, &hdr)) return nullptr;
@@ -201,13 +217,38 @@ CGImageRef LoadImageAsCGImage(const std::string& image_path) {
 
   // Anything else (in practice, the JPEG a color scan was saved as) goes
   // through ImageIO.
-  NSData* ns_data = [NSData dataWithBytes:data.data() length:data.size()];
-  CGImageSourceRef source =
-      CGImageSourceCreateWithData((__bridge CFDataRef)ns_data, nullptr);
-  if (source == nullptr) return nullptr;
-  CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
-  CFRelease(source);
-  return image;
+  return CreateCGImageFromEncodedBytes(data.data(), data.size());
+}
+
+CGImageRef CreateCGImageFromScanResult(const brscan::ScanResult& page) {
+  const size_t width = static_cast<size_t>(page.width);
+  const size_t height = static_cast<size_t>(page.height);
+
+  switch (page.format) {
+    case brscan::PixelFormat::kRgb:
+      // `data` is a baseline JPEG stream, exactly what the non-PNM branch
+      // of LoadImageAsCGImage decodes from a file.
+      if (page.data.empty()) return nullptr;
+      return CreateCGImageFromEncodedBytes(page.data.data(), page.data.size());
+
+    case brscan::PixelFormat::kGray:
+      // `data` is 8-bit grayscale, one byte per pixel, row-major.
+      if (page.width <= 0 || page.height <= 0) return nullptr;
+      if (page.data.size() < width * height) return nullptr;
+      return CreateCGImageFromGray8(page.data.data(), page.width, page.height);
+
+    case brscan::PixelFormat::kBitonal: {
+      // `data` is packed 1-bit-per-pixel (MSB-first, 1=black); expand to
+      // 8-bit grayscale, the same route LoadPnmAsCGImage takes for a P4.
+      if (page.width <= 0 || page.height <= 0) return nullptr;
+      const size_t row_bytes = (width + 7) / 8;
+      if (page.data.size() < row_bytes * height) return nullptr;
+      const std::vector<uint8_t> gray8 =
+          ExpandBitonalToGray8(page.data.data(), page.width, page.height);
+      return CreateCGImageFromGray8(gray8.data(), page.width, page.height);
+    }
+  }
+  return nullptr;
 }
 
 namespace {
@@ -234,24 +275,28 @@ NSArray<VNRecognizedTextObservation*>* RecognizeText(CGImageRef image) {
   return request.results;
 }
 
-// Draws `image` as the page's visible content, then each of
-// `observations`' recognized strings as invisible text scaled/positioned
-// over its normalized bounding box, into a new one-page PDF at
-// `pdf_path`. Returns false if the PDF context couldn't be created.
-bool ComposeSearchablePdf(
-    CGImageRef image, NSArray<VNRecognizedTextObservation*>* observations,
-    const std::string& pdf_path) {
+// Draws one page into the already-open PDF context `ctx`: begins a page
+// sized to `image`'s pixels, draws `image` as its visible content, then
+// (for each of `observations`' recognized strings) draws that string as
+// invisible text scaled/positioned over its normalized bounding box, and
+// ends the page. Passing an empty or nil `observations` produces a page
+// with no text layer (the plain, non-searchable case). This is the shared
+// per-page body driven once by OcrImageToSearchablePdf and in a loop by
+// WriteSearchablePdf, so the invisible-text logic lives in one place.
+void DrawSearchablePdfPage(
+    CGContextRef ctx, CGImageRef image,
+    NSArray<VNRecognizedTextObservation*>* observations) {
   const size_t width = CGImageGetWidth(image);
   const size_t height = CGImageGetHeight(image);
   CGRect page_rect =
       CGRectMake(0, 0, static_cast<CGFloat>(width), static_cast<CGFloat>(height));
 
-  NSString* ns_path = [NSString stringWithUTF8String:pdf_path.c_str()];
-  CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:ns_path];
-  CGContextRef ctx = CGPDFContextCreateWithURL(url, &page_rect, nullptr);
-  if (ctx == nullptr) return false;
-
-  CGPDFContextBeginPage(ctx, nullptr);
+  // A per-page media box, so pages of differing pixel sizes each get their
+  // own correctly sized PDF page rather than the context's default box.
+  NSData* box_data = [NSData dataWithBytes:&page_rect length:sizeof(page_rect)];
+  NSDictionary* page_info =
+      @{(__bridge NSString*)kCGPDFContextMediaBox : box_data};
+  CGPDFContextBeginPage(ctx, (__bridge CFDictionaryRef)page_info);
   CGContextDrawImage(ctx, page_rect, image);
 
   // Invisible text layer: same visible page, but every recognized string
@@ -311,12 +356,49 @@ bool ComposeSearchablePdf(
   }
 
   CGPDFContextEndPage(ctx);
-  CGPDFContextClose(ctx);
-  CGContextRelease(ctx);
-  return true;
 }
 
 }  // namespace
+
+Status WriteSearchablePdf(const std::vector<CGImageRef>& images,
+                          bool searchable, const std::string& pdf_path) {
+  @autoreleasepool {
+    if (images.empty()) return Status::kIoError;
+
+    // The context needs a default media box up front; give it the first
+    // page's rect. Every page then overrides it per-page in
+    // DrawSearchablePdfPage, so differently sized pages stay correct.
+    const CGRect first_rect =
+        CGRectMake(0, 0, static_cast<CGFloat>(CGImageGetWidth(images.front())),
+                   static_cast<CGFloat>(CGImageGetHeight(images.front())));
+    CGRect default_box = first_rect;
+
+    NSString* ns_path = [NSString stringWithUTF8String:pdf_path.c_str()];
+    CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:ns_path];
+    CGContextRef ctx = CGPDFContextCreateWithURL(url, &default_box, nullptr);
+    if (ctx == nullptr) {
+      std::cerr << "[action_ocr] could not create PDF: " << pdf_path << "\n";
+      return Status::kIoError;
+    }
+
+    for (CGImageRef image : images) {
+      NSArray<VNRecognizedTextObservation*>* observations = nil;
+      if (searchable) {
+        observations = RecognizeText(image);
+        if (observations == nil) {
+          CGPDFContextClose(ctx);
+          CGContextRelease(ctx);
+          return Status::kProtocolError;
+        }
+      }
+      DrawSearchablePdfPage(ctx, image, observations);
+    }
+
+    CGPDFContextClose(ctx);
+    CGContextRelease(ctx);
+    return Status::kOk;
+  }
+}
 
 Status OcrImageToSearchablePdf(const std::string& image_path,
                                 const std::string& pdf_path) {
@@ -327,19 +409,10 @@ Status OcrImageToSearchablePdf(const std::string& image_path,
       return Status::kIoError;
     }
 
-    NSArray<VNRecognizedTextObservation*>* observations = RecognizeText(image);
-    if (observations == nil) {
-      CGImageRelease(image);
-      return Status::kProtocolError;
-    }
-
-    const bool wrote = ComposeSearchablePdf(image, observations, pdf_path);
+    const Status status =
+        WriteSearchablePdf({image}, /*searchable=*/true, pdf_path);
     CGImageRelease(image);
-    if (!wrote) {
-      std::cerr << "[action_ocr] could not create PDF: " << pdf_path << "\n";
-      return Status::kIoError;
-    }
-    return Status::kOk;
+    return status;
   }
 }
 

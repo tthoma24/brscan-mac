@@ -50,6 +50,43 @@ std::optional<int> ParsePositiveInt(const std::string& s) {
   }
 }
 
+std::optional<OutputFormat> ParseFormatString(const std::string& s) {
+  if (s == "pdf") return OutputFormat::kPdf;
+  if (s == "tiff") return OutputFormat::kTiff;
+  if (s == "jpeg") return OutputFormat::kJpeg;
+  if (s == "png") return OutputFormat::kPng;
+  if (s == "native") return OutputFormat::kNative;
+  return std::nullopt;
+}
+
+std::optional<TiffCompression> ParseTiffCompressionString(const std::string& s) {
+  if (s == "lzw") return TiffCompression::kLzw;
+  if (s == "g3") return TiffCompression::kG3;
+  if (s == "g4") return TiffCompression::kG4;
+  return std::nullopt;
+}
+
+// Parses a `<dest>.separation` value: "combine" (all pages in one
+// container) or "every:N" (a new container every N pages, N a positive
+// int). Returns nullopt for anything else, so the caller leaves the
+// default (combine) in place, per ParseConfig()'s tolerant-parse contract.
+std::optional<OutputSeparation> ParseSeparationString(const std::string& s,
+                                                      int* separate_n) {
+  if (s == "combine") {
+    *separate_n = 1;
+    return OutputSeparation::kCombine;
+  }
+  constexpr char kEveryPrefix[] = "every:";
+  const size_t prefix_len = sizeof(kEveryPrefix) - 1;
+  if (s.compare(0, prefix_len, kEveryPrefix) == 0) {
+    if (const auto n = ParsePositiveInt(s.substr(prefix_len))) {
+      *separate_n = *n;
+      return OutputSeparation::kEveryN;
+    }
+  }
+  return std::nullopt;
+}
+
 // Returns the Params this key's <dest> prefix (file/image/ocr/email) names,
 // or nullptr for anything else -- the caller then ignores the key.
 brscan::Params* ParamsForDestPrefix(Config* cfg, const std::string& dest) {
@@ -57,6 +94,17 @@ brscan::Params* ParamsForDestPrefix(Config* cfg, const std::string& dest) {
   if (dest == "image") return &cfg->image_params;
   if (dest == "ocr") return &cfg->ocr_params;
   if (dest == "email") return &cfg->email_params;
+  return nullptr;
+}
+
+// Returns the OutputSettings this key's <dest> prefix names, or nullptr for
+// anything else -- the counterpart to ParamsForDestPrefix for the output
+// keys (format/tiff_compression/separation).
+OutputSettings* OutputForDestPrefix(Config* cfg, const std::string& dest) {
+  if (dest == "file") return &cfg->file_output;
+  if (dest == "image") return &cfg->image_output;
+  if (dest == "ocr") return &cfg->ocr_output;
+  if (dest == "email") return &cfg->email_output;
   return nullptr;
 }
 
@@ -87,22 +135,45 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
 
   const size_t dot = key.find('.');
   if (dot == std::string::npos) return;
-  brscan::Params* const params =
-      ParamsForDestPrefix(cfg, key.substr(0, dot));
-  if (params == nullptr) return;
+  const std::string dest = key.substr(0, dot);
   const std::string field = key.substr(dot + 1);
 
-  if (field == "mode") {
-    if (const auto mode = ParseModeString(value)) params->mode = *mode;
-  } else if (field == "dpi") {
-    if (const auto dpi = ParsePositiveInt(value)) {
-      params->x_dpi = *dpi;
-      params->y_dpi = *dpi;
+  brscan::Params* const params = ParamsForDestPrefix(cfg, dest);
+  if (params != nullptr) {
+    if (field == "mode") {
+      if (const auto mode = ParseModeString(value)) params->mode = *mode;
+      return;
     }
-  } else if (field == "source") {
-    if (const auto src = ParseSourceString(value)) {
-      params->source = src->source;
-      params->duplex = src->duplex;
+    if (field == "dpi") {
+      if (const auto dpi = ParsePositiveInt(value)) {
+        params->x_dpi = *dpi;
+        params->y_dpi = *dpi;
+      }
+      return;
+    }
+    if (field == "source") {
+      if (const auto src = ParseSourceString(value)) {
+        params->source = src->source;
+        params->duplex = src->duplex;
+      }
+      return;
+    }
+  }
+
+  OutputSettings* const output = OutputForDestPrefix(cfg, dest);
+  if (output != nullptr) {
+    if (field == "format") {
+      if (const auto fmt = ParseFormatString(value)) output->format = *fmt;
+    } else if (field == "tiff_compression") {
+      if (const auto comp = ParseTiffCompressionString(value)) {
+        output->tiff_compression = *comp;
+      }
+    } else if (field == "separation") {
+      int separate_n = output->separate_n;
+      if (const auto sep = ParseSeparationString(value, &separate_n)) {
+        output->separation = *sep;
+        output->separate_n = separate_n;
+      }
     }
   }
 }
@@ -180,6 +251,14 @@ const brscan::Params& ParamsForFunc(const Config& cfg, const std::string& func) 
   if (func == kFuncOcr) return cfg.ocr_params;
   if (func == kFuncEmail) return cfg.email_params;
   return cfg.file_params;  // kFuncFile, and the safe fallback otherwise.
+}
+
+const OutputSettings& OutputSettingsForFunc(const Config& cfg,
+                                            const std::string& func) {
+  if (func == kFuncImage) return cfg.image_output;
+  if (func == kFuncOcr) return cfg.ocr_output;
+  if (func == kFuncEmail) return cfg.email_output;
+  return cfg.file_output;  // kFuncFile, and the safe fallback otherwise.
 }
 
 bool IsKnownFunc(const std::string& func) {
