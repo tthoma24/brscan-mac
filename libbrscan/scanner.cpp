@@ -332,31 +332,35 @@ Status RunScan(Transport& transport, const Params& params, ScanResult* out) {
   status = framer.DrainQuiet(kAckTimeoutMs, kDrainIdleTimeoutMs);
   if (status != Status::kOk) return status;
 
-  // Select source. ESC S / ESC D each ack with a short reply whose exact
-  // length isn't stable: the capture in reference/streams/s0_in.bin shows
-  // 2 bytes for ESC S, but a live probe against the real device for this
-  // task saw as little as 1 byte for the same command. Drain it like the
+  // Select source -- exactly one command, either ESC S FB (flatbed) or
+  // ESC D ADF (document feeder), never both. The vendor driver's own
+  // command stream (reference/streams/s0_out.bin) issues ESC D ADF *alone*
+  // for its ADF scans (offsets 2044/2161, tests 7/8), with no preceding
+  // ESC S FB; an earlier version here sent ESC S FB unconditionally and
+  // then ESC D ADF, which left the device on the flatbed (a live ADF scan
+  // came back at full flatbed dimensions). ESC S / ESC D each ack with a
+  // short reply whose exact length isn't stable: the capture shows 2 bytes
+  // for ESC S, but a live probe saw as little as 1, so drain it like the
   // ESC Q reply rather than assuming a fixed count.
-  status = send(EncodeSelectFlatbed());
-  if (status != Status::kOk) return status;
-  status = framer.DrainQuiet(kAckTimeoutMs, kDrainIdleTimeoutMs);
-  if (status != Status::kOk) return status;
-
   if (params.source == Source::kAdf) {
     status = send(EncodeSelectAdf());
     if (status != Status::kOk) return status;
     status = framer.DrainQuiet(kAckTimeoutMs, kDrainIdleTimeoutMs);
     if (status == Status::kTimeout) {
       // No response fixture for the ADF-empty case was ever captured (see
-      // tests/fixtures/README.md: it's listed as a gap, not something
-      // Task 6 extracted); the vendor driver's own command stream in
-      // reference/streams/s0_out.bin simply stops right after this
-      // command in the no-paper test. Heuristic, not confirmed: map a
+      // tests/fixtures/README.md: it's listed as a gap); the vendor
+      // driver's own command stream simply stops right after this command
+      // in the no-paper test. Heuristic, not confirmed: map a
       // source-select ack that doesn't arrive at all -- when every other
       // observed ack arrived in well under a second -- to kNoPaper rather
       // than a generic kTimeout.
       return Status::kNoPaper;
     }
+    if (status != Status::kOk) return status;
+  } else {
+    status = send(EncodeSelectFlatbed());
+    if (status != Status::kOk) return status;
+    status = framer.DrainQuiet(kAckTimeoutMs, kDrainIdleTimeoutMs);
     if (status != Status::kOk) return status;
   }
 

@@ -144,15 +144,33 @@ brscan::Params TrueGrayParams() {
   return p;
 }
 
-// Queues the connection preamble common to every successful scan: a ready
-// greeting, an ESC Q reply (arbitrary content, drained and discarded), and
-// the flatbed select ack.
-void QueuePreamble(brscan::FakeTransport* t) {
+// Queues the part of the preamble before source selection: a ready
+// greeting and an ESC Q reply (arbitrary content, drained and discarded).
+void QueueConnectPreamble(brscan::FakeTransport* t) {
   t->QueueRead(std::string("+OK 200\r\n"));
   t->QueueRead(std::vector<uint8_t>{0xc1, 0x00, 0x35, 0x0a});  // ESC Q reply
   t->QueueTimeout();                                           // drain done
+}
+
+// Queues the connection preamble common to every successful flatbed scan:
+// QueueConnectPreamble plus the flatbed (ESC S FB) select ack.
+void QueuePreamble(brscan::FakeTransport* t) {
+  QueueConnectPreamble(t);
   t->QueueRead(std::vector<uint8_t>{0x80, 0x00});              // ESC S ack
   t->QueueTimeout();                                           // drain done
+}
+
+// True if `haystack` contains `needle` as a contiguous subsequence. Used to
+// assert which source-select command RunScan actually put on the wire.
+bool Contains(const std::vector<uint8_t>& haystack,
+              const std::vector<uint8_t>& needle) {
+  if (needle.empty() || needle.size() > haystack.size()) return false;
+  for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+    if (std::equal(needle.begin(), needle.end(), haystack.begin() + i)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -424,7 +442,7 @@ TEST(RunScan, BusyGreetingReportsBusy) {
 
 TEST(RunScan, AdfSourceSelectNoAckReportsNoPaper) {
   brscan::FakeTransport t;
-  QueuePreamble(&t);
+  QueueConnectPreamble(&t);
   // ESC D ADF gets no reply at all (queue goes quiet immediately): the
   // heuristic mapping for an empty feeder. See scanner.cpp's caveat on
   // this mapping.
@@ -436,6 +454,36 @@ TEST(RunScan, AdfSourceSelectNoAckReportsNoPaper) {
   brscan::ScanResult result;
   const auto status = brscan::RunScan(t, params, &result);
   EXPECT_EQ(status, brscan::Status::kNoPaper);
+}
+
+TEST(RunScan, AdfSelectsFeederWithEscDNotFlatbed) {
+  // Regression guard for the ADF source-select bug: an ADF scan must put
+  // ESC D ADF on the wire and must NOT send ESC S FB, which (sent first)
+  // left the device on the flatbed. See scanner.cpp's source-select block
+  // and reference/streams/s0_out.bin (offsets 2044/2161).
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC D ADF ack
+  t.QueueTimeout();                               // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,3460,427,5052,"));
+
+  const auto jpeg = MakeSyntheticJpeg(16, 8);
+  auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
+  payload.insert(payload.end(), jpeg.begin(), jpeg.end());
+  t.QueueRead(payload);
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+
+  brscan::ScanResult result;
+  const auto status = brscan::RunScan(t, params, &result);
+  ASSERT_EQ(status, brscan::Status::kOk);
+
+  // 0x1b 0x44 = ESC D (ADF select); 0x1b 0x53 = ESC S (flatbed select).
+  EXPECT_TRUE(Contains(t.written(), {0x1b, 0x44}))
+      << "ADF scan must issue ESC D ADF";
+  EXPECT_FALSE(Contains(t.written(), {0x1b, 0x53}))
+      << "ADF scan must not issue ESC S FB (it re-selects the flatbed)";
 }
 
 TEST(RunScan, TruncatedColorPayloadIsErrorNotHang) {
