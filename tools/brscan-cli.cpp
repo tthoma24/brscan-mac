@@ -11,9 +11,9 @@
 #include <optional>
 #include <string>
 
+#include "brscan/scanner.h"
+#include "brscan/transport_tcp.h"
 #include "brscan/types.h"
-#include "scanner.h"
-#include "transport_tcp.h"
 
 namespace {
 

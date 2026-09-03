@@ -1,11 +1,11 @@
-#include "scanner.h"
+#include "brscan/scanner.h"
 
 #include <string>
 
+#include "brscan/session.h"
 #include "command.h"
 #include "decode_jpeg.h"
 #include "response.h"
-#include "session.h"
 
 namespace brscan {
 

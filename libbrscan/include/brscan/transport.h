@@ -3,17 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace brscan {
+#include "brscan/types.h"
 
-enum class Status {
-  kOk,
-  kIoError,
-  kProtocolError,
-  kBusy,
-  kNoPaper,
-  kCancelled,
-  kTimeout,
-};
+namespace brscan {
 
 class Transport {
  public:

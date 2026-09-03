@@ -6,7 +6,6 @@
 #include <string>
 
 #include "brscan/types.h"
-#include "transport.h"
 
 namespace brscan {
 
