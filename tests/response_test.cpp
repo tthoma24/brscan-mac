@@ -112,6 +112,9 @@ TEST(ParseBlockHeader, ColorHeaderParses) {
   ASSERT_TRUE(parsed.has_value());
   EXPECT_EQ(parsed->width, 0xfff4);
   EXPECT_EQ(parsed->type, 0x64);
+  // Byte[4] is the 1-based page index (0x01 here); see BlockHeader in
+  // response.h. A duplex color reader de-interleaves pages by this field.
+  EXPECT_EQ(parsed->page_index, 1);
 }
 
 TEST(ParseBlockHeader, TooShortIsMalformed) {

@@ -74,6 +74,20 @@ struct BlockHeader {
   // reference/protocol-notes-modes.md) is not a row-data block; callers
   // must check `type` before reading `width` bytes of payload after it.
   int type;
+
+  // Byte 4 (of the normalized 13-byte header; the same field is at wire
+  // byte[3] of the 12-byte shape the device actually sends -- see
+  // DetectHeaderLength in scanner.cpp): the 1-based PAGE INDEX of the page
+  // this chunk belongs to. CONFIRMED for color/JPEG multi-page ADF against
+  // reference/streams/s0_in.bin (see reference/protocol-notes-adf-multipage.md
+  // and PROVENANCE.md): a duplex feed multiplexes the two sides' chunks and
+  // tags each with its page index here, so a reader de-interleaves them by
+  // this value. It sits in the same position as the end-of-page marker's
+  // own `pidx` byte (`82 07 00 <pidx> 00 84 ...`). For the gray/RLENGTH
+  // modes this byte was constant (`01`) in every captured row -- its use as
+  // a page index there is unconfirmed (see the note on the RLENGTH path in
+  // scanner.cpp).
+  int page_index;
 };
 
 // Parses the 13-byte block header. Validates two constant anchor bytes

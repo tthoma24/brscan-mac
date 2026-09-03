@@ -243,6 +243,35 @@ desynchronizing the rest of the stream. Read the marker as a fixed 10-byte
 count, then peek (without consuming) the next 2 bytes to decide whether to
 stop or loop back for another page.
 
+### Duplex interleaving (color) — pages are multiplexed by `pidx`
+
+A **duplex** color feed does not stream each page contiguously. The device
+scans both sides concurrently and **interleaves their chunks on the wire**,
+tagging every block header with the 1-based page index `pidx` at **byte[3]**
+(`64 07 00 <pidx> 00 84 ...`; the same field the end-of-page marker carries).
+Chunks arrive multiplexed — in the confirmed capture the headers alternate
+`pidx 2,1,2,1,…` up to `EOP(pidx=1)`, then `3,2,3,2,…` up to `EOP(pidx=2)`,
+and so on — and each page is closed by its **own** end-of-page marker
+carrying that page's `pidx`. The markers arrive in page order (`pidx`
+1,2,3,4).
+
+A reader therefore **de-interleaves by `pidx`**: keep one accumulating JPEG
+buffer per page index, append each chunk's body to the buffer named by its
+header's `pidx`, and finalize (decode, emit) a page when its end-of-page
+marker arrives. Simplex is the degenerate case where only one page index is
+ever active, so the same de-interleaving loop handles simplex, duplex, and
+single-page flatbed alike. De-multiplexing the confirmed duplex capture this
+way yields exactly 4 independent baseline JPEGs, all decoding cleanly at
+2560×3252; reading the interleaved stream as one page at a time instead
+concatenates two pages' bytes into a single blob (two `ff d8` SOIs) that a
+JPEG decoder rejects.
+
+Only **color/JPEG** duplex interleaving has been observed and captured. The
+gray and RLENGTH modes have no duplex capture; whether the device also
+multiplexes their chunks by `pidx` is unconfirmed, so a reader that only has
+per-page sequential handling for those modes is correct for every captured
+(simplex/single-page) gray/RLENGTH sample but unverified for duplex.
+
 Only color/JPEG multi-page ADF framing has been confirmed against a real
 capture (see PROVENANCE.md); the gray and RLENGTH (Black & White/Error
 Diffusion/True Gray) modes are expected to use the same marker, since it's
