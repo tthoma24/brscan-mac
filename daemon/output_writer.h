@@ -1,0 +1,84 @@
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "brscan/scanner.h"
+#include "brscan/types.h"
+
+// The library-level output writer: turns a completed multi-page scan (a
+// list of brscan::ScanResult pages, as RunScan now returns) into the file
+// format the user configured for a destination -- mirroring the
+// iPrint&Scan Settings dialog's "File Type" and "Document separation"
+// choices. This is deliberately hermetic: it decodes each page to a
+// CoreGraphics image in memory and writes PDF / TIFF / JPEG / PNG / native
+// files, but knows nothing about the daemon, the config file, or which
+// FUNC triggered the scan. Task 1c.2b wires it into the daemon's actions.
+//
+// The Objective-C++ implementation (ImageIO / CoreGraphics / Vision) lives
+// in daemon/output_writer.mm; this header is plain C++ so an ordinary .cpp
+// caller can drive it.
+namespace brscan::scand {
+
+// The output file format, one per "File Type" the vendor dialog offers.
+//   kNative writes each page in its own per-PixelFormat file (JPEG for a
+//   color page, PGM/P5 for gray, PBM/P4 for bitonal) -- exactly what
+//   tools/scan_output.cpp's WritePages already produces, and the format
+//   used when no `<dest>.format` key is set.
+enum class OutputFormat { kNative, kPdf, kTiff, kJpeg, kPng };
+
+// TIFF compression codec, as an NSTIFFCompression value at write time
+// (LZW=5, CCITT Group 3=3, CCITT Group 4=4). G3/G4 are 1-bit fax codecs
+// and only apply to a bilevel page; see WriteConfiguredOutput's comment on
+// how a non-bilevel page requested with G3/G4 is handled.
+enum class TiffCompression { kLzw, kG3, kG4 };
+
+// Document separation, as the vendor dialog's "Document" separation
+// offers. kCombine puts every page in one container; kEveryN starts a new
+// container every `separate_n` pages.
+enum class OutputSeparation { kCombine, kEveryN };
+
+// One destination's output settings (see daemon/config.h, which parses the
+// per-FUNC keys into these). Defaults match the config parser's defaults:
+// native format, LZW, combine-all.
+struct OutputSettings {
+  OutputFormat format = OutputFormat::kNative;
+  TiffCompression tiff_compression = TiffCompression::kLzw;
+  OutputSeparation separation = OutputSeparation::kCombine;
+  int separate_n = 1;       // Used when separation == kEveryN (>= 1).
+  bool searchable = false;  // PDF only: lay a Vision OCR text layer.
+};
+
+// Writes `pages` to disk as `settings.format`, deriving each output path
+// from `base_path` (e.g. ".../scan-20260903-131605-FILE-64620.jpg"): its
+// directory and stem are kept, its extension replaced to match the chosen
+// format. Appends every path actually written to `*written` (which is
+// cleared first). Returns kOk on success.
+//
+// Behavior by format:
+//   - kNative: delegates to brscan::cli::WritePages -- one native file per
+//     page, numbered `-NNN` when there is more than one page. Separation
+//     does not apply (there is no container to split).
+//   - kPdf: one multi-page PDF; if `settings.searchable`, each page also
+//     gets a Vision-recognized invisible text layer.
+//   - kTiff: one multi-page TIFF, each page tagged with the requested
+//     compression. G3/G4 require a bilevel image: a kBitonal page is
+//     written 1-bit with the requested fax codec; a kGray/kRgb page is not
+//     bilevel, so G3/G4 falls back to LZW for that page (documented,
+//     lossless -- no thresholding).
+//   - kJpeg / kPng: one file per page, numbered `-NNN` when there is more
+//     than one page (via brscan::cli::PagePath). Separation does not apply
+//     to these per-page formats -- kEveryN behaves like kCombine.
+//
+// Separation (kEveryN) applies only to the container formats (PDF, TIFF):
+// it produces ceil(P / separate_n) files, each holding up to `separate_n`
+// pages, named with a `-docNNN` suffix (e.g. `-doc001.pdf`). Each
+// ScanResult counts as one page/image.
+//
+// Returns kIoError if a file cannot be written or a page cannot be
+// decoded, kProtocolError if a searchable PDF's Vision request fails.
+brscan::Status WriteConfiguredOutput(
+    const std::vector<brscan::ScanResult>& pages, const OutputSettings& settings,
+    const std::string& base_path, std::vector<std::string>* written);
+
+}  // namespace brscan::scand

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include <CoreGraphics/CoreGraphics.h>
 
+#include "brscan/scanner.h"
 #include "brscan/types.h"
 
 // The OCR destination action's core: turn one already-saved scan (JPEG
@@ -31,6 +33,40 @@ namespace brscan {
 // Returns nullptr on any read, parse, or decode failure. The caller owns
 // the returned image and must CGImageRelease() it.
 CGImageRef LoadImageAsCGImage(const std::string& image_path);
+
+// Converts one already-decoded scan page (a brscan::ScanResult, see
+// libbrscan/include/brscan/scanner.h) to a CGImageRef entirely in memory,
+// with no intermediate file. The three PixelFormat cases map exactly as
+// LoadImageAsCGImage does for the on-disk forms:
+//   - kRgb: `data` is a baseline JPEG stream, decoded via ImageIO.
+//   - kGray: `data` is 8-bit grayscale, one byte per pixel, wrapped
+//     directly.
+//   - kBitonal: `data` is packed 1-bit-per-pixel (see PixelFormat::kBitonal
+//     in types.h), expanded to 8-bit grayscale.
+//
+// Returns nullptr on any decode failure or if `page.data` is too short for
+// its stated dimensions. The caller owns the returned image and must
+// CGImageRelease() it. Shares its JPEG-bytes-to-CGImage and
+// gray/bitonal-to-CGImage implementation with LoadImageAsCGImage.
+CGImageRef CreateCGImageFromScanResult(const brscan::ScanResult& page);
+
+// Writes `images` (already-decoded pages, in order) as one multi-page PDF
+// at `pdf_path`, each page sized to its image's pixels with the image drawn
+// as the page's visible content. If `searchable`, each page also gets a
+// Vision-recognized invisible text layer (see ComposeSearchablePdf's page
+// helper) so the PDF is selectable and searchable; if not, the pages carry
+// no text layer. The caller retains ownership of every CGImageRef in
+// `images` (this function neither retains nor releases them).
+//
+// Returns:
+//   kOk             the PDF was written (a searchable page that recognized
+//                    no text is still kOk -- it is just a faithful image).
+//   kIoError        `images` is empty, or `pdf_path` could not be
+//                    created/written.
+//   kProtocolError  `searchable` was requested and Vision's recognition
+//                    request itself failed on some page.
+Status WriteSearchablePdf(const std::vector<CGImageRef>& images,
+                          bool searchable, const std::string& pdf_path);
 
 // Runs Vision text recognition (VNRecognizeTextRequest, accurate level)
 // on `image_path` and composes a searchable PDF at `pdf_path`: a single
