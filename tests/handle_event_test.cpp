@@ -47,6 +47,24 @@ std::vector<uint8_t> EncodeBlockHeader(uint16_t width) {
           static_cast<uint8_t>((width >> 8) & 0xff)};
 }
 
+// The 10-byte end-of-page marker (`82 07 00 <pidx> 00 84 00 00 00 00`; see
+// reference/protocol-notes-adf-multipage.md and tests/scanner_test.cpp's
+// RunScan tests, which decode this same shape). Followed by either the
+// next page's block header (more pages) or `80 80` (job-final -- see
+// EncodeJobFinalTerminator below).
+std::vector<uint8_t> EncodeEndOfPageMarker(uint8_t pidx) {
+  return {0x82, 0x07, 0x00, pidx, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00};
+}
+
+// The 12-byte job-final terminator every single-page scan now ends with:
+// EncodeEndOfPageMarker(pidx) followed by `80 80`.
+std::vector<uint8_t> EncodeJobFinalTerminator(uint8_t pidx) {
+  std::vector<uint8_t> out = EncodeEndOfPageMarker(pidx);
+  out.push_back(0x80);
+  out.push_back(0x80);
+  return out;
+}
+
 std::vector<uint8_t> MakeSyntheticJpeg(int width, int height) {
   std::vector<uint8_t> rgb(static_cast<size_t>(width) * height * 3, 128);
   tjhandle handle = tjInitCompress();
@@ -151,6 +169,7 @@ TEST_F(HandleButtonEventTest, FileFuncUsesFileParamsAndSavesJpeg) {
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   Config cfg = DefaultConfig();  // file_params: color, 300dpi, flatbed.
   cfg.save_dir = save_dir_;
@@ -191,6 +210,7 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
   const std::vector<uint8_t> raw(4 * 3, 0x42);
   payload.insert(payload.end(), raw.begin(), raw.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   Config cfg = DefaultConfig();
   // Give IMAGE its own settings, distinct from FILE's color/300dpi
@@ -232,6 +252,87 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
   // IMAGE's action really does invoke the runner (unlike FILE above) --
   // confirm it went through the injected fake, with the expected argv,
   // and not through a real `/usr/bin/open` process.
+  ASSERT_EQ(runner_.calls().size(), 1u);
+  EXPECT_EQ(runner_.calls()[0][0], "/usr/bin/open");
+  EXPECT_EQ(runner_.calls()[0].back(), saved_path);
+}
+
+// Regression test for a Task 1c.1 review finding: WritePages (tools/
+// scan_output.h) never writes the bare, unnumbered base path for a
+// multi-page scan -- only "-001", "-002", etc. HandleButtonEvent must
+// report and act on the actual numbered page-1 file, not a path that was
+// never written to disk. A 2-page synthetic ADF-shaped gray scan (same
+// inter-page 10-byte marker framing as tests/scanner_test.cpp's
+// GrayAdfMultiPageReturnsAllPages) drives this through IMAGE so the
+// recording CommandRunner shows exactly what PerformAction ran against.
+TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndActsOnPageOne) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=4, height_px=3 (same offer as ImageFuncUsesImageParamsDistinctFromFile).
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  auto block1 = EncodeBlockHeader(4);
+  const std::vector<uint8_t> raw1(4 * 3, 0x11);
+  block1.insert(block1.end(), raw1.begin(), raw1.end());
+  t.QueueRead(block1);
+  t.QueueRead(EncodeEndOfPageMarker(1));
+
+  auto block2 = EncodeBlockHeader(4);
+  const std::vector<uint8_t> raw2(4 * 3, 0x22);
+  block2.insert(block2.end(), raw2.begin(), raw2.end());
+  t.QueueRead(block2);
+  t.QueueRead(EncodeJobFinalTerminator(2));
+
+  Config cfg = DefaultConfig();
+  cfg.image_params.mode = brscan::ScanMode::kGray;
+  cfg.image_params.x_dpi = 100;
+  cfg.image_params.y_dpi = 100;
+  cfg.save_dir = save_dir_;
+
+  const ButtonEvent event = MakeEvent("IMAGE", "7007");
+  std::string saved_path;
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_FALSE(saved_path.empty());
+
+  // saved_path must be the numbered page-1 file (tools/scan_output.h's
+  // PagePath(base, 1, 2)), never the unnumbered base BuildOutputPath()
+  // built -- that exact path is never written for a 2-page scan.
+  ASSERT_NE(saved_path.find("-001."), std::string::npos)
+      << "saved_path must be the numbered page-1 file, not the unwritten "
+         "base path: "
+      << saved_path;
+  ASSERT_TRUE(std::filesystem::exists(saved_path));
+
+  const size_t page_marker_pos = saved_path.rfind("-001");
+  ASSERT_NE(page_marker_pos, std::string::npos);
+  std::string page2_path = saved_path;
+  page2_path.replace(page_marker_pos, 4, "-002");
+  ASSERT_TRUE(std::filesystem::exists(page2_path))
+      << "page 2 must also be written to disk: " << page2_path;
+
+  // Each numbered file must hold its own page's pixel data, not a copy of
+  // the other page's.
+  const std::string want_header = "P5\n4 3\n255\n";
+  const std::vector<uint8_t> page1_file = ReadWholeFile(saved_path);
+  ASSERT_GE(page1_file.size(), want_header.size() + raw1.size());
+  const std::vector<uint8_t> page1_payload(
+      page1_file.begin() + static_cast<long>(want_header.size()), page1_file.end());
+  EXPECT_EQ(page1_payload, raw1);
+
+  const std::vector<uint8_t> page2_file = ReadWholeFile(page2_path);
+  ASSERT_GE(page2_file.size(), want_header.size() + raw2.size());
+  const std::vector<uint8_t> page2_payload(
+      page2_file.begin() + static_cast<long>(want_header.size()), page2_file.end());
+  EXPECT_EQ(page2_payload, raw2);
+
+  // The FUNC action (IMAGE -> `/usr/bin/open`) must run against the file
+  // that actually exists on disk -- the page-1 numbered file -- not the
+  // never-written base path. This is the exact check that would have
+  // caught the Critical: before the fix, this ran `/usr/bin/open` on a
+  // nonexistent path.
   ASSERT_EQ(runner_.calls().size(), 1u);
   EXPECT_EQ(runner_.calls()[0][0], "/usr/bin/open");
   EXPECT_EQ(runner_.calls()[0].back(), saved_path);
@@ -289,6 +390,7 @@ TEST_F(HandleButtonEventTest, SanitizesPathTraversalInRegidAndStaysInsideSaveDir
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   Config cfg = DefaultConfig();
   cfg.save_dir = save_dir_;
@@ -332,6 +434,7 @@ TEST_F(HandleButtonEventTest, UnwritableSaveDirReturnsIoErrorNotCrash) {
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   ASSERT_EQ(::mkdir(save_dir_.c_str(), 0700), 0);
   ASSERT_EQ(::chmod(save_dir_.c_str(), 0000), 0);

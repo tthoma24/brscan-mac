@@ -9,6 +9,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "brscan/scanner.h"
 #include "brscan/transport_tcp.h"
@@ -192,8 +193,8 @@ int main(int argc, char** argv) {
                : brscan::cli::ExitCodeFor(connect_status);
   }
 
-  brscan::ScanResult result;
-  const brscan::Status scan_status = brscan::RunScan(transport, params, &result);
+  std::vector<brscan::ScanResult> pages;
+  const brscan::Status scan_status = brscan::RunScan(transport, params, &pages);
   transport.Disconnect();
 
   if (scan_status != brscan::Status::kOk) {
@@ -201,9 +202,20 @@ int main(int argc, char** argv) {
     return brscan::cli::ExitCodeFor(scan_status);
   }
 
-  if (!brscan::cli::WriteOutput(result, args.output)) return 1;
+  if (!brscan::cli::WritePages(pages, args.output)) return 1;
 
-  std::cout << "Wrote " << args.output << " (" << result.width << "x"
-            << result.height << ")\n";
+  const int total_pages = static_cast<int>(pages.size());
+  if (total_pages == 1) {
+    std::cout << "Wrote " << args.output << " (1 page, " << pages[0].width
+               << "x" << pages[0].height << ")\n";
+  } else {
+    // brscan::cli::PagePath mirrors WritePages' own numbering, so this
+    // names the file WritePages actually wrote for page 1, not a
+    // hand-reconstructed guess at its name.
+    const std::string first_path =
+        brscan::cli::PagePath(args.output, 1, total_pages);
+    std::cout << "Wrote " << total_pages << " pages to " << first_path
+               << " ...\n";
+  }
   return 0;
 }

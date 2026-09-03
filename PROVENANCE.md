@@ -73,6 +73,15 @@ its documented RLENGTH/PackBits algorithm under that license (see
 which names that project as a permitted source. No Brother binary, driver
 package, or decompiler output was run or read by this project directly.
 
+The constant below is from `reference/streams/s0_in.bin` (the same capture
+cited above), re-examined for its ADF regions (tests 7 and 8: an ADF simplex
+and an ADF duplex scan). See `reference/protocol-notes-adf-multipage.md` for
+the full byte-level decode.
+
+| Constant | Meaning | Source |
+|---|---|---|
+| 10-byte end-of-page marker `82 07 00 <pidx> 00 84 00 00 00 00`, followed by either `80 80` (job-final, forming the 12-byte terminator already documented for the single-page case) or the next page's block header | Delimits pages within one multi-page ADF job (one `ESC X` streams the whole stack) | Capture, `reference/streams/s0_in.bin` tests 7 (ADF simplex, 3 pages) and 8 (ADF duplex, 4 pages): every inter-page boundary in both regions parses cleanly under this shape. Only color/JPEG multi-page is capture-confirmed; gray and RLENGTH multi-page framing is assumed identical (block framing, not payload-specific) but not independently captured |
+
 The constant below is from `reference/brscan-button.pcap`, our own capture of
 the Scan-button registration/notification traffic between a Mac running
 Brother's driver and the printer (issue #3), taken 2026-09-02. See

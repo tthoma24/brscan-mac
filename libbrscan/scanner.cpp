@@ -310,8 +310,10 @@ Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
 
 }  // namespace
 
-Status RunScan(Transport& transport, const Params& params, ScanResult* out) {
+Status RunScan(Transport& transport, const Params& params,
+                std::vector<ScanResult>* out) {
   if (out == nullptr) return Status::kProtocolError;
+  out->clear();
 
   // Greeting. Session::Open() already maps +OK 200 -> kOk, -NG 401 ->
   // kBusy, anything else -> kProtocolError; reuse it rather than
@@ -406,90 +408,137 @@ Status RunScan(Transport& transport, const Params& params, ScanResult* out) {
     exec_params.area = Area{0, 0, offer->width_px, offer->height_px};
   }
 
-  // Execute.
+  // Execute. This runs once regardless of how many pages the device ends
+  // up streaming back: a document-feeder scan negotiates and starts a
+  // single job, and one ESC X makes the device feed and send the whole
+  // stack over this same connection (see docs/PROTOCOL.md, "Multi-page
+  // (ADF)"). Only the block/payload readout below loops per page.
   status = send(EncodeExecute(exec_params));
   if (status != Status::kOk) return status;
 
-  BlockHeader header;
-  status = ReadBlockHeader(&framer, kScanTimeoutMs, &header);
-  if (status != Status::kOk) return status;
+  // On any failure from here on, `out` must not be left holding a partial
+  // page list (see scanner.h's doc comment on RunScan) -- clear it before
+  // returning whatever error status was found.
+  const auto fail = [&](Status s) {
+    out->clear();
+    return s;
+  };
 
-  if (params.mode == ScanMode::kColor) {
-    std::vector<uint8_t> jpeg;
-    status = ReadChunkedJpeg(&framer, header, kScanTimeoutMs, &jpeg);
-    if (status != Status::kOk) return status;
+  for (;;) {
+    BlockHeader header;
+    status = ReadBlockHeader(&framer, kScanTimeoutMs, &header);
+    if (status != Status::kOk) return fail(status);
 
-    Image image;
-    const Status decode_status = DecodeJpeg(jpeg.data(), jpeg.size(), &image);
-    if (decode_status != Status::kOk) return decode_status;
+    ScanResult page;
 
-    out->format = PixelFormat::kRgb;
-    out->width = image.width;
-    out->height = image.height;
-    out->data = std::move(jpeg);
-    return Status::kOk;
+    if (params.mode == ScanMode::kColor) {
+      // Each ADF page is its own independent baseline JPEG (own JFIF/DQT/
+      // SOF/DHT/EOI), chunked exactly like a single flatbed scan -- so it
+      // gets its own ReadChunkedJpeg/DecodeJpeg call per iteration of this
+      // loop, not one shared across pages.
+      std::vector<uint8_t> jpeg;
+      status = ReadChunkedJpeg(&framer, header, kScanTimeoutMs, &jpeg);
+      if (status != Status::kOk) return fail(status);
+
+      Image image;
+      const Status decode_status = DecodeJpeg(jpeg.data(), jpeg.size(), &image);
+      if (decode_status != Status::kOk) return fail(decode_status);
+
+      page.format = PixelFormat::kRgb;
+      page.width = image.width;
+      page.height = image.height;
+      page.data = std::move(jpeg);
+    } else if (params.mode == ScanMode::kBlackWhite ||
+               params.mode == ScanMode::kErrorDiffusion ||
+               params.mode == ScanMode::kTrueGray) {
+      const bool bitonal = params.mode != ScanMode::kTrueGray;
+      const int width = exec_params.area.x1 - exec_params.area.x0;
+      const int height = exec_params.area.y1 - exec_params.area.y0;
+      if (width <= 0 || height <= 0) return fail(Status::kProtocolError);
+      const size_t row_bytes = RlengthRowBytes(width, bitonal);
+
+      std::vector<uint8_t> pixels;
+      status = ReadRlengthRows(&framer, header, height, row_bytes,
+                                kScanTimeoutMs, &pixels);
+      if (status != Status::kOk) return fail(status);
+
+      Image image;
+      const Status decode_status =
+          bitonal ? WrapBitonalImage(width, height, pixels, &image)
+                  : DecodeGrayRaw(width, height, pixels.data(), pixels.size(),
+                                  &image);
+      if (decode_status != Status::kOk) return fail(decode_status);
+
+      page.format = bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
+      page.width = width;
+      page.height = height;
+      page.data = std::move(pixels);
+    } else {
+      // Gray: raw payload, exactly width * height bytes, no embedded
+      // headers (see ReadRawGray). Width comes from this block's header
+      // (confirmed reliable for a gray payload); height comes from the
+      // requested area, since gray has no length field analogous to the
+      // JPEG case to confirm it against.
+      //
+      // Residual risk: `height` here is what we *asked for*, not
+      // something the device confirms back -- unlike color, where the
+      // actual JPEG dimensions come from the decoded image itself. If the
+      // device ever auto-crops a gray scan's delivered height short of
+      // the requested area (as Task 6's report notes it does for some
+      // same-offer color scans, trimming to detected paper edges),
+      // ReadRawGray would block waiting for bytes that never arrive
+      // rather than returning the shorter image, surfacing as
+      // Status::kTimeout. Not observed in this task's live gray scans,
+      // but not independently ruled out either.
+      const int width = header.width;
+      const int height = exec_params.area.y1 - exec_params.area.y0;
+      if (width <= 0 || height <= 0) return fail(Status::kProtocolError);
+      const size_t expected =
+          static_cast<size_t>(width) * static_cast<size_t>(height);
+
+      std::vector<uint8_t> raw;
+      status = ReadRawGray(&framer, expected, kScanTimeoutMs, &raw);
+      if (status != Status::kOk) return fail(status);
+
+      Image image;
+      const Status decode_status =
+          DecodeGrayRaw(width, height, raw.data(), raw.size(), &image);
+      if (decode_status != Status::kOk) return fail(decode_status);
+
+      page.format = PixelFormat::kGray;
+      page.width = width;
+      page.height = height;
+      page.data = std::move(raw);
+    }
+
+    out->push_back(std::move(page));
+
+    // End-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00, exactly 10
+    // bytes (see docs/PROTOCOL.md, "Multi-page (ADF)"). Read it as a fixed
+    // count plus a 2-byte peek rather than routing it through
+    // ReadBlockHeader, which would consume the 2 bytes right after it --
+    // either the job-final `80 80` or the next page's block header -- and
+    // desync the rest of the stream.
+    std::vector<uint8_t> marker;
+    status = framer.ReadExact(10, kScanTimeoutMs, &marker);
+    if (status != Status::kOk) return fail(status);
+    if (marker[0] != 0x82 || marker[1] != 0x07 || marker[5] != 0x84) {
+      return fail(Status::kProtocolError);
+    }
+
+    std::vector<uint8_t> tail;
+    status = framer.Peek(2, kScanTimeoutMs, &tail);
+    if (status != Status::kOk) return fail(status);
+    if (tail[0] == 0x80 && tail[1] == 0x80) {
+      std::vector<uint8_t> consumed;
+      status = framer.ReadExact(2, kScanTimeoutMs, &consumed);
+      if (status != Status::kOk) return fail(status);
+      break;  // Job-final terminator: no more pages.
+    }
+    // Otherwise `tail` is the next page's block header (e.g. `64 07` for
+    // color) -- loop back to ReadBlockHeader without consuming it.
   }
 
-  if (params.mode == ScanMode::kBlackWhite ||
-      params.mode == ScanMode::kErrorDiffusion ||
-      params.mode == ScanMode::kTrueGray) {
-    const bool bitonal = params.mode != ScanMode::kTrueGray;
-    const int width = exec_params.area.x1 - exec_params.area.x0;
-    const int height = exec_params.area.y1 - exec_params.area.y0;
-    if (width <= 0 || height <= 0) return Status::kProtocolError;
-    const size_t row_bytes = RlengthRowBytes(width, bitonal);
-
-    std::vector<uint8_t> pixels;
-    status = ReadRlengthRows(&framer, header, height, row_bytes,
-                              kScanTimeoutMs, &pixels);
-    if (status != Status::kOk) return status;
-
-    Image image;
-    const Status decode_status =
-        bitonal ? WrapBitonalImage(width, height, pixels, &image)
-                : DecodeGrayRaw(width, height, pixels.data(), pixels.size(),
-                                &image);
-    if (decode_status != Status::kOk) return decode_status;
-
-    out->format = bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
-    out->width = width;
-    out->height = height;
-    out->data = std::move(pixels);
-    return Status::kOk;
-  }
-
-  // Gray: raw payload, exactly width * height bytes, no embedded headers
-  // (see ReadRawGray). Width comes from the first block's header
-  // (confirmed reliable for a gray payload); height comes from the
-  // requested area, since gray has no length field analogous to the JPEG
-  // case to confirm it against.
-  //
-  // Residual risk: `height` here is what we *asked for*, not something the
-  // device confirms back -- unlike color, where the actual JPEG dimensions
-  // come from the decoded image itself. If the device ever auto-crops a
-  // gray scan's delivered height short of the requested area (as Task 6's
-  // report notes it does for some same-offer color scans, trimming to
-  // detected paper edges), ReadRawGray would block waiting for bytes that
-  // never arrive rather than returning the shorter image, surfacing as
-  // Status::kTimeout. Not observed in this task's live gray scans, but
-  // not independently ruled out either.
-  const int width = header.width;
-  const int height = exec_params.area.y1 - exec_params.area.y0;
-  if (width <= 0 || height <= 0) return Status::kProtocolError;
-  const size_t expected = static_cast<size_t>(width) * static_cast<size_t>(height);
-
-  std::vector<uint8_t> raw;
-  status = ReadRawGray(&framer, expected, kScanTimeoutMs, &raw);
-  if (status != Status::kOk) return status;
-
-  Image image;
-  const Status decode_status = DecodeGrayRaw(width, height, raw.data(), raw.size(), &image);
-  if (decode_status != Status::kOk) return decode_status;
-
-  out->format = PixelFormat::kGray;
-  out->width = width;
-  out->height = height;
-  out->data = std::move(raw);
   return Status::kOk;
 }
 

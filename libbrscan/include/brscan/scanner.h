@@ -32,7 +32,8 @@ struct ScanResult {
 // Runs one full scan end-to-end over `transport`, per the flow in
 // docs/PROTOCOL.md: greeting, ESC Q (session init), source select
 // (ESC S, plus ESC D for the document feeder), ESC I (per-scan negotiate),
-// ESC X (execute), then the block header and payload readout.
+// ESC X (execute), then the block header and payload readout, looped over
+// every page the device sends.
 //
 // `transport` must already be connected (see Transport::Connect); RunScan
 // neither connects nor disconnects it, matching how Session is used
@@ -42,9 +43,20 @@ struct ScanResult {
 // full area granted by the per-scan ESC I offer. Otherwise it requests
 // exactly the area given.
 //
-// On Status::kOk, `out` holds the scanned image's native payload bytes and
-// the dimensions the device reported for it. Any other Status reports a
-// specific failure:
+// A single ESC X can make the document feeder stream more than one page
+// over the same connection (see docs/PROTOCOL.md, "Multi-page (ADF)"): the
+// ESC Q / source-select / ESC I / ESC X sequence runs once, but the
+// block/payload readout loops until the device's job-final terminator
+// arrives. `out` holds one ScanResult per page, in device order
+// (1-based page order, front-to-back for a duplex ADF scan). A flatbed or
+// single-sheet ADF scan yields a 1-element vector -- the degenerate case
+// of the same loop.
+//
+// `out->clear()` runs first. On Status::kOk, `out` holds one ScanResult
+// per page, each with the scanned image's native payload bytes and the
+// dimensions the device reported for it. On any other Status, `out` is
+// left empty (cleared) rather than holding a partial page list, so a
+// caller can never mistake a partial read for a complete one:
 //   - kBusy: the device reported busy at the greeting (-NG 401).
 //   - kNoPaper: params.source == Source::kAdf and the feeder did not ack
 //     source selection within the ack timeout. See scanner.cpp for the
@@ -54,7 +66,8 @@ struct ScanResult {
 //     device-panel cancel mid-scan, which docs/PROTOCOL.md documents as
 //     emitting no explicit status -- the device just stops sending.
 //   - kProtocolError: a malformed or incomplete reply (bad offer CSV, bad
-//     block header, truncated JPEG, short gray payload).
+//     block header, truncated JPEG, short gray payload, malformed
+//     end-of-page marker).
 //   - kIoError: the connection dropped.
 //
 // Residual risk: two replies in this flow (the ESC Q capability block and
@@ -66,6 +79,7 @@ struct ScanResult {
 // read as complete early, and its late tail bytes would corrupt the next
 // read. Not observed in this task's live testing, but not something the
 // protocol lets this code rule out structurally.
-Status RunScan(Transport& transport, const Params& params, ScanResult* out);
+Status RunScan(Transport& transport, const Params& params,
+                std::vector<ScanResult>* out);
 
 }  // namespace brscan

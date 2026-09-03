@@ -1,9 +1,37 @@
 #include "scan_output.h"
 
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 
 namespace brscan::cli {
+
+namespace {
+
+// Inserts a "-<NNN>" page number (1-based, zero-padded to 3 digits) before
+// `path`'s extension, e.g. NumberedPagePath("scan.jpg", 1) == "scan-001.jpg".
+// A dot is only treated as the extension separator if it falls after the
+// last path separator (a dot in a directory name isn't an extension); if
+// `path` has no extension, the suffix is appended at the end instead.
+std::string NumberedPagePath(const std::string& path, int page_number) {
+  std::ostringstream suffix;
+  suffix << '-' << std::setfill('0') << std::setw(3) << page_number;
+
+  const size_t slash = path.find_last_of('/');
+  const size_t dot = path.find_last_of('.');
+  if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+    return path.substr(0, dot) + suffix.str() + path.substr(dot);
+  }
+  return path + suffix.str();
+}
+
+}  // namespace
+
+std::string PagePath(const std::string& base, int index_1based, int total) {
+  if (total <= 1) return base;
+  return NumberedPagePath(base, index_1based);
+}
 
 std::string DescribeFailure(brscan::Status status) {
   switch (status) {
@@ -68,6 +96,17 @@ bool WriteOutput(const brscan::ScanResult& result, const std::string& path) {
     return false;
   }
   return true;
+}
+
+bool WritePages(const std::vector<brscan::ScanResult>& pages,
+                 const std::string& path) {
+  bool ok = true;
+  const int total = static_cast<int>(pages.size());
+  for (int i = 0; i < total; ++i) {
+    const std::string page_path = PagePath(path, i + 1, total);
+    if (!WriteOutput(pages[static_cast<size_t>(i)], page_path)) ok = false;
+  }
+  return ok;
 }
 
 }  // namespace brscan::cli
