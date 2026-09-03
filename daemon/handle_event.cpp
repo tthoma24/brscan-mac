@@ -96,6 +96,13 @@ std::string BuildOutputPath(const std::string& save_dir,
 Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
                           brscan::Transport& transport,
                           std::string* saved_path) {
+  return HandleButtonEvent(event, cfg, transport, saved_path,
+                            DefaultCommandRunner);
+}
+
+Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
+                          brscan::Transport& transport,
+                          std::string* saved_path, const CommandRunner& runner) {
   // event.func comes straight off an untrusted UDP notification (see
   // daemon/button_listener.h's ParseNotification, which validates the
   // wire framing but not FUNC's value against any known set). Reject
@@ -154,7 +161,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
              << "\n";
   *saved_path = path;
 
-  return PerformAction(event.func, path, cfg);
+  return PerformAction(event.func, path, cfg, runner);
 }
 
 }  // namespace brscan::scand
