@@ -688,6 +688,58 @@ TEST(RunScan, ColorAdfMultiPageReturnsAllPages) {
   EXPECT_EQ(pages[2].data, jpeg3);
 }
 
+// Exercises ReadChunkedJpeg's sentinel-boundary-is-the-end-of-page-marker
+// branch (the `is_end_of_page` break in scanner.cpp): each page's single
+// chunk header DECLARES the 0xfff4 sentinel, yet its data ends right at the
+// 10-byte end-of-page marker (the boundary is the MARKER, not a next block
+// header). ReadChunkedJpeg must read exactly up to the marker, leave the
+// marker unconsumed, and return -- so RunScan's own ReadExact(10) then
+// consumes it and finds the next page. The existing multi-page tests only
+// end a page on a sub-0xfff4 honest final chunk or a next-header boundary,
+// so this marker-boundary branch (and the "marker left intact" contract)
+// is otherwise uncovered. Two pages prove page 2 is still framed correctly
+// after page 1 left its marker for the loop.
+TEST(RunScan, ColorAdfSentinelChunkEndingAtMarkerReturnsAllPages) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC D ADF ack
+  t.QueueTimeout();                               // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  const auto jpeg1 = MakeSyntheticJpeg(16, 8);
+  const auto jpeg2 = MakeSyntheticJpeg(16, 8);
+  ASSERT_LT(jpeg1.size(), 0xfff4u);
+  ASSERT_LT(jpeg2.size(), 0xfff4u);
+
+  // Header declares the 0xfff4 sentinel (12-byte shape) though the payload
+  // is far shorter and is immediately followed by the end-of-page marker.
+  auto block1 = EncodeBlockHeader12(static_cast<uint16_t>(0xfff4));
+  block1.insert(block1.end(), jpeg1.begin(), jpeg1.end());
+  t.QueueRead(block1);
+  t.QueueRead(EncodeEndOfPageMarker(1));  // tail after marker: `64 07`.
+
+  auto block2 = EncodeBlockHeader12(static_cast<uint16_t>(0xfff4));
+  block2.insert(block2.end(), jpeg2.begin(), jpeg2.end());
+  t.QueueRead(block2);
+  t.QueueRead(EncodeJobFinalTerminator(2));  // tail: `80 80`, job done.
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  for (const auto& page : pages) {
+    EXPECT_EQ(page.format, brscan::PixelFormat::kRgb);
+    EXPECT_EQ(page.width, 16);
+    EXPECT_EQ(page.height, 8);
+  }
+  EXPECT_EQ(pages[0].data, jpeg1);
+  EXPECT_EQ(pages[1].data, jpeg2);
+}
+
 // A 2-page synthetic ADF gray (GRAY64/C=NONE) scan: each page is a raw,
 // unchunked payload (see ReadRawGray), separated by the same 10-byte
 // marker as the color case -- the marker framing is payload-type-

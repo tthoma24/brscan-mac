@@ -40,6 +40,13 @@ Status DecodeJpeg(const uint8_t* jpeg, size_t len, Image* out) {
   // otherwise-perfect page (observed on ADF simplex page 1), so only a
   // fatal error is treated as a decode failure here. tjGetErrorCode must
   // be read before tjDestroy frees the handle.
+  //
+  // This widens acceptance to ALL libjpeg-turbo recoverable warnings, not
+  // only "premature end" -- any warning still yields a fully-written pixel
+  // buffer. The caller's structural checks are the backstop: ReadChunkedJpeg
+  // only hands over a payload it has confirmed ends at the JPEG EOI marker
+  // (ff d9), so a truncated or garbled stream is caught before it reaches
+  // here. Requires libjpeg-turbo >= 2.0 for tjGetErrorCode / TJERR_WARNING.
   const bool fatal = rc != 0 && tjGetErrorCode(handle) != TJERR_WARNING;
   tjDestroy(handle);
   if (fatal) return Status::kProtocolError;
