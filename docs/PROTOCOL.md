@@ -57,6 +57,86 @@ P=0 E=1 G=0     page/edge/gamma flags (constant in all captures)
 Note the two distinct uses of "D": the `ESC D` command selects the ADF source,
 while `D=` inside `ESC X` selects simplex or duplex.
 
+### Black & White, Error Diffusion, and True Gray (`C=RLENGTH`)
+
+Captured from Brother iPrint&Scan rather than Image Capture (issue #4), over
+the same protocol and connection flow above. Three additional modes all use a
+per-row run-length payload instead of JPEG or raw:
+
+| Mode | `M=` | `C=` | Payload |
+|---|---|---|---|
+| Black & White | `TEXT` | `RLENGTH` | 1-bit, packed 8px/byte |
+| Error Diffusion (dithered gray) | `ERRDIF` | `RLENGTH` | 1-bit, packed 8px/byte |
+| True Gray | `GRAY256` | `RLENGTH` | 8-bit, 1 byte/pixel |
+
+iPrint&Scan's ESC X and ESC I for these three modes carry a different param
+set than the CGRAY/GRAY64 flow above: ESC I adds `S=NORMAL_SCAN`; ESC X adds
+`S=NORMAL_SCAN` and `L=0`, and uses `E=0` in place of `E=1`. The field order
+also differs (`R,M,C,J,B,N,A,D,S,P,E,G,L` vs. `B,N,M,C,J,R,A,D,P,E,G`); the
+device accepts either order, so this codebase reproduces iPrint&Scan's order
+byte-for-byte for these three modes rather than merging the two shapes.
+
+#### Row block framing
+
+The image arrives as one block per scanline (confirmed: a 3472x4913 capture
+produced exactly 4913 row blocks). Each block is a 12-byte header:
+
+```
+<type> 07 00 01 00 84 00 00 00 00 <len:le16>
+```
+
+`type` at byte 0 and the little-endian payload length in the last two bytes
+(this is the same 12-byte shape `DetectHeaderLength` in `scanner.cpp` already
+recognized for a raw gray/JPEG block on current firmware -- see "Image data"
+above -- just with the marker byte now dispatched on rather than assumed).
+Confirmed `type` values:
+
+- `0x42`: the payload is `<len>` bytes of RLENGTH-compressed row data (below).
+- `0x40`: the payload is `<len>` bytes of that row's *uncompressed* samples
+  (the same shape as a GRAY64/`C=NONE` block). Observed for the large
+  majority of rows in a True Gray capture -- the device apparently falls
+  back to sending a row raw rather than compressing it, at least for some
+  content, so a reader must accept both types for these three modes, not
+  just 0x42.
+- `0x64`: a JPEG chunk (not used by these three modes; documented above).
+- `0x82`: not a row -- an end-of-page/status marker (`0x82 07 00 01 00 84
+  00 00 00 00 <status>`, 11 bytes, no length-prefixed payload) that follows
+  the last row block. A reader that already knows the requested height
+  (as this codebase's `RunScan` does) can simply stop after that many rows
+  without needing to parse this marker.
+
+#### RLENGTH row codec
+
+RLENGTH is the classic Apple/TIFF PackBits algorithm (see
+`libbrscan/decode_rlength.h` and PROVENANCE.md for how this was derived and
+cross-checked). Each row's compressed payload is a sequence of runs, each
+starting with a control byte `c`:
+
+- `c` in `[0x00, 0x7f]`: **literal run**. Copy the next `c + 1` bytes from
+  the payload to the output verbatim.
+- `c == 0x80`: **no-op**. No output, and no value byte is consumed.
+- `c` in `[0x81, 0xff]`: **repeat run**. The single next byte in the
+  payload is repeated `257 - c` times in the output (2 to 128 repeats).
+
+Decoding a row's whole compressed payload must consume it exactly and
+produce exactly that row's fixed byte width: `ceil(width_px / 8)` for the
+1-bit modes (TEXT/ERRDIF), or `width_px` for True Gray (GRAY256, 1
+byte/pixel). Verified against this project's own capture: every one of the
+4913 compressed rows in a 3472px-wide TEXT scan decodes to exactly 434
+bytes; a companion Error Diffusion capture decodes 4896 of its 4897
+compressed rows to the same 434 bytes, the sole exception being a single
+row with a corrupted length field on the wire (a hardware/capture
+anomaly -- the bytes that follow are unambiguously the *next* row's
+header, arriving earlier than the corrupted length claimed -- not a flaw
+in this algorithm). Decoded 1-bit rows use the standard fax/PBM
+convention: bit value 1 = black, 0 = white, packed most-significant-bit
+first (see `PixelFormat::kBitonal` in `types.h`).
+
+The row width actually used by the device is the requested `A=` area's
+width, not the ESC I offer's granted maximum -- in this project's capture
+the offer reported a 3460px maximum but the request's `A=0,0,3472,4913`
+was honored as-is, delivering 3472px-wide rows.
+
 A typical scan is: `ESC Q` (once per connection), then per scan
 `ESC S FB` (or `+ ESC D ADF`), `ESC I` to negotiate, and `ESC X` to run it.
 
@@ -122,9 +202,8 @@ A typical scan is: `ESC Q` (once per connection), then per scan
   status: the device simply stops sending. A client must use a read timeout to
   detect the stalled stream rather than blocking indefinitely.
 
-## Modes not yet captured
+## Mode coverage
 
-The vendor vocabulary includes `TEXT`, `ERRDIF` (error diffusion), and `C256`,
-but only `CGRAY` and `GRAY64` have been observed on the wire. True 1-bit
-black-and-white and dithered modes await a supplementary capture. See the issue
-tracker.
+`CGRAY`, `GRAY64`, `TEXT`, `ERRDIF`, and `GRAY256` have all been observed on
+the wire and are implemented (see "Black & White, Error Diffusion, and True
+Gray" above for the latter three). No other modes are known to remain.

@@ -76,6 +76,21 @@ TEST(ParseBlockHeader, GrayHeaderWidth) {
   const auto parsed = brscan::ParseBlockHeader(header.data(), header.size());
   ASSERT_TRUE(parsed.has_value());
   EXPECT_EQ(parsed->width, 3472);
+  EXPECT_EQ(parsed->type, 0x40);
+}
+
+TEST(ParseBlockHeader, RlengthHeaderType) {
+  // 00 42 07 00 01 00 84 00 00 00 00 08 00 -- a TEXT/ERRDIF/GRAY256 row
+  // block: type 0x42 (RLENGTH-compressed), 8-byte compressed payload.
+  // See reference/streams/modes_text_in.bin's first row (a blank/white
+  // scanline) via reference/protocol-notes-modes.md.
+  const std::vector<uint8_t> header = {0x00, 0x42, 0x07, 0x00, 0x01, 0x00,
+                                        0x84, 0x00, 0x00, 0x00, 0x00, 0x08,
+                                        0x00};
+  const auto parsed = brscan::ParseBlockHeader(header.data(), header.size());
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->width, 8);
+  EXPECT_EQ(parsed->type, 0x42);
 }
 
 TEST(ParseBlockHeader, GrayHeaderFixtureFile) {
@@ -96,6 +111,7 @@ TEST(ParseBlockHeader, ColorHeaderParses) {
   const auto parsed = brscan::ParseBlockHeader(header.data(), header.size());
   ASSERT_TRUE(parsed.has_value());
   EXPECT_EQ(parsed->width, 0xfff4);
+  EXPECT_EQ(parsed->type, 0x64);
 }
 
 TEST(ParseBlockHeader, TooShortIsMalformed) {

@@ -30,15 +30,17 @@ void PrintUsage(const char* argv0, std::ostream& out) {
       << "\n"
       << "Options:\n"
       << "  --port PORT         TCP port (default " << kDefaultPort << ").\n"
-      << "  --mode MODE         color | gray (default color).\n"
+      << "  --mode MODE         color | gray | bw | errdiff | truegray\n"
+      << "                      (default color).\n"
       << "  --resolution DPI    Scan resolution in dpi (default "
       << kDefaultResolution << ").\n"
       << "  --source SOURCE     flatbed | adf | adf-duplex (default flatbed).\n"
       << "  --area X0,Y0,X1,Y1  Scan area in pixels at the scan resolution\n"
       << "                      (default: the full area the device offers).\n"
       << "\n"
-      << "Output format follows --mode: color writes a JPEG, gray writes a\n"
-      << "binary PGM (P5).\n";
+      << "Output format follows --mode: color writes a JPEG; gray and\n"
+      << "truegray write a binary PGM (P5); bw and errdiff (1-bit modes)\n"
+      << "write a binary PBM (P4).\n";
 }
 
 struct Args {
@@ -87,8 +89,16 @@ bool ParseArgs(int argc, char** argv, Args* out) {
         out->mode = brscan::ScanMode::kColor;
       } else if (*v == "gray") {
         out->mode = brscan::ScanMode::kGray;
+      } else if (*v == "bw") {
+        out->mode = brscan::ScanMode::kBlackWhite;
+      } else if (*v == "errdiff") {
+        out->mode = brscan::ScanMode::kErrorDiffusion;
+      } else if (*v == "truegray") {
+        out->mode = brscan::ScanMode::kTrueGray;
       } else {
-        std::cerr << "--mode must be 'color' or 'gray', got '" << *v << "'\n";
+        std::cerr << "--mode must be one of 'color', 'gray', 'bw', "
+                      "'errdiff', or 'truegray', got '"
+                   << *v << "'\n";
         return false;
       }
     } else if (flag == "--resolution") {
@@ -187,9 +197,13 @@ int ExitCodeFor(brscan::Status status) {
   return 1;
 }
 
-// Writes `result` to `path`: the JPEG bytes as-is for color, or a binary
-// PGM (P5) for gray. Returns false (after printing an error) if the file
-// can't be opened for writing.
+// Writes `result` to `path`: the JPEG bytes as-is for color, a binary PGM
+// (P5) for gray (GRAY64 raw or GRAY256/RLENGTH, both PixelFormat::kGray),
+// or a binary PBM (P4) for the 1-bit modes (TEXT/ERRDIF,
+// PixelFormat::kBitonal -- see the bit-packing convention documented on
+// PixelFormat::kBitonal in types.h, which is exactly what P4 expects, so
+// `result.data` is written out unchanged). Returns false (after printing
+// an error) if the file can't be opened for writing.
 bool WriteOutput(const brscan::ScanResult& result, const std::string& path) {
   std::ofstream f(path, std::ios::binary | std::ios::trunc);
   if (!f) {
@@ -197,13 +211,21 @@ bool WriteOutput(const brscan::ScanResult& result, const std::string& path) {
     return false;
   }
 
-  if (result.format == brscan::PixelFormat::kRgb) {
-    f.write(reinterpret_cast<const char*>(result.data.data()),
-            static_cast<std::streamsize>(result.data.size()));
-  } else {
-    f << "P5\n" << result.width << " " << result.height << "\n255\n";
-    f.write(reinterpret_cast<const char*>(result.data.data()),
-            static_cast<std::streamsize>(result.data.size()));
+  switch (result.format) {
+    case brscan::PixelFormat::kRgb:
+      f.write(reinterpret_cast<const char*>(result.data.data()),
+              static_cast<std::streamsize>(result.data.size()));
+      break;
+    case brscan::PixelFormat::kGray:
+      f << "P5\n" << result.width << " " << result.height << "\n255\n";
+      f.write(reinterpret_cast<const char*>(result.data.data()),
+              static_cast<std::streamsize>(result.data.size()));
+      break;
+    case brscan::PixelFormat::kBitonal:
+      f << "P4\n" << result.width << " " << result.height << "\n";
+      f.write(reinterpret_cast<const char*>(result.data.data()),
+              static_cast<std::streamsize>(result.data.size()));
+      break;
   }
 
   if (!f) {

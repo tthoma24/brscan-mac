@@ -18,6 +18,7 @@ add_library(brscan
   libbrscan/command.cpp
   libbrscan/response.cpp
   libbrscan/decode_jpeg.cpp
+  libbrscan/decode_rlength.cpp
   libbrscan/scanner.cpp
 )
 target_include_directories(brscan PUBLIC libbrscan/include)
@@ -57,6 +58,7 @@ if(BUILD_TESTING)
     tests/command_test.cpp
     tests/response_test.cpp
     tests/decode_test.cpp
+    tests/decode_rlength_test.cpp
     tests/scanner_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
