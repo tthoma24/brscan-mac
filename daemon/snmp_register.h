@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,17 @@ constexpr int kAppNumFile = 5;
 // caller should re-register before this elapses.
 constexpr int kDefaultRegistrationDurationSec = 360;
 
+// Validates `name` for safe embedding as BuildRegisterValue's USER="..."
+// field: a `"` would prematurely close that quoted field, and a `;` would
+// inject an extra, attacker- or typo-controlled KEY=VALUE token into the
+// registration string the printer parses. Returns std::nullopt if `name`
+// contains either character, `name` unchanged otherwise. The wire format
+// has no escape convention of its own for these characters (nothing in the
+// captured protocol suggests one -- see reference/protocol-notes-button.md),
+// so this rejects rather than guessing at an escaping scheme that couldn't
+// be verified against a real device.
+std::optional<std::string> SanitizeDisplayName(const std::string& name);
+
 // Composes the OctetString value carried by the SNMP Set: e.g.
 // "TYPE=BR;BUTTON=SCAN;DURATION=360;CC=1;HOST=192.0.2.10:54925;
 // USER=\"Test Mac\";FUNC=FILE;APPNUM=5;". `ip`/`port` are where the printer
@@ -32,7 +44,9 @@ constexpr int kDefaultRegistrationDurationSec = 360;
 // name shown in the printer's Scan menu; `func` is one of
 // FILE|IMAGE|EMAIL|OCR; `appnum` is the matching Brother application number
 // (see the kAppNum* constants above); `duration_sec` is the registration
-// lifetime in seconds.
+// lifetime in seconds. Does not itself validate `name` -- callers should
+// run it through SanitizeDisplayName() first (see above) so a `"` or `;`
+// in a user-supplied display name can't corrupt this string.
 std::string BuildRegisterValue(
     const std::string& ip, uint16_t port, const std::string& name,
     const std::string& func, int appnum,
