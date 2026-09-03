@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <system_error>
 
 #include "action_ocr.h"
 
@@ -109,14 +110,27 @@ Status PerformOcrAction(const std::string& saved_path, const Config& cfg) {
 
   const Status status =
       brscan::OcrImageToSearchablePdf(saved_path, pdf_path.string());
-  if (status == Status::kOk) {
-    std::cout << "[actions] OCR: wrote searchable PDF to " << pdf_path.string()
-               << " (original scan kept at " << saved_path << ")\n";
-  } else {
+  if (status != Status::kOk) {
     std::cerr << "[actions] OCR: failed to create a searchable PDF from "
                << saved_path << "\n";
+    return status;
   }
-  return status;
+
+  // The searchable PDF is the OCR destination's deliverable; the raster the
+  // scan was pulled into is only an intermediate, so an OCR press should
+  // leave just the PDF. Remove the intermediate best-effort: if the delete
+  // fails the PDF is still the result, so don't fail the action over it.
+  std::error_code ec;
+  std::filesystem::remove(saved_path, ec);
+  if (ec) {
+    std::cerr << "[actions] OCR: wrote searchable PDF to " << pdf_path.string()
+               << ", but could not remove the intermediate scan " << saved_path
+               << ": " << ec.message() << "\n";
+  } else {
+    std::cout << "[actions] OCR: wrote searchable PDF to " << pdf_path.string()
+               << "\n";
+  }
+  return Status::kOk;
 }
 
 }  // namespace
