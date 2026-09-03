@@ -26,6 +26,7 @@
 #include "button_listener.h"
 #include "config.h"
 #include "handle_event.h"
+#include "notification_deduper.h"
 #include "scan_output.h"
 #include "sender_check.h"
 #include "snmp_register.h"
@@ -250,6 +251,13 @@ int main(int argc, char** argv) {
   // first registration cycle resolves it.
   std::vector<std::string> allowed_sender_ips;
 
+  // The printer retransmits a button notification until it's satisfied the
+  // press was consumed, so one press arrives as several identical datagrams
+  // (observed on hardware: one press, two scans). Each copy is still ACKed
+  // below -- the ACK is what stops the retransmits -- but only the first is
+  // scanned. See daemon/notification_deduper.h.
+  brscan::scand::NotificationDeduper deduper;
+
   while (g_stop_requested == 0) {
     // Note on signal responsiveness: g_stop_requested is only consulted
     // here, at each iteration of this loop. A SIGINT/SIGTERM that arrives
@@ -322,9 +330,20 @@ int main(int argc, char** argv) {
 
       std::cout << "[listener] button press: FUNC=" << event.func
                  << " user=" << event.user << " seq=" << event.seq << "\n";
+      // ACK first (even for a duplicate): the byte-for-byte echo is what
+      // tells the printer to stop retransmitting this notification.
       if (listener.Ack(raw, from, fromlen) != brscan::Status::kOk) {
         std::cerr << "[listener] failed to ACK the notification (continuing "
                       "anyway)\n";
+      }
+
+      // A retransmit of a press already handled is ACKed above but not
+      // scanned again -- see daemon/notification_deduper.h.
+      if (deduper.IsDuplicate(event)) {
+        std::cout << "[listener] duplicate notification (REGID=" << event.regid
+                   << " SEQ=" << event.seq
+                   << "); ACKed, not re-scanning\n";
+        continue;
       }
 
       brscan::TcpTransport transport(cfg.printer_host, kScanPort);

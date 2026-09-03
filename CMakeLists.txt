@@ -91,6 +91,7 @@ add_executable(brscan-scand
   daemon/action_ocr.mm
   daemon/handle_event.cpp
   daemon/sender_check.cpp
+  daemon/notification_deduper.cpp
 )
 target_include_directories(brscan-scand PRIVATE daemon tools)
 target_link_libraries(brscan-scand PRIVATE brscan)
@@ -133,6 +134,8 @@ if(BUILD_TESTING)
     tests/handle_event_test.cpp
     daemon/sender_check.cpp
     tests/sender_check_test.cpp
+    daemon/notification_deduper.cpp
+    tests/notification_deduper_test.cpp
     tools/scan_output.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
