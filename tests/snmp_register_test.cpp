@@ -16,6 +16,26 @@
 namespace brscan::scand {
 namespace {
 
+TEST(SanitizeDisplayNameTest, AcceptsAnOrdinaryName) {
+  const auto sanitized = SanitizeDisplayName("Office Mac");
+  ASSERT_TRUE(sanitized.has_value());
+  EXPECT_EQ(*sanitized, "Office Mac");
+}
+
+TEST(SanitizeDisplayNameTest, RejectsEmbeddedQuote) {
+  // A '"' would close USER="..." early, letting the rest of the name
+  // inject its own KEY=VALUE tokens into the registration string.
+  EXPECT_FALSE(SanitizeDisplayName("Evil\" ;FUNC=IMAGE;\"Mac").has_value());
+  EXPECT_FALSE(SanitizeDisplayName("\"").has_value());
+}
+
+TEST(SanitizeDisplayNameTest, RejectsEmbeddedSemicolon) {
+  // A ';' would terminate the USER field's token and start a new
+  // KEY=VALUE pair of the attacker's/typo's choosing.
+  EXPECT_FALSE(SanitizeDisplayName("Mac;FUNC=IMAGE").has_value());
+  EXPECT_FALSE(SanitizeDisplayName(";").has_value());
+}
+
 TEST(BuildRegisterValueTest, ComposesExpectedString) {
   EXPECT_EQ(BuildRegisterValue("192.0.2.10", 54925, "Test Mac", "FILE", 5,
                                 /*duration_sec=*/360),

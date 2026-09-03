@@ -39,6 +39,26 @@ target_link_libraries(brscan-cli PRIVATE brscan)
 target_link_libraries(brscan-cli PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan-cli PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
+# The Scan-button daemon: registers with the printer, listens for button
+# presses on UDP 54925, pulls each scan, and saves it (Plan 1b). Its own
+# protocol pieces (SNMP registration, the UDP listener, config, and FUNC
+# dispatch) live under daemon/ rather than in the brscan library, since
+# they're specific to this daemon and not part of the core scan protocol.
+add_executable(brscan-scand
+  tools/brscan-scand.cpp
+  tools/scan_output.cpp
+  daemon/snmp_register.cpp
+  daemon/button_listener.cpp
+  daemon/config.cpp
+  daemon/actions.cpp
+  daemon/handle_event.cpp
+  daemon/sender_check.cpp
+)
+target_include_directories(brscan-scand PRIVATE daemon tools)
+target_link_libraries(brscan-scand PRIVATE brscan)
+target_link_libraries(brscan-scand PRIVATE ${TURBOJPEG_LIBRARIES})
+target_link_directories(brscan-scand PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
+
 # Tests.
 include(CTest)
 if(BUILD_TESTING)
@@ -64,9 +84,18 @@ if(BUILD_TESTING)
     tests/snmp_register_test.cpp
     daemon/button_listener.cpp
     tests/button_listener_test.cpp
+    daemon/config.cpp
+    tests/config_test.cpp
+    daemon/actions.cpp
+    tests/actions_test.cpp
+    daemon/handle_event.cpp
+    tests/handle_event_test.cpp
+    daemon/sender_check.cpp
+    tests/sender_check_test.cpp
+    tools/scan_output.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
-  target_include_directories(brscan_tests PRIVATE libbrscan tests daemon)
+  target_include_directories(brscan_tests PRIVATE libbrscan tests daemon tools)
   target_include_directories(brscan_tests PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
   target_link_libraries(brscan_tests PRIVATE ${TURBOJPEG_LIBRARIES})
   target_link_directories(brscan_tests PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
