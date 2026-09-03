@@ -7,12 +7,11 @@
 #include "brscan/types.h"
 
 // Test vectors for the literal/repeat/no-op control-byte cases (WhiteLine,
-// MixedRunThenLiteral, LargeRunOfMaxLength) are the exact worked examples
-// from dmikushin/brscan's tests/test_integration.c (GPLv2; see
-// PROVENANCE.md) -- not derived from this project's own captures. The
-// BlankTextRow case below is derived from this project's own capture but
-// is a blank/white scanline, not decodable scanned content; see
-// docs/PROTOCOL.md and PROVENANCE.md.
+// MixedRunThenLiteral, LargeRunOfMaxLength) are standard/textbook PackBits
+// cases (hand-built to exercise each control-byte range), not transcribed
+// from any captured or third-party file. The BlankTextRow case below is
+// derived from this project's own capture but is a blank/white scanline,
+// not decodable scanned content; see docs/PROTOCOL.md and PROVENANCE.md.
 
 TEST(DecodeRlengthRow, WhiteLine) {
   // "0x81 0xFF -> repeat 0xFF 128 times" x3, then "0xF1 0xFF -> repeat

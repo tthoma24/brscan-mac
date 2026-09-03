@@ -202,7 +202,7 @@ A typical scan is: `ESC Q` (once per connection), then per scan
   status: the device simply stops sending. A client must use a read timeout to
   detect the stalled stream rather than blocking indefinitely.
 
-## Modes not yet captured
+## Mode coverage
 
 `CGRAY`, `GRAY64`, `TEXT`, `ERRDIF`, and `GRAY256` have all been observed on
 the wire and are implemented (see "Black & White, Error Diffusion, and True

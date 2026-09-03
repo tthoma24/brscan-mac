@@ -14,30 +14,28 @@ namespace brscan {
 // network blocks and calls these to turn each row's payload into decoded
 // pixel bytes.
 //
-// RLENGTH is the classic Apple/TIFF PackBits algorithm. This was reverse
-// engineered from two independent sources that agree exactly:
-//   1. reference/streams/modes_{text,errdif,gray256}_in.bin (this
-//      project's own capture): decoding every compressed row in the TEXT
-//      capture with the algorithm below produces exactly 434 bytes (the
-//      3472px-wide, 1-bit row width) for all 4913 rows; ERRDIF decodes
-//      4896 of its 4897 compressed rows to the same 434 bytes (the one
-//      exception is a single row with a corrupted length field on the
-//      wire -- a capture/hardware anomaly, not a decode error: see
-//      PROVENANCE.md and the issue #4 report for the byte-level detail).
-//   2. dmikushin/brscan (GPLv2; see PROVENANCE.md), whose
-//      tests/test_integration.c documents the exact control-byte
-//      semantics against Brother's own libbrscandec.so with worked
-//      examples (`WHITE_LINE_PACKBITS`, `mixed_pb`, `large_run`) that this
-//      file's control-byte encoding matches byte for byte.
+// RLENGTH is the classic Apple/TIFF PackBits algorithm. This was primarily
+// reverse engineered from this project's own capture
+// (reference/streams/modes_{text,errdif,gray256}_in.bin, git-ignored):
+// decoding every compressed row in the TEXT capture with the algorithm
+// below produces exactly 434 bytes (the 3472px-wide, 1-bit row width) for
+// all 4913 rows; ERRDIF decodes 4896 of its 4897 compressed rows to the
+// same 434 bytes (the one exception is a single row with a corrupted
+// length field on the wire -- a capture/hardware anomaly, not a decode
+// error: see PROVENANCE.md and the issue #4 report for the byte-level
+// detail). The control-byte roles this implies are corroborated by
+// `~/src/brscan`'s (`dmikushin/brscan`, GPLv2; see PROVENANCE.md)
+// `libbrscandec/brother_scandec.c`, `FUN_001063f3`'s `nInDataComp == 3`
+// branch.
 //
 // Control byte `c` (the first byte of a run):
 //   c in [0x00, 0x7f]: literal run. Copy the next (c + 1) bytes from the
 //     input verbatim.
 //   c == 0x80: no-op. Produces no output and consumes no further input
 //     byte. (Not exercised by any captured row in this project's
-//     fixtures, but documented as a no-op by dmikushin/brscan; a decoder
-//     that treated it as anything else would misparse a row that used
-//     it.)
+//     fixtures; see brother_scandec.c's `FUN_001063f3` for why this value
+//     is treated as a no-op rather than anything else -- a decoder that
+//     misparsed it would break on a row that used it.)
 //   c in [0x81, 0xff]: repeat run. The single next byte from the input is
 //     repeated (257 - c) times (2 to 128 repeats).
 

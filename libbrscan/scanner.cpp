@@ -286,7 +286,8 @@ Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
     if (header.type != kBlockTypeRaw && header.type != kBlockTypeRlength) {
       return Status::kProtocolError;
     }
-    if (header.width < 0) return Status::kProtocolError;
+    // No header.width < 0 guard here: it's built from two uint8_t bytes
+    // (see ParseBlockHeader in response.cpp), so it's always in [0, 65535].
 
     std::vector<uint8_t> payload;
     const Status s =

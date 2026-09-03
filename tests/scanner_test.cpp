@@ -334,6 +334,50 @@ TEST(RunScan, TrueGrayFlatbedRawFallbackRowsRoundTrip) {
   EXPECT_EQ(result.data, want);
 }
 
+TEST(RunScan, TrueGrayFlatbedCompressedRowsRoundTrip) {
+  // Companion to TrueGrayFlatbedRawFallbackRowsRoundTrip: this project's
+  // own True Gray capture happened to arrive entirely as raw (0x40) rows
+  // (see the issue #4 report), so the 0x42/PackBits decode path for an
+  // 8-bit-per-pixel row is only proven at the DecodeRlengthRow unit level
+  // and via the 1-bit (TEXT/ERRDIF) RunScan tests above. This test drives
+  // that same path end to end for GRAY256 with synthetic PackBits rows
+  // (literal, repeat, and a mixed literal+repeat row) so the assembly
+  // logic in ReadRlengthRows -- re-reading a block header per row -- is
+  // exercised for a compressed True Gray scan too, not just raw.
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  // Row 0: literal run of 4 bytes -> {0x10, 0x11, 0x12, 0x13}.
+  auto row0 = EncodeRlengthBlockHeader(0x42, 5);
+  const std::vector<uint8_t> row0_payload = {0x03, 0x10, 0x11, 0x12, 0x13};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  // Row 1: repeat run of 4 bytes -> {0x22, 0x22, 0x22, 0x22}.
+  auto row1 = EncodeRlengthBlockHeader(0x42, 2);
+  const std::vector<uint8_t> row1_payload = {0xFD, 0x22};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  // Row 2: literal run of 2 then repeat run of 2 -> {0x30, 0x31, 0x32, 0x32}.
+  auto row2 = EncodeRlengthBlockHeader(0x42, 5);
+  const std::vector<uint8_t> row2_payload = {0x01, 0x30, 0x31, 0xFF, 0x32};
+  row2.insert(row2.end(), row2_payload.begin(), row2_payload.end());
+  t.QueueRead(row2);
+
+  brscan::ScanResult result;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &result);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  EXPECT_EQ(result.format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(result.width, 4);
+  EXPECT_EQ(result.height, 3);
+  const std::vector<uint8_t> want = {0x10, 0x11, 0x12, 0x13,   // row 0
+                                      0x22, 0x22, 0x22, 0x22,   // row 1
+                                      0x30, 0x31, 0x32, 0x32};  // row 2
+  EXPECT_EQ(result.data, want);
+}
+
 TEST(RunScan, TruncatedRlengthPayloadIsErrorNotHang) {
   brscan::FakeTransport t;
   QueuePreamble(&t);
