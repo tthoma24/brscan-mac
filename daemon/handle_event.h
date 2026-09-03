@@ -47,22 +47,27 @@ std::string BuildOutputPath(const std::string& save_dir,
 // defense against a forged or corrupted notification, since an unknown
 // FUNC has no safe Params to scan with and its raw text must never reach
 // a file path unvalidated. Otherwise resolves `event.func` to Params via
-// ParamsForFunc(cfg, ...), runs RunScan over `transport`, writes the
-// result under cfg.save_dir via BuildOutputPath()/tools/scan_output.h's
-// WriteOutput() -- refusing to write (Status::kIoError) if the results
-// path, once resolved, does not actually land inside cfg.save_dir, as a
-// second independent check on top of BuildOutputPath()'s own
-// sanitization -- and dispatches PerformAction(). `transport` must
-// already be Transport::Connect()ed; this function neither connects nor
-// disconnects it (matching RunScan's own contract) so the caller
+// ParamsForFunc(cfg, ...), runs RunScan over `transport` (which, for the
+// document feeder, may return more than one page -- see
+// libbrscan/scanner.h), writes every page under cfg.save_dir via
+// BuildOutputPath()/tools/scan_output.h's WritePages() -- refusing to
+// write (Status::kIoError) if the base path, once resolved, does not
+// actually land inside cfg.save_dir, as a second independent check on top
+// of BuildOutputPath()'s own sanitization -- and dispatches
+// PerformAction() on page 1's path only (TODO(Task 1c.2): drive
+// PerformAction from the full multi-page/PDF output instead). `transport`
+// must already be Transport::Connect()ed; this function neither connects
+// nor disconnects it (matching RunScan's own contract) so the caller
 // controls the connection's lifetime.
 //
-// On success, sets `*saved_path` to the path written and returns whatever
+// On success, sets `*saved_path` to page 1's path and returns whatever
 // PerformAction() returned (Status::kOk today; see daemon/actions.h).
 // `*saved_path` is left untouched on failure. Returns RunScan's status
-// unchanged if the scan itself failed, or Status::kIoError if the scan
-// succeeded but the file could not be written (including the
-// save_dir-escape refusal above).
+// unchanged if the scan itself failed (including Status::kProtocolError
+// if RunScan reported success with zero pages -- not expected, but
+// guarded rather than assumed), or Status::kIoError if the scan succeeded
+// but a page could not be written (including the save_dir-escape refusal
+// above).
 //
 // This overload runs PerformAction()'s IMAGE/EMAIL external commands
 // through DefaultCommandRunner (see daemon/actions.h) -- i.e. this is the

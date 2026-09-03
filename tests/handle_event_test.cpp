@@ -47,6 +47,15 @@ std::vector<uint8_t> EncodeBlockHeader(uint16_t width) {
           static_cast<uint8_t>((width >> 8) & 0xff)};
 }
 
+// The 12-byte job-final terminator every single-page scan now ends with
+// (see reference/protocol-notes-adf-multipage.md and
+// tests/scanner_test.cpp's RunScan tests, which decode this same shape):
+// the 10-byte end-of-page marker (`82 07 00 <pidx> 00 84 00 00 00 00`)
+// followed by `80 80`.
+std::vector<uint8_t> EncodeJobFinalTerminator(uint8_t pidx) {
+  return {0x82, 0x07, 0x00, pidx, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80};
+}
+
 std::vector<uint8_t> MakeSyntheticJpeg(int width, int height) {
   std::vector<uint8_t> rgb(static_cast<size_t>(width) * height * 3, 128);
   tjhandle handle = tjInitCompress();
@@ -151,6 +160,7 @@ TEST_F(HandleButtonEventTest, FileFuncUsesFileParamsAndSavesJpeg) {
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   Config cfg = DefaultConfig();  // file_params: color, 300dpi, flatbed.
   cfg.save_dir = save_dir_;
@@ -191,6 +201,7 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
   const std::vector<uint8_t> raw(4 * 3, 0x42);
   payload.insert(payload.end(), raw.begin(), raw.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   Config cfg = DefaultConfig();
   // Give IMAGE its own settings, distinct from FILE's color/300dpi
@@ -289,6 +300,7 @@ TEST_F(HandleButtonEventTest, SanitizesPathTraversalInRegidAndStaysInsideSaveDir
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   Config cfg = DefaultConfig();
   cfg.save_dir = save_dir_;
@@ -332,6 +344,7 @@ TEST_F(HandleButtonEventTest, UnwritableSaveDirReturnsIoErrorNotCrash) {
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   ASSERT_EQ(::mkdir(save_dir_.c_str(), 0700), 0);
   ASSERT_EQ(::chmod(save_dir_.c_str(), 0000), 0);

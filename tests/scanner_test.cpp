@@ -160,6 +160,28 @@ void QueuePreamble(brscan::FakeTransport* t) {
   t->QueueTimeout();                                           // drain done
 }
 
+// The 10-byte end-of-page marker that follows every page's payload:
+// `82 07 00 <pidx> 00 84 00 00 00 00` (pidx is 1-based; see
+// reference/protocol-notes-adf-multipage.md and docs/PROTOCOL.md's
+// "Multi-page (ADF)" section). Whether a page is the job's last one is
+// decided by the 2 bytes that follow this marker, not by anything inside
+// it -- see EncodeJobFinalTerminator (this marker + `80 80`) below, and
+// the multi-page tests, which follow it with the next page's block header
+// instead.
+std::vector<uint8_t> EncodeEndOfPageMarker(uint8_t pidx) {
+  return {0x82, 0x07, 0x00, pidx, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00};
+}
+
+// The full 12-byte job-final terminator: EncodeEndOfPageMarker(pidx)
+// followed by `80 80`, meaning "no more pages." Every flatbed (and
+// single-page ADF) scan ends with this as the degenerate pidx=1 case.
+std::vector<uint8_t> EncodeJobFinalTerminator(uint8_t pidx) {
+  std::vector<uint8_t> out = EncodeEndOfPageMarker(pidx);
+  out.push_back(0x80);
+  out.push_back(0x80);
+  return out;
+}
+
 // True if `haystack` contains `needle` as a contiguous subsequence. Used to
 // assert which source-select command RunScan actually put on the wire.
 bool Contains(const std::vector<uint8_t>& haystack,
@@ -188,14 +210,16 @@ TEST(RunScan, ColorFlatbedRoundTrips) {
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, ColorParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
   ASSERT_EQ(status, brscan::Status::kOk);
-  EXPECT_EQ(result.format, brscan::PixelFormat::kRgb);
-  EXPECT_EQ(result.width, 16);
-  EXPECT_EQ(result.height, 8);
-  ASSERT_EQ(result.data, jpeg);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kRgb);
+  EXPECT_EQ(pages[0].width, 16);
+  EXPECT_EQ(pages[0].height, 8);
+  ASSERT_EQ(pages[0].data, jpeg);
 }
 
 // A JPEG payload spanning several network blocks: every block but the
@@ -223,14 +247,16 @@ TEST(RunScan, ColorFlatbedMultiBlockPayloadReassembles) {
     block.insert(block.end(), jpeg.begin() + offset, jpeg.begin() + offset + chunk_len);
     t.QueueRead(block);
   }
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, ColorParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
   ASSERT_EQ(status, brscan::Status::kOk);
-  EXPECT_EQ(result.format, brscan::PixelFormat::kRgb);
-  EXPECT_EQ(result.width, 300);
-  EXPECT_EQ(result.height, 300);
-  ASSERT_EQ(result.data, jpeg);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kRgb);
+  EXPECT_EQ(pages[0].width, 300);
+  EXPECT_EQ(pages[0].height, 300);
+  ASSERT_EQ(pages[0].data, jpeg);
 }
 
 // Same reassembly as ColorFlatbedMultiBlockPayloadReassembles, but with
@@ -258,14 +284,16 @@ TEST(RunScan, ColorFlatbedTwelveByteHeaderReassembles) {
     block.insert(block.end(), jpeg.begin() + offset, jpeg.begin() + offset + chunk_len);
     t.QueueRead(block);
   }
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, ColorParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
   ASSERT_EQ(status, brscan::Status::kOk);
-  EXPECT_EQ(result.format, brscan::PixelFormat::kRgb);
-  EXPECT_EQ(result.width, 300);
-  EXPECT_EQ(result.height, 300);
-  ASSERT_EQ(result.data, jpeg);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kRgb);
+  EXPECT_EQ(pages[0].width, 300);
+  EXPECT_EQ(pages[0].height, 300);
+  ASSERT_EQ(pages[0].data, jpeg);
 }
 
 TEST(RunScan, GrayFlatbedRoundTrips) {
@@ -280,14 +308,16 @@ TEST(RunScan, GrayFlatbedRoundTrips) {
   const std::vector<uint8_t> raw(4 * 3, 0x42);
   payload.insert(payload.end(), raw.begin(), raw.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, GrayParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, GrayParams(), &pages);
   ASSERT_EQ(status, brscan::Status::kOk);
-  EXPECT_EQ(result.format, brscan::PixelFormat::kGray);
-  EXPECT_EQ(result.width, 4);
-  EXPECT_EQ(result.height, 3);
-  EXPECT_EQ(result.data, raw);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  EXPECT_EQ(pages[0].height, 3);
+  EXPECT_EQ(pages[0].data, raw);
 }
 
 // --- RLENGTH modes (TEXT/ERRDIF -> kBitonal, GRAY256 -> kGray) ----------
@@ -309,15 +339,17 @@ TEST(RunScan, BlackWhiteFlatbedRoundTrips) {
   const std::vector<uint8_t> row1_payload = {0x01, 0xCC, 0xDD};
   row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
   t.QueueRead(row1);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, BlackWhiteParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
   ASSERT_EQ(status, brscan::Status::kOk);
-  EXPECT_EQ(result.format, brscan::PixelFormat::kBitonal);
-  EXPECT_EQ(result.width, 9);
-  EXPECT_EQ(result.height, 2);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kBitonal);
+  EXPECT_EQ(pages[0].width, 9);
+  EXPECT_EQ(pages[0].height, 2);
   const std::vector<uint8_t> want = {0xAA, 0xBB, 0xCC, 0xDD};
-  EXPECT_EQ(result.data, want);
+  EXPECT_EQ(pages[0].data, want);
 }
 
 TEST(RunScan, TrueGrayFlatbedRawFallbackRowsRoundTrip) {
@@ -340,16 +372,18 @@ TEST(RunScan, TrueGrayFlatbedRawFallbackRowsRoundTrip) {
     block.insert(block.end(), row.begin(), row.end());
     t.QueueRead(block);
   }
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, TrueGrayParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &pages);
   ASSERT_EQ(status, brscan::Status::kOk);
-  EXPECT_EQ(result.format, brscan::PixelFormat::kGray);
-  EXPECT_EQ(result.width, 4);
-  EXPECT_EQ(result.height, 3);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  EXPECT_EQ(pages[0].height, 3);
   std::vector<uint8_t> want;
   for (const auto& row : rows) want.insert(want.end(), row.begin(), row.end());
-  EXPECT_EQ(result.data, want);
+  EXPECT_EQ(pages[0].data, want);
 }
 
 TEST(RunScan, TrueGrayFlatbedCompressedRowsRoundTrip) {
@@ -383,17 +417,19 @@ TEST(RunScan, TrueGrayFlatbedCompressedRowsRoundTrip) {
   const std::vector<uint8_t> row2_payload = {0x01, 0x30, 0x31, 0xFF, 0x32};
   row2.insert(row2.end(), row2_payload.begin(), row2_payload.end());
   t.QueueRead(row2);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, TrueGrayParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &pages);
   ASSERT_EQ(status, brscan::Status::kOk);
-  EXPECT_EQ(result.format, brscan::PixelFormat::kGray);
-  EXPECT_EQ(result.width, 4);
-  EXPECT_EQ(result.height, 3);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  EXPECT_EQ(pages[0].height, 3);
   const std::vector<uint8_t> want = {0x10, 0x11, 0x12, 0x13,   // row 0
                                       0x22, 0x22, 0x22, 0x22,   // row 1
                                       0x30, 0x31, 0x32, 0x32};  // row 2
-  EXPECT_EQ(result.data, want);
+  EXPECT_EQ(pages[0].data, want);
 }
 
 TEST(RunScan, TruncatedRlengthPayloadIsErrorNotHang) {
@@ -407,9 +443,10 @@ TEST(RunScan, TruncatedRlengthPayloadIsErrorNotHang) {
   row0.push_back(0x01);
   t.QueueRead(row0);
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, BlackWhiteParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
   EXPECT_NE(status, brscan::Status::kOk);
+  EXPECT_TRUE(pages.empty());
 }
 
 TEST(RunScan, RlengthRowDecodingToWrongWidthIsError) {
@@ -426,18 +463,20 @@ TEST(RunScan, RlengthRowDecodingToWrongWidthIsError) {
   row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
   t.QueueRead(row0);
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, BlackWhiteParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
   EXPECT_EQ(status, brscan::Status::kProtocolError);
+  EXPECT_TRUE(pages.empty());
 }
 
 TEST(RunScan, BusyGreetingReportsBusy) {
   brscan::FakeTransport t;
   t.QueueRead(std::string("-NG 401\r\n"));
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, ColorParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
   EXPECT_EQ(status, brscan::Status::kBusy);
+  EXPECT_TRUE(pages.empty());
 }
 
 TEST(RunScan, AdfSourceSelectNoAckReportsNoPaper) {
@@ -451,9 +490,10 @@ TEST(RunScan, AdfSourceSelectNoAckReportsNoPaper) {
   auto params = ColorParams();
   params.source = brscan::Source::kAdf;
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, params, &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
   EXPECT_EQ(status, brscan::Status::kNoPaper);
+  EXPECT_TRUE(pages.empty());
 }
 
 TEST(RunScan, AdfSelectsFeederWithEscDNotFlatbed) {
@@ -471,12 +511,13 @@ TEST(RunScan, AdfSelectsFeederWithEscDNotFlatbed) {
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
   t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
 
   auto params = ColorParams();
   params.source = brscan::Source::kAdf;
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, params, &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
   ASSERT_EQ(status, brscan::Status::kOk);
 
   // 0x1b 0x44 = ESC D (ADF select); 0x1b 0x53 = ESC S (flatbed select).
@@ -501,9 +542,10 @@ TEST(RunScan, TruncatedColorPayloadIsErrorNotHang) {
   payload.insert(payload.end(), partial_jpeg.begin(), partial_jpeg.end());
   t.QueueRead(payload);
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, ColorParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
   EXPECT_NE(status, brscan::Status::kOk);
+  EXPECT_TRUE(pages.empty());
 }
 
 TEST(RunScan, TruncatedGrayPayloadIsErrorNotHang) {
@@ -518,9 +560,178 @@ TEST(RunScan, TruncatedGrayPayloadIsErrorNotHang) {
   payload.insert(payload.end(), short_raw.begin(), short_raw.end());
   t.QueueRead(payload);
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(t, GrayParams(), &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, GrayParams(), &pages);
   EXPECT_NE(status, brscan::Status::kOk);
+  EXPECT_TRUE(pages.empty());
+}
+
+// --- Multi-page (ADF) -----------------------------------------------------
+
+// A 3-page synthetic ADF color scan: each page is its own independent
+// baseline JPEG, separated by the 10-byte end-of-page marker (see
+// EncodeEndOfPageMarker) whose trailing 2 bytes -- the next page's `64 07`
+// block header -- tell RunScan's page loop to keep going rather than stop.
+// Mirrors reference/protocol-notes-adf-multipage.md's decoded framing.
+TEST(RunScan, ColorAdfMultiPageReturnsAllPages) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC D ADF ack
+  t.QueueTimeout();                               // drain done
+  // The ADF tell in a real offer is flag=1, ymax=0 (the feeder can't know
+  // page length up front; see protocol-notes-adf-multipage.md). RunScan's
+  // color path never reads exec_params.area, so an explicit area below
+  // sidesteps ymax=0 rather than exercising the "request the offer's full
+  // area" branch, which isn't this test's concern.
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  const auto jpeg1 = MakeSyntheticJpeg(16, 8);
+  const auto jpeg2 = MakeSyntheticJpeg(16, 8);
+  const auto jpeg3 = MakeSyntheticJpeg(16, 8);
+
+  auto block1 = EncodeBlockHeader(static_cast<uint16_t>(jpeg1.size()));
+  block1.insert(block1.end(), jpeg1.begin(), jpeg1.end());
+  t.QueueRead(block1);
+  t.QueueRead(EncodeEndOfPageMarker(1));  // tail (next 2 bytes): `64 07`.
+
+  auto block2 = EncodeBlockHeader(static_cast<uint16_t>(jpeg2.size()));
+  block2.insert(block2.end(), jpeg2.begin(), jpeg2.end());
+  t.QueueRead(block2);
+  t.QueueRead(EncodeEndOfPageMarker(2));  // tail (next 2 bytes): `64 07`.
+
+  auto block3 = EncodeBlockHeader(static_cast<uint16_t>(jpeg3.size()));
+  block3.insert(block3.end(), jpeg3.begin(), jpeg3.end());
+  t.QueueRead(block3);
+  t.QueueRead(EncodeJobFinalTerminator(3));  // tail: `80 80`, job done.
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 3u);
+  for (const auto& page : pages) {
+    EXPECT_EQ(page.format, brscan::PixelFormat::kRgb);
+    EXPECT_EQ(page.width, 16);
+    EXPECT_EQ(page.height, 8);
+  }
+  EXPECT_EQ(pages[0].data, jpeg1);
+  EXPECT_EQ(pages[1].data, jpeg2);
+  EXPECT_EQ(pages[2].data, jpeg3);
+}
+
+// A 2-page synthetic ADF gray (GRAY64/C=NONE) scan: each page is a raw,
+// unchunked payload (see ReadRawGray), separated by the same 10-byte
+// marker as the color case -- the marker framing is payload-type-
+// independent (docs/PROTOCOL.md, "Multi-page (ADF)"). Gray/RLENGTH
+// multi-page ADF framing is not in this project's own capture (only
+// color/JPEG is -- see PROVENANCE.md), so this exercises the loop against
+// a synthetic stream built to the same documented framing, not a
+// hardware-confirmed one.
+TEST(RunScan, GrayAdfMultiPageReturnsAllPages) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  auto block1 = EncodeBlockHeader(4);
+  const std::vector<uint8_t> raw1(4 * 3, 0x11);
+  block1.insert(block1.end(), raw1.begin(), raw1.end());
+  t.QueueRead(block1);
+  t.QueueRead(EncodeEndOfPageMarker(1));
+
+  auto block2 = EncodeBlockHeader(4);
+  const std::vector<uint8_t> raw2(4 * 3, 0x22);
+  block2.insert(block2.end(), raw2.begin(), raw2.end());
+  t.QueueRead(block2);
+  t.QueueRead(EncodeJobFinalTerminator(2));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, GrayParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  for (const auto& page : pages) {
+    EXPECT_EQ(page.format, brscan::PixelFormat::kGray);
+    EXPECT_EQ(page.width, 4);
+    EXPECT_EQ(page.height, 3);
+  }
+  EXPECT_EQ(pages[0].data, raw1);
+  EXPECT_EQ(pages[1].data, raw2);
+}
+
+// A 2-page synthetic ADF Black & White (TEXT/C=RLENGTH) scan: each page's
+// rows are read the same way as the single-page case
+// (BlackWhiteFlatbedRoundTrips), with the 10-byte marker between the last
+// row of page 1 and the first row header of page 2. Same capture caveat as
+// GrayAdfMultiPageReturnsAllPages: synthetic, per the documented framing,
+// not a hardware-confirmed RLENGTH multi-page capture.
+TEST(RunScan, BlackWhiteAdfMultiPageReturnsAllPages) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,2,"));
+
+  // Page 1: rows {0xAA, 0xBB} and {0xCC, 0xDD}, each a 2-byte literal run.
+  auto p1row0 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> p1row0_payload = {0x01, 0xAA, 0xBB};
+  p1row0.insert(p1row0.end(), p1row0_payload.begin(), p1row0_payload.end());
+  t.QueueRead(p1row0);
+
+  auto p1row1 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> p1row1_payload = {0x01, 0xCC, 0xDD};
+  p1row1.insert(p1row1.end(), p1row1_payload.begin(), p1row1_payload.end());
+  t.QueueRead(p1row1);
+  t.QueueRead(EncodeEndOfPageMarker(1));
+
+  // Page 2: rows {0x11, 0x22} and {0x33, 0x44}.
+  auto p2row0 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> p2row0_payload = {0x01, 0x11, 0x22};
+  p2row0.insert(p2row0.end(), p2row0_payload.begin(), p2row0_payload.end());
+  t.QueueRead(p2row0);
+
+  auto p2row1 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> p2row1_payload = {0x01, 0x33, 0x44};
+  p2row1.insert(p2row1.end(), p2row1_payload.begin(), p2row1_payload.end());
+  t.QueueRead(p2row1);
+  t.QueueRead(EncodeJobFinalTerminator(2));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  for (const auto& page : pages) {
+    EXPECT_EQ(page.format, brscan::PixelFormat::kBitonal);
+    EXPECT_EQ(page.width, 9);
+    EXPECT_EQ(page.height, 2);
+  }
+  const std::vector<uint8_t> want1 = {0xAA, 0xBB, 0xCC, 0xDD};
+  const std::vector<uint8_t> want2 = {0x11, 0x22, 0x33, 0x44};
+  EXPECT_EQ(pages[0].data, want1);
+  EXPECT_EQ(pages[1].data, want2);
+}
+
+// A malformed end-of-page marker (byte[0] isn't the 0x82 anchor) must
+// surface as a protocol error, not a hang or a desync that misreads
+// whatever bytes follow as a bogus next page.
+TEST(RunScan, MalformedEndOfPageMarkerIsProtocolError) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,3460,427,5052,"));
+
+  const auto jpeg = MakeSyntheticJpeg(16, 8);
+  auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
+  payload.insert(payload.end(), jpeg.begin(), jpeg.end());
+  t.QueueRead(payload);
+
+  // Same shape as EncodeEndOfPageMarker(1) except byte[0] is 0x00, not the
+  // required 0x82 anchor.
+  t.QueueRead(std::vector<uint8_t>{0x00, 0x07, 0x00, 0x01, 0x00, 0x84, 0x00,
+                                    0x00, 0x00, 0x00});
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
+  EXPECT_EQ(status, brscan::Status::kProtocolError);
+  EXPECT_TRUE(pages.empty());
 }
 
 // Live, opt-in: connects to a real device and runs a small color flatbed
@@ -543,15 +754,16 @@ TEST(RunScanLive, ColorFlatbedScanAtLowResolution) {
   // flatbed at even this low resolution.
   params.area = brscan::Area{0, 0, 200, 200};
 
-  brscan::ScanResult result;
-  const auto status = brscan::RunScan(transport, params, &result);
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(transport, params, &pages);
   transport.Disconnect();
 
   ASSERT_EQ(status, brscan::Status::kOk);
-  EXPECT_EQ(result.format, brscan::PixelFormat::kRgb);
-  EXPECT_GT(result.width, 0);
-  EXPECT_GT(result.height, 0);
-  ASSERT_GE(result.data.size(), 2u);
-  EXPECT_EQ(result.data[0], 0xff);
-  EXPECT_EQ(result.data[1], 0xd8);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kRgb);
+  EXPECT_GT(pages[0].width, 0);
+  EXPECT_GT(pages[0].height, 0);
+  ASSERT_GE(pages[0].data.size(), 2u);
+  EXPECT_EQ(pages[0].data[0], 0xff);
+  EXPECT_EQ(pages[0].data[1], 0xd8);
 }

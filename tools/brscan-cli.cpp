@@ -9,6 +9,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "brscan/scanner.h"
 #include "brscan/transport_tcp.h"
@@ -192,8 +193,8 @@ int main(int argc, char** argv) {
                : brscan::cli::ExitCodeFor(connect_status);
   }
 
-  brscan::ScanResult result;
-  const brscan::Status scan_status = brscan::RunScan(transport, params, &result);
+  std::vector<brscan::ScanResult> pages;
+  const brscan::Status scan_status = brscan::RunScan(transport, params, &pages);
   transport.Disconnect();
 
   if (scan_status != brscan::Status::kOk) {
@@ -201,9 +202,24 @@ int main(int argc, char** argv) {
     return brscan::cli::ExitCodeFor(scan_status);
   }
 
-  if (!brscan::cli::WriteOutput(result, args.output)) return 1;
+  if (!brscan::cli::WritePages(pages, args.output)) return 1;
 
-  std::cout << "Wrote " << args.output << " (" << result.width << "x"
-            << result.height << ")\n";
+  if (pages.size() == 1) {
+    std::cout << "Wrote " << args.output << " (1 page, " << pages[0].width
+               << "x" << pages[0].height << ")\n";
+  } else {
+    // Mirror WritePages' own numbering (see scan_output.cpp's
+    // NumberedPagePath) just to name the first file in this message; the
+    // page count above is the authoritative "how many" answer.
+    const size_t dot = args.output.find_last_of('.');
+    const size_t slash = args.output.find_last_of('/');
+    const bool has_ext = dot != std::string::npos &&
+                          (slash == std::string::npos || dot > slash);
+    const std::string first_path =
+        has_ext ? args.output.substr(0, dot) + "-001" + args.output.substr(dot)
+                : args.output + "-001";
+    std::cout << "Wrote " << pages.size() << " pages to " << first_path
+               << " ...\n";
+  }
   return 0;
 }

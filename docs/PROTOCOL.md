@@ -187,6 +187,52 @@ A typical scan is: `ESC Q` (once per connection), then per scan
    header are not decoded by this codebase; see "Cancellation" below for how
    a cancelled scan is detected instead (a read timeout, not a status byte).
 
+## Multi-page (ADF)
+
+A single `ESC X` on the document feeder makes the device feed and stream
+**every** page in the stack over the same connection, not just one: `ESC Q`,
+source select, `ESC I`, and `ESC X` all run once per job, and the block/
+payload readout that follows loops until the device signals the job is
+done. This applies to a simplex feed (pages 1..N in order) and a duplex feed
+(front/back pages, still delivered in order) alike; a flatbed or single-
+sheet feeder scan is just the one-page degenerate case of the same framing.
+
+Each page is an independent payload: for color, its own complete baseline
+JPEG (own JFIF/DQT/SOF/DHT/EOI), chunked exactly like a single flatbed
+scan's payload (see "Image data" above). After a page's payload comes a
+10-byte end-of-page marker:
+
+```
+82 07 00 <pidx> 00 84 00 00 00 00
+```
+
+`pidx` is the 1-based index of the page that just ended. The 2 bytes
+immediately following this marker decide what comes next:
+
+- `80 80`: the job is done. Together with the marker above this forms the
+  12-byte job-final terminator, `82 07 00 <pidx> 00 84 00 00 00 00 80 80`.
+  A single-page (flatbed or one-sheet ADF) scan is simply this terminator
+  with `pidx = 1`, following the one page it sent -- which is why a
+  single-page reader that stops right there already works.
+- Anything else: it's the next page's block header (`64 07` for color,
+  `40 07`/`42 07` for the raw-gray/RLENGTH modes -- see "Image data" and
+  "Row block framing" above), not a new marker. A reader must not consume
+  or reinterpret these bytes as part of the marker; it must go straight
+  back to parsing a block header with them still unread.
+
+A reader must not route the 10-byte marker through the same header parser
+that decodes `64`/`40`/`42`-type payload blocks: doing so consumes the 2
+bytes right after the marker as part of a (bogus) 12/13-byte header,
+desynchronizing the rest of the stream. Read the marker as a fixed 10-byte
+count, then peek (without consuming) the next 2 bytes to decide whether to
+stop or loop back for another page.
+
+Only color/JPEG multi-page ADF framing has been confirmed against a real
+capture (see PROVENANCE.md); the gray and RLENGTH (Black & White/Error
+Diffusion/True Gray) modes are expected to use the same marker, since it's
+block framing rather than anything payload-type-specific, but that has not
+been independently verified on the wire.
+
 ## Resolution and size
 
 - Host-facing resolutions observed: 100, 150, 200, 300, 400, 600, 1200 dpi.

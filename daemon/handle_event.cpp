@@ -6,6 +6,7 @@
 #include <iostream>
 #include <sstream>
 #include <system_error>
+#include <vector>
 
 #include "actions.h"
 #include "brscan/scanner.h"
@@ -134,17 +135,26 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
                                                                        : "flatbed")
              << ")\n";
 
-  brscan::ScanResult result;
-  const Status scan_status = brscan::RunScan(transport, params, &result);
+  std::vector<brscan::ScanResult> pages;
+  const Status scan_status = brscan::RunScan(transport, params, &pages);
   if (scan_status != Status::kOk) {
     std::cerr << "[handle_event] FUNC=" << event.func
                << ": scan failed: "
                << brscan::cli::DescribeFailure(scan_status) << "\n";
     return scan_status;
   }
-  std::cout << "[handle_event] FUNC=" << event.func
-             << ": scan complete (" << result.width << "x" << result.height
-             << ")\n";
+  // RunScan only returns kOk after pushing at least one page (see
+  // scanner.cpp's page loop); an empty vector here would mean this
+  // invariant broke somewhere upstream. Guard it explicitly rather than
+  // indexing pages[0] below on a vector that might be empty.
+  if (pages.empty()) {
+    std::cerr << "[handle_event] FUNC=" << event.func
+               << ": scan reported success with no pages\n";
+    return Status::kProtocolError;
+  }
+  std::cout << "[handle_event] FUNC=" << event.func << ": scan complete ("
+             << pages.size() << (pages.size() == 1 ? " page, " : " pages, ")
+             << pages[0].width << "x" << pages[0].height << ")\n";
 
   // Best-effort: if save_dir already exists (the common case after the
   // first scan) this is a no-op; if it can't be created, WriteOutput below
@@ -152,7 +162,8 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   std::error_code ec;
   std::filesystem::create_directories(cfg.save_dir, ec);
 
-  const std::string path = BuildOutputPath(cfg.save_dir, event, result.format);
+  const std::string path =
+      BuildOutputPath(cfg.save_dir, event, pages[0].format);
 
   // Second, independent check on top of BuildOutputPath()'s own
   // sanitization (see its doc comment in handle_event.h): confirm the
@@ -164,13 +175,20 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     return Status::kIoError;
   }
 
-  if (!brscan::cli::WriteOutput(result, path)) {
+  // Save every page (so FILE keeps the whole stack), numbered per
+  // WritePages when there's more than one.
+  if (!brscan::cli::WritePages(pages, path)) {
     std::cerr << "[handle_event] FUNC=" << event.func
                << ": failed to write '" << path << "'\n";
     return Status::kIoError;
   }
   std::cout << "[handle_event] FUNC=" << event.func << ": wrote " << path
+             << (pages.size() > 1 ? " (and further numbered pages)" : "")
              << "\n";
+
+  // TODO(Task 1c.2): multi-page output/actions (PDF/TIFF combine). For now
+  // the FUNC action (IMAGE/OCR/EMAIL) runs on page 1's path only, even
+  // though every page was just saved to disk above.
   *saved_path = path;
 
   return PerformAction(event.func, path, cfg, runner);

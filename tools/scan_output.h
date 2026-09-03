@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "brscan/scanner.h"
 #include "brscan/types.h"
@@ -24,5 +25,16 @@ int ExitCodeFor(brscan::Status status);
 // `result.data` is written out unchanged). Returns false (after printing
 // an error) if the file can't be opened for writing.
 bool WriteOutput(const brscan::ScanResult& result, const std::string& path);
+
+// Writes every page in `pages` to disk, per WriteOutput's format rules for
+// each page's PixelFormat. A single-page vector writes exactly `path`,
+// unchanged. A multi-page vector writes one numbered file per page instead:
+// `path` with `-<NNN>` (1-based, zero-padded to 3 digits) inserted before
+// its extension -- e.g. `scan.jpg` becomes `scan-001.jpg`, `scan-002.jpg`,
+// and so on. Returns false (after WriteOutput has printed an error for the
+// page that failed) if any page fails to write; pages before the failure
+// are still left on disk.
+bool WritePages(const std::vector<brscan::ScanResult>& pages,
+                 const std::string& path);
 
 }  // namespace brscan::cli
