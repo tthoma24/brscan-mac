@@ -47,10 +47,10 @@ dns-sd -B _scanner._tcp
 ```
 
 This lists the service names of scanners on your network (for example,
-`BRW0071CC7B35BE`). Resolve one to a hostname with:
+`BRW00AABBCCDDEE`). Resolve one to a hostname with:
 
 ```bash
-dns-sd -G v4 BRW0071CC7B35BE.local
+dns-sd -G v4 BRW00AABBCCDDEE.local
 ```
 
 You can pass either the `.local` hostname or the resolved IP address to
@@ -61,27 +61,27 @@ You can pass either the `.local` hostname or the resolved IP address to
 Scan a color image at 300 dpi from the flatbed to a JPEG file:
 
 ```bash
-build/brscan-cli --host BRW0071CC7B35BE.local --output scan.jpg
+build/brscan-cli --host BRW00AABBCCDDEE.local --output scan.jpg
 ```
 
 Scan in grayscale at a lower resolution:
 
 ```bash
-build/brscan-cli --host BRW0071CC7B35BE.local --mode gray --resolution 100 \
+build/brscan-cli --host BRW00AABBCCDDEE.local --mode gray --resolution 100 \
   --output scan.pgm
 ```
 
 Scan from the document feeder instead of the flatbed:
 
 ```bash
-build/brscan-cli --host BRW0071CC7B35BE.local --source adf --output scan.jpg
+build/brscan-cli --host BRW00AABBCCDDEE.local --source adf --output scan.jpg
 ```
 
 Scan a specific region instead of the full page, in pixels at the scan
 resolution:
 
 ```bash
-build/brscan-cli --host BRW0071CC7B35BE.local --area 0,0,1200,1600 \
+build/brscan-cli --host BRW00AABBCCDDEE.local --area 0,0,1200,1600 \
   --output scan.jpg
 ```
 
@@ -90,6 +90,16 @@ determines the output file format: `color` writes a JPEG, `gray` writes a
 binary PGM. `brscan-cli` exits with a non-zero status and a message on
 `stderr` if the scan fails -- for example, if the scanner is busy or the
 document feeder is empty.
+
+## Scanning from the printer's Scan button
+
+`brscan-scand` is a background agent that lets the printer's physical **Scan**
+button send a scan to this Mac. Press Scan on the device, pick this Mac and a
+destination -- File, Image, OCR, or E-mail -- and the daemon pulls the scan and
+handles it: saving it, opening it, producing a searchable PDF, or attaching it
+to a new Mail message. See [docs/BUTTON.md](docs/BUTTON.md) for setup, and
+[config/brscan-scand.conf.example](config/brscan-scand.conf.example) for the
+configuration options.
 
 ## Trademark and affiliation
 

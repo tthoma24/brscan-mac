@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  brscan-scand LaunchAgent.
+
+  This is a LaunchAgent, not a LaunchDaemon: it runs inside your GUI login
+  session, which the IMAGE (open), EMAIL (Mail.app), and OCR actions need.
+  This mirrors how Brother's own scan-key helper is installed.
+
+  Install one of two ways:
+    - Per user (no admin):  ~/Library/LaunchAgents/com.brscan.scand.plist
+    - All users (admin):    /Library/LaunchAgents/com.brscan.scand.plist
+
+  Before installing, set the first ProgramArguments entry below to wherever
+  you put the brscan-scand binary. launchd does not expand ~ in these paths,
+  so they must be absolute. The daemon reads ~/.config/brscan-scand.conf by
+  default; to point it elsewhere, add "--config" and an absolute path as two
+  more <string> entries.
+
+  See docs/BUTTON.md for the full install and load steps.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.brscan.scand</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/brscan-scand</string>
+    </array>
+
+    <!-- Start at login and restart if it ever exits. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- A lightweight, mostly-idle background agent. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Logs. The path must be absolute (no ~). For an all-users install,
+         give each user a distinct absolute path instead of this shared one,
+         so two users' agents don't write the same file. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/brscan-scand.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/brscan-scand.log</string>
+</dict>
+</plist>

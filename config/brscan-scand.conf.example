@@ -1,0 +1,63 @@
+# brscan-scand configuration.
+#
+# Copy this file to ~/.config/brscan-scand.conf and edit it, or pass a path
+# with `brscan-scand --config PATH`. Lines are `key = value`; blank lines and
+# lines starting with `#` are ignored. Whitespace around the key and value is
+# trimmed. An unrecognized key, or a value that doesn't parse, is ignored and
+# leaves that setting at its default, so a partial config still starts the
+# daemon.
+
+# --- Required ---------------------------------------------------------------
+
+# The printer's Bonjour hostname or IP address. Required: there is no default
+# (every device's name is specific to that device), and the daemon refuses to
+# start until you set it. Find yours with:
+#   dns-sd -B _scanner._tcp
+# which lists names like BRW00AABBCCDDEE; append `.local` for the hostname.
+# Uncomment the next line and set it to your printer:
+#printer_host = BRWxxxxxxxxxxxx.local
+
+# --- General ----------------------------------------------------------------
+
+# The name this Mac shows under in the printer's Scan menu. Defaults to this
+# machine's host name. A `"` or `;` in the name is rejected at registration
+# (the wire format has no way to escape them) and a generic fallback is used.
+# display_name = Living Room Mac
+
+# Where FILE-destination scans are saved. The directory is created if it
+# doesn't exist. A leading ~ is expanded. Defaults to ~/Scans.
+# save_dir = ~/Scans
+
+# --- Per-destination scan settings ------------------------------------------
+#
+# Each of the four destinations (file, image, ocr, email) takes its own
+# mode/dpi/source. Any you omit default to color, 300 dpi, flatbed.
+#
+#   <dest>.mode     color | gray | bw | errdiff | truegray
+#   <dest>.dpi      a positive integer; sets both horizontal and vertical dpi
+#   <dest>.source   flatbed | adf | adf-duplex
+
+# file.mode = color
+# file.dpi = 300
+# file.source = flatbed
+
+# image.mode = color
+# image.dpi = 300
+
+# ocr.mode = gray
+# ocr.dpi = 300
+# ocr.source = adf
+
+# email.mode = gray
+# email.dpi = 200
+
+# --- Destination action settings --------------------------------------------
+
+# IMAGE destination: the app that opens the saved scan, as `open -a <app>`.
+# Leave unset to open in the file's default app for its type.
+# image_app = Preview
+
+# EMAIL destination: the address the composed message is pre-addressed to.
+# Leave unset to leave the To: field blank. The message is opened for you to
+# review and is never sent automatically.
+# email_to = someone@example.com
