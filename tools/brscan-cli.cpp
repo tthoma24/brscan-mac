@@ -14,6 +14,7 @@
 #include "brscan/scanner.h"
 #include "brscan/transport_tcp.h"
 #include "brscan/types.h"
+#include "output_writer.h"
 #include "scan_output.h"
 
 namespace {
@@ -38,10 +39,23 @@ void PrintUsage(const char* argv0, std::ostream& out) {
       << "  --source SOURCE     flatbed | adf | adf-duplex (default flatbed).\n"
       << "  --area X0,Y0,X1,Y1  Scan area in pixels at the scan resolution\n"
       << "                      (default: the full area the device offers).\n"
+      << "  --format FORMAT     pdf | tiff | jpeg | png | native\n"
+      << "                      (default native).\n"
+      << "  --tiff-compression C\n"
+      << "                      lzw | g3 | g4 (default lzw; only affects\n"
+      << "                      --format tiff).\n"
+      << "  --separate N        Start a new document every N pages\n"
+      << "                      (--format pdf/tiff only; default: one\n"
+      << "                      combined document for all pages).\n"
       << "\n"
-      << "Output format follows --mode: color writes a JPEG; gray and\n"
-      << "truegray write a binary PGM (P5); bw and errdiff (1-bit modes)\n"
-      << "write a binary PBM (P4).\n";
+      << "With --format native (the default), output follows --mode: color\n"
+      << "writes a JPEG; gray and truegray write a binary PGM (P5); bw and\n"
+      << "errdiff (1-bit modes) write a binary PBM (P4) -- exactly today's\n"
+      << "behavior, one file per page, numbered when there's more than one.\n"
+      << "Any other --format writes the requested container/image type\n"
+      << "instead, replacing --output's extension. --format pdf never\n"
+      << "produces a searchable PDF from this CLI (that's a brscan-scand\n"
+      << "destination setting); it's always a plain image PDF.\n";
 }
 
 struct Args {
@@ -53,6 +67,7 @@ struct Args {
   bool duplex = false;
   std::optional<brscan::Area> area;
   std::string output;
+  brscan::scand::OutputSettings output_settings;
   bool help = false;
 };
 
@@ -142,6 +157,49 @@ bool ParseArgs(int argc, char** argv, Args* out) {
       const auto v = next_value(i);
       if (!v) { std::cerr << "--output requires a value\n"; return false; }
       out->output = *v;
+    } else if (flag == "--format") {
+      const auto v = next_value(i);
+      if (!v) { std::cerr << "--format requires a value\n"; return false; }
+      if (*v == "native") {
+        out->output_settings.format = brscan::scand::OutputFormat::kNative;
+      } else if (*v == "pdf") {
+        out->output_settings.format = brscan::scand::OutputFormat::kPdf;
+      } else if (*v == "tiff") {
+        out->output_settings.format = brscan::scand::OutputFormat::kTiff;
+      } else if (*v == "jpeg") {
+        out->output_settings.format = brscan::scand::OutputFormat::kJpeg;
+      } else if (*v == "png") {
+        out->output_settings.format = brscan::scand::OutputFormat::kPng;
+      } else {
+        std::cerr << "--format must be one of 'pdf', 'tiff', 'jpeg', "
+                      "'png', or 'native', got '"
+                   << *v << "'\n";
+        return false;
+      }
+    } else if (flag == "--tiff-compression") {
+      const auto v = next_value(i);
+      if (!v) { std::cerr << "--tiff-compression requires a value\n"; return false; }
+      if (*v == "lzw") {
+        out->output_settings.tiff_compression = brscan::scand::TiffCompression::kLzw;
+      } else if (*v == "g3") {
+        out->output_settings.tiff_compression = brscan::scand::TiffCompression::kG3;
+      } else if (*v == "g4") {
+        out->output_settings.tiff_compression = brscan::scand::TiffCompression::kG4;
+      } else {
+        std::cerr << "--tiff-compression must be one of 'lzw', 'g3', or 'g4', got '"
+                   << *v << "'\n";
+        return false;
+      }
+    } else if (flag == "--separate") {
+      const auto v = next_value(i);
+      if (!v) { std::cerr << "--separate requires a value\n"; return false; }
+      const int n = std::atoi(v->c_str());
+      if (n <= 0) {
+        std::cerr << "--separate must be a positive integer, got '" << *v << "'\n";
+        return false;
+      }
+      out->output_settings.separation = brscan::scand::OutputSeparation::kEveryN;
+      out->output_settings.separate_n = n;
     } else if (flag == "--help" || flag == "-h") {
       out->help = true;
       return true;
@@ -202,20 +260,22 @@ int main(int argc, char** argv) {
     return brscan::cli::ExitCodeFor(scan_status);
   }
 
-  if (!brscan::cli::WritePages(pages, args.output)) return 1;
+  std::vector<std::string> written;
+  const brscan::Status write_status = brscan::scand::WriteConfiguredOutput(
+      pages, args.output_settings, args.output, &written);
+  if (write_status != brscan::Status::kOk || written.empty()) {
+    std::cerr << "Failed to write " << args.output << "\n";
+    return 1;
+  }
 
   const int total_pages = static_cast<int>(pages.size());
-  if (total_pages == 1) {
-    std::cout << "Wrote " << args.output << " (1 page, " << pages[0].width
+  if (written.size() == 1) {
+    std::cout << "Wrote " << written.front() << " (" << total_pages
+               << (total_pages == 1 ? " page, " : " pages, ") << pages[0].width
                << "x" << pages[0].height << ")\n";
   } else {
-    // brscan::cli::PagePath mirrors WritePages' own numbering, so this
-    // names the file WritePages actually wrote for page 1, not a
-    // hand-reconstructed guess at its name.
-    const std::string first_path =
-        brscan::cli::PagePath(args.output, 1, total_pages);
-    std::cout << "Wrote " << total_pages << " pages to " << first_path
-               << " ...\n";
+    std::cout << "Wrote " << total_pages << " pages to " << written.size()
+               << " files, starting at " << written.front() << " ...\n";
   }
   return 0;
 }

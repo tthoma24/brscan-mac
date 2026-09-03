@@ -3,12 +3,8 @@
 #include <spawn.h>
 #include <sys/wait.h>
 
-#include <filesystem>
 #include <iostream>
 #include <sstream>
-#include <system_error>
-
-#include "action_ocr.h"
 
 extern "C" char** environ;
 
@@ -35,23 +31,24 @@ std::string EscapeForAppleScriptString(const std::string& s) {
 }
 
 // Builds the AppleScript run by the EMAIL action: a new outgoing Mail.app
-// message with `saved_path` attached, addressed to `cfg.email_to` if
-// set, brought to the front -- and, deliberately, never sent. There is
-// no `send` (or `save`) statement anywhere in this script; PerformAction
-// for EMAIL leaves the message open for the user to review before they
-// send it themselves.
-std::string BuildEmailAppleScript(const std::string& saved_path,
+// message with every path in `attachments` attached (in order), addressed
+// to `cfg.email_to` if set, brought to the front -- and, deliberately,
+// never sent. There is no `send` (or `save`) statement anywhere in this
+// script; PerformAction for EMAIL leaves the message open for the user to
+// review before they send it themselves.
+std::string BuildEmailAppleScript(const std::vector<std::string>& attachments,
                                    const Config& cfg) {
-  const std::string escaped_path = EscapeForAppleScriptString(saved_path);
-
   std::ostringstream script;
   script << "tell application \"Mail\"\n"
          << "  set newMessage to make new outgoing message with properties "
             "{subject:\"Scanned Document\", visible:true}\n"
-         << "  tell newMessage\n"
-         << "    make new attachment with properties {file name:POSIX "
-            "file \""
-         << escaped_path << "\"} at after the last paragraph\n";
+         << "  tell newMessage\n";
+  for (const std::string& path : attachments) {
+    const std::string escaped_path = EscapeForAppleScriptString(path);
+    script << "    make new attachment with properties {file name:POSIX "
+              "file \""
+           << escaped_path << "\"} at after the last paragraph\n";
+  }
   if (!cfg.email_to.empty()) {
     const std::string escaped_to = EscapeForAppleScriptString(cfg.email_to);
     script << "    make new to recipient at end of to recipients with "
@@ -85,51 +82,20 @@ Status PerformImageAction(const std::string& saved_path, const Config& cfg,
   return Status::kOk;
 }
 
-Status PerformEmailAction(const std::string& saved_path, const Config& cfg,
-                           const CommandRunner& runner) {
-  const std::string script = BuildEmailAppleScript(saved_path, cfg);
+Status PerformEmailAction(const std::vector<std::string>& written,
+                           const Config& cfg, const CommandRunner& runner) {
+  const std::string script = BuildEmailAppleScript(written, cfg);
   const std::vector<std::string> argv = {"/usr/bin/osascript", "-e", script};
 
   const int rc = runner(argv);
   if (rc != 0) {
     std::cerr << "[actions] EMAIL: '/usr/bin/osascript' exited with status "
-               << rc << " for " << saved_path << "\n";
+               << rc << "\n";
     return Status::kIoError;
   }
   std::cout << "[actions] EMAIL: opened a new Mail message with "
-             << saved_path << " attached (left unsent)\n";
-  return Status::kOk;
-}
-
-Status PerformOcrAction(const std::string& saved_path, const Config& cfg) {
-  (void)cfg;  // No OCR-specific config setting yet beyond the scan Params
-              // already applied before this runs.
-
-  std::filesystem::path pdf_path(saved_path);
-  pdf_path.replace_extension(".pdf");
-
-  const Status status =
-      brscan::OcrImageToSearchablePdf(saved_path, pdf_path.string());
-  if (status != Status::kOk) {
-    std::cerr << "[actions] OCR: failed to create a searchable PDF from "
-               << saved_path << "\n";
-    return status;
-  }
-
-  // The searchable PDF is the OCR destination's deliverable; the raster the
-  // scan was pulled into is only an intermediate, so an OCR press should
-  // leave just the PDF. Remove the intermediate best-effort: if the delete
-  // fails the PDF is still the result, so don't fail the action over it.
-  std::error_code ec;
-  std::filesystem::remove(saved_path, ec);
-  if (ec) {
-    std::cerr << "[actions] OCR: wrote searchable PDF to " << pdf_path.string()
-               << ", but could not remove the intermediate scan " << saved_path
-               << ": " << ec.message() << "\n";
-  } else {
-    std::cout << "[actions] OCR: wrote searchable PDF to " << pdf_path.string()
-               << "\n";
-  }
+             << written.size() << (written.size() == 1 ? " file" : " files")
+             << " attached (left unsent)\n";
   return Status::kOk;
 }
 
@@ -156,25 +122,44 @@ int DefaultCommandRunner(const std::vector<std::string>& argv) {
   return -1;
 }
 
-Status PerformAction(const std::string& func, const std::string& saved_path,
+Status PerformAction(const std::string& func,
+                      const std::vector<std::string>& written,
                       const Config& cfg, const CommandRunner& runner) {
   if (func == kFuncFile) {
-    std::cout << "[actions] FILE: scan saved to " << saved_path << "\n";
+    for (const std::string& path : written) {
+      std::cout << "[actions] FILE: scan saved to " << path << "\n";
+    }
     return Status::kOk;
   }
 
-  if (func == kFuncImage) return PerformImageAction(saved_path, cfg, runner);
-  if (func == kFuncOcr) return PerformOcrAction(saved_path, cfg);
-  if (func == kFuncEmail) return PerformEmailAction(saved_path, cfg, runner);
+  if (func == kFuncImage) {
+    if (written.empty()) {
+      std::cerr << "[actions] IMAGE: no output file to open\n";
+      return Status::kIoError;
+    }
+    return PerformImageAction(written.front(), cfg, runner);
+  }
+  if (func == kFuncOcr) {
+    // WriteConfiguredOutput already produced the searchable PDF (see
+    // daemon/handle_event.cpp, which forces OCR's OutputSettings to
+    // PDF+searchable before calling it) -- nothing left to do here but log
+    // it.
+    for (const std::string& path : written) {
+      std::cout << "[actions] OCR: searchable PDF at " << path << "\n";
+    }
+    return Status::kOk;
+  }
+  if (func == kFuncEmail) return PerformEmailAction(written, cfg, runner);
 
   std::cout << "[actions] unrecognized FUNC '" << func
-             << "'; treating as no-op, scan saved to " << saved_path << "\n";
+             << "'; treating as no-op\n";
   return Status::kOk;
 }
 
-Status PerformAction(const std::string& func, const std::string& saved_path,
+Status PerformAction(const std::string& func,
+                      const std::vector<std::string>& written,
                       const Config& cfg) {
-  return PerformAction(func, saved_path, cfg, DefaultCommandRunner);
+  return PerformAction(func, written, cfg, DefaultCommandRunner);
 }
 
 }  // namespace brscan::scand

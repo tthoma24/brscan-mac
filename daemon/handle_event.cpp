@@ -175,36 +175,66 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     return Status::kIoError;
   }
 
-  // Save every page (so FILE keeps the whole stack), numbered per
-  // WritePages when there's more than one. `page1_path` is the actual file
-  // WritePages wrote for page 1 -- `path` itself only when there's exactly
-  // one page; for N>1, WritePages never writes `path` verbatim, only the
-  // numbered files, so anything downstream (the action, the log line, the
-  // caller's *saved_path) must name page1_path, not the never-written
-  // base `path`, or it points at a file that doesn't exist.
-  const int total_pages = static_cast<int>(pages.size());
-  const std::string page1_path = brscan::cli::PagePath(path, 1, total_pages);
+  // Resolve this FUNC's configured output format/separation (see
+  // daemon/config.h's OutputSettingsForFunc and daemon/output_writer.h).
+  OutputSettings settings = OutputSettingsForFunc(cfg, event.func);
+  if (event.func == kFuncOcr) {
+    // OCR's deliverable is always a searchable PDF: "native" wouldn't be
+    // searchable, so a configured (or default) native format is promoted
+    // to PDF here; any other explicitly configured container format
+    // (tiff/jpeg/png) is left alone, but `searchable` only ever means
+    // anything for a PDF page (see output_writer.h), so it's only set
+    // when the format actually is PDF.
+    if (settings.format == OutputFormat::kNative) {
+      settings.format = OutputFormat::kPdf;
+    }
+    settings.searchable = (settings.format == OutputFormat::kPdf);
+  }
 
-  if (!brscan::cli::WritePages(pages, path)) {
+  std::vector<std::string> written;
+  const Status write_status =
+      WriteConfiguredOutput(pages, settings, path, &written);
+  if (write_status != Status::kOk) {
     std::cerr << "[handle_event] FUNC=" << event.func
-               << ": failed to write '" << path << "'\n";
+               << ": failed to write configured output for '" << path
+               << "'\n";
+    return write_status;
+  }
+  if (written.empty()) {
+    std::cerr << "[handle_event] FUNC=" << event.func
+               << ": WriteConfiguredOutput reported success with no files "
+                  "written\n";
     return Status::kIoError;
   }
-  if (total_pages == 1) {
+
+  // Third containment check, alongside BuildOutputPath()'s own
+  // sanitization and the base-path check above: WriteConfiguredOutput
+  // derives every path it returns from `path`'s own directory and stem
+  // (replacing the extension, or adding a `-NNN`/`-docNNN` suffix -- see
+  // output_writer.h), never from event.func/event.regid directly, but
+  // `path` itself is still built from those untrusted fields, so
+  // re-validate each returned path rather than trusting that derivation
+  // blindly.
+  for (const std::string& file : written) {
+    if (!IsPathWithinDirectory(file, cfg.save_dir)) {
+      std::cerr << "[handle_event] refusing to act on output outside "
+                    "save_dir: '"
+                 << file << "' is not under '" << cfg.save_dir << "'\n";
+      return Status::kIoError;
+    }
+  }
+
+  *saved_path = written.front();
+  if (written.size() == 1) {
     std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
-               << page1_path << "\n";
+               << written.front() << "\n";
   } else {
     std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
-               << total_pages << " pages, starting at " << page1_path
+               << written.size() << " files, starting at " << written.front()
                << "\n";
   }
 
-  // TODO(Task 1c.2): multi-page output/actions (PDF/TIFF combine). For now
-  // the FUNC action (IMAGE/OCR/EMAIL) runs on page 1's file only, even
-  // though every page was just saved to disk above.
-  *saved_path = page1_path;
-
-  return PerformAction(event.func, page1_path, cfg, runner);
+  return PerformAction(event.func, written, cfg, runner);
 }
 
 }  // namespace brscan::scand

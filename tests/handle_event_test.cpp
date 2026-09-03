@@ -116,6 +116,29 @@ bool Contains(const std::vector<uint8_t>& haystack, const std::string& needle) {
   return it != haystack.end();
 }
 
+// True if `path`'s first 4 bytes are the PDF magic number ("%PDF"). Used to
+// confirm a file WriteConfiguredOutput wrote really is a PDF, without
+// needing PDFKit (this file is plain C++, not Objective-C++ -- the deeper
+// PDF content checks, e.g. page count and searchable text, already live in
+// tests/output_writer_test.mm).
+bool StartsWithPdfMagic(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  char buf[4] = {0};
+  f.read(buf, sizeof(buf));
+  return f.gcount() == static_cast<std::streamsize>(sizeof(buf)) &&
+         std::string(buf, sizeof(buf)) == "%PDF";
+}
+
+// The number of directory entries directly under `dir` (non-recursive).
+size_t CountFilesIn(const std::string& dir) {
+  size_t count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    (void)entry;
+    ++count;
+  }
+  return count;
+}
+
 // A fake CommandRunner for every pipeline test below. HandleButtonEvent
 // ends by calling PerformAction (daemon/actions.h), whose IMAGE and EMAIL
 // destinations spawn a real external process (`/usr/bin/open`,
@@ -336,6 +359,140 @@ TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndActsOnPageOne) {
   ASSERT_EQ(runner_.calls().size(), 1u);
   EXPECT_EQ(runner_.calls()[0][0], "/usr/bin/open");
   EXPECT_EQ(runner_.calls()[0].back(), saved_path);
+}
+
+// Task 1c.2b: a FUNC configured with a non-native `<dest>.format` must
+// actually produce that format end to end -- not the native per-PixelFormat
+// file the pre-1c.2b flow always wrote.
+TEST_F(HandleButtonEventTest, FileFuncWithPdfFormatProducesSinglePdf) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,16,427,8,"));
+
+  const auto jpeg = MakeSyntheticJpeg(16, 8);
+  auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
+  payload.insert(payload.end(), jpeg.begin(), jpeg.end());
+  t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  Config cfg = DefaultConfig();
+  cfg.save_dir = save_dir_;
+  cfg.file_output.format = OutputFormat::kPdf;
+
+  const ButtonEvent event = MakeEvent("FILE", "4004");
+  std::string saved_path;
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_FALSE(saved_path.empty());
+  EXPECT_TRUE(saved_path.size() >= 4 &&
+              saved_path.substr(saved_path.size() - 4) == ".pdf");
+  ASSERT_TRUE(std::filesystem::exists(saved_path));
+  EXPECT_TRUE(StartsWithPdfMagic(saved_path));
+
+  // Exactly the one combined PDF should be on disk -- not the native .jpg
+  // BuildOutputPath's page-1 extension would suggest.
+  EXPECT_EQ(CountFilesIn(save_dir_), 1u);
+
+  // FILE is still a no-op action either way.
+  EXPECT_TRUE(runner_.calls().empty());
+}
+
+// OCR's OutputSettings is forced to a searchable PDF regardless of
+// configuration (see daemon/handle_event.cpp); the deliverable comes from
+// WriteConfiguredOutput itself, so PerformAction's OCR branch must be a
+// pure no-op -- no separate OCR action (and, in particular, no runner
+// invocation) on top of it.
+TEST_F(HandleButtonEventTest, OcrFuncProducesSearchablePdfWithNoSeparateOcrAction) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,16,427,8,"));
+
+  const auto jpeg = MakeSyntheticJpeg(16, 8);
+  auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
+  payload.insert(payload.end(), jpeg.begin(), jpeg.end());
+  t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  Config cfg = DefaultConfig();  // ocr_output defaults to native -> promoted
+                                  // to a searchable PDF for this FUNC.
+  cfg.save_dir = save_dir_;
+
+  const ButtonEvent event = MakeEvent("OCR", "5005");
+  std::string saved_path;
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_FALSE(saved_path.empty());
+  EXPECT_TRUE(saved_path.size() >= 4 &&
+              saved_path.substr(saved_path.size() - 4) == ".pdf");
+  ASSERT_TRUE(std::filesystem::exists(saved_path));
+  EXPECT_TRUE(StartsWithPdfMagic(saved_path));
+  EXPECT_EQ(CountFilesIn(save_dir_), 1u);
+
+  EXPECT_TRUE(runner_.calls().empty());
+}
+
+// A multi-page scan with `every:1` separation produces one document per
+// page; EMAIL must attach every one of them, not just the first.
+TEST_F(HandleButtonEventTest, EmailFuncWithSeparationAttachesAllProducedFiles) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=4, height_px=3 (same offer as the IMAGE multi-page test above).
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  auto block1 = EncodeBlockHeader(4);
+  const std::vector<uint8_t> raw1(4 * 3, 0x11);
+  block1.insert(block1.end(), raw1.begin(), raw1.end());
+  t.QueueRead(block1);
+  t.QueueRead(EncodeEndOfPageMarker(1));
+
+  auto block2 = EncodeBlockHeader(4);
+  const std::vector<uint8_t> raw2(4 * 3, 0x22);
+  block2.insert(block2.end(), raw2.begin(), raw2.end());
+  t.QueueRead(block2);
+  t.QueueRead(EncodeJobFinalTerminator(2));
+
+  Config cfg = DefaultConfig();
+  cfg.email_params.mode = brscan::ScanMode::kGray;
+  cfg.email_params.x_dpi = 100;
+  cfg.email_params.y_dpi = 100;
+  cfg.email_output.format = OutputFormat::kPdf;
+  cfg.email_output.separation = OutputSeparation::kEveryN;
+  cfg.email_output.separate_n = 1;
+  cfg.save_dir = save_dir_;
+
+  const ButtonEvent event = MakeEvent("EMAIL", "8008");
+  std::string saved_path;
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_FALSE(saved_path.empty());
+  ASSERT_NE(saved_path.find("-doc001."), std::string::npos) << saved_path;
+
+  std::string doc2_path = saved_path;
+  const size_t marker_pos = doc2_path.rfind("-doc001");
+  ASSERT_NE(marker_pos, std::string::npos);
+  doc2_path.replace(marker_pos, 7, "-doc002");
+
+  ASSERT_TRUE(std::filesystem::exists(saved_path));
+  ASSERT_TRUE(std::filesystem::exists(doc2_path))
+      << "the second document must also be written: " << doc2_path;
+  EXPECT_EQ(CountFilesIn(save_dir_), 2u);
+
+  ASSERT_EQ(runner_.calls().size(), 1u);
+  ASSERT_EQ(runner_.calls()[0][0], "/usr/bin/osascript");
+  ASSERT_EQ(runner_.calls()[0].size(), 3u);
+  const std::string& script = runner_.calls()[0][2];
+
+  EXPECT_NE(script.find(saved_path), std::string::npos)
+      << "script does not mention " << saved_path << ": " << script;
+  EXPECT_NE(script.find(doc2_path), std::string::npos)
+      << "script does not mention " << doc2_path << ": " << script;
+  EXPECT_EQ(script.find("send"), std::string::npos);
 }
 
 TEST_F(HandleButtonEventTest, ScanFailurePropagatesStatusAndSavesNothing) {
