@@ -17,12 +17,12 @@ namespace {
 
 TEST(PerformActionTest, FileReturnsOk) {
   const Config cfg = DefaultConfig();
-  EXPECT_EQ(PerformAction("FILE", "/tmp/whatever.jpg", cfg), Status::kOk);
+  EXPECT_EQ(PerformAction("FILE", {"/tmp/whatever.jpg"}, cfg), Status::kOk);
 }
 
 TEST(PerformActionTest, UnrecognizedFuncIsTreatedAsNoOp) {
   const Config cfg = DefaultConfig();
-  EXPECT_EQ(PerformAction("BOGUS", "/tmp/whatever.jpg", cfg), Status::kOk);
+  EXPECT_EQ(PerformAction("BOGUS", {"/tmp/whatever.jpg"}, cfg), Status::kOk);
 }
 
 // A CommandRunner that records every argv it's called with and returns a
@@ -51,7 +51,7 @@ TEST(PerformActionImageTest, DefaultAppUsesPlainOpen) {
   RecordingRunner runner;
 
   const Status status =
-      PerformAction("IMAGE", "/tmp/scan.jpg", cfg, std::ref(runner));
+      PerformAction("IMAGE", {"/tmp/scan.jpg"}, cfg, std::ref(runner));
 
   EXPECT_EQ(status, Status::kOk);
   ASSERT_EQ(runner.calls().size(), 1u);
@@ -65,7 +65,7 @@ TEST(PerformActionImageTest, ConfiguredAppAddsDashA) {
   RecordingRunner runner;
 
   const Status status =
-      PerformAction("IMAGE", "/tmp/scan.jpg", cfg, std::ref(runner));
+      PerformAction("IMAGE", {"/tmp/scan.jpg"}, cfg, std::ref(runner));
 
   EXPECT_EQ(status, Status::kOk);
   ASSERT_EQ(runner.calls().size(), 1u);
@@ -74,12 +74,42 @@ TEST(PerformActionImageTest, ConfiguredAppAddsDashA) {
   EXPECT_EQ(runner.calls()[0], want);
 }
 
+// A multi-page write (e.g. per-page native/JPEG/PNG output) produces
+// several files; IMAGE opens only the first one.
+TEST(PerformActionImageTest, MultiFileWrittenOpensOnlyTheFirst) {
+  Config cfg = DefaultConfig();
+  RecordingRunner runner;
+
+  const Status status = PerformAction(
+      "IMAGE", {"/tmp/scan-001.jpg", "/tmp/scan-002.jpg"}, cfg,
+      std::ref(runner));
+
+  EXPECT_EQ(status, Status::kOk);
+  ASSERT_EQ(runner.calls().size(), 1u);
+  const std::vector<std::string> want = {"/usr/bin/open", "/tmp/scan-001.jpg"};
+  EXPECT_EQ(runner.calls()[0], want);
+}
+
 TEST(PerformActionImageTest, NonzeroExitIsIoError) {
   Config cfg = DefaultConfig();
   RecordingRunner runner(/*exit_status=*/1);
 
-  EXPECT_EQ(PerformAction("IMAGE", "/tmp/scan.jpg", cfg, std::ref(runner)),
+  EXPECT_EQ(PerformAction("IMAGE", {"/tmp/scan.jpg"}, cfg, std::ref(runner)),
             Status::kIoError);
+}
+
+TEST(PerformActionOcrTest, NoOpAndDoesNotTouchRunner) {
+  // OCR's searchable PDF is already produced upstream by
+  // WriteConfiguredOutput (see daemon/handle_event.cpp); PerformAction's
+  // OCR branch must be a pure log-and-return, never touching the runner.
+  Config cfg = DefaultConfig();
+  RecordingRunner runner;
+
+  const Status status =
+      PerformAction("OCR", {"/tmp/scan.pdf"}, cfg, std::ref(runner));
+
+  EXPECT_EQ(status, Status::kOk);
+  EXPECT_TRUE(runner.calls().empty());
 }
 
 TEST(PerformActionEmailTest, ArgvIsOsascriptDashE) {
@@ -87,7 +117,7 @@ TEST(PerformActionEmailTest, ArgvIsOsascriptDashE) {
   RecordingRunner runner;
 
   const Status status =
-      PerformAction("EMAIL", "/tmp/scan.jpg", cfg, std::ref(runner));
+      PerformAction("EMAIL", {"/tmp/scan.jpg"}, cfg, std::ref(runner));
 
   EXPECT_EQ(status, Status::kOk);
   ASSERT_EQ(runner.calls().size(), 1u);
@@ -102,7 +132,7 @@ TEST(PerformActionEmailTest, ScriptComposesAndAttachesWithoutSending) {
   Config cfg = DefaultConfig();
   RecordingRunner runner;
 
-  PerformAction("EMAIL", "/tmp/scan.jpg", cfg, std::ref(runner));
+  PerformAction("EMAIL", {"/tmp/scan.jpg"}, cfg, std::ref(runner));
 
   ASSERT_EQ(runner.calls().size(), 1u);
   const std::string& script = runner.calls()[0][2];
@@ -118,11 +148,41 @@ TEST(PerformActionEmailTest, ScriptComposesAndAttachesWithoutSending) {
   EXPECT_EQ(script.find("send"), std::string::npos);
 }
 
+// A multi-page/every:N write produces several files; EMAIL must attach
+// every one of them, in order, and still never send the message.
+TEST(PerformActionEmailTest, MultipleWrittenFilesAreAllAttached) {
+  Config cfg = DefaultConfig();
+  RecordingRunner runner;
+
+  PerformAction("EMAIL", {"/tmp/scan-doc001.pdf", "/tmp/scan-doc002.pdf"}, cfg,
+                std::ref(runner));
+
+  ASSERT_EQ(runner.calls().size(), 1u);
+  const std::string& script = runner.calls()[0][2];
+
+  EXPECT_NE(script.find("POSIX file \"/tmp/scan-doc001.pdf\""),
+            std::string::npos);
+  EXPECT_NE(script.find("POSIX file \"/tmp/scan-doc002.pdf\""),
+            std::string::npos);
+  // Both attachments, and nothing else -- exactly two "make new attachment"
+  // statements.
+  size_t count = 0;
+  size_t pos = 0;
+  while ((pos = script.find("make new attachment", pos)) != std::string::npos) {
+    ++count;
+    pos += 1;
+  }
+  EXPECT_EQ(count, 2u);
+
+  EXPECT_EQ(script.find("send"), std::string::npos);
+}
+
 TEST(PerformActionEmailTest, EscapesQuotesAndBackslashesInPath) {
   Config cfg = DefaultConfig();
   RecordingRunner runner;
 
-  PerformAction("EMAIL", "/tmp/weird\"path\\name.jpg", cfg, std::ref(runner));
+  PerformAction("EMAIL", {"/tmp/weird\"path\\name.jpg"}, cfg,
+                std::ref(runner));
 
   ASSERT_EQ(runner.calls().size(), 1u);
   const std::string& script = runner.calls()[0][2];
@@ -135,7 +195,7 @@ TEST(PerformActionEmailTest, ConfiguredRecipientAddsToRecipient) {
   cfg.email_to = "someone@example.com";
   RecordingRunner runner;
 
-  PerformAction("EMAIL", "/tmp/scan.jpg", cfg, std::ref(runner));
+  PerformAction("EMAIL", {"/tmp/scan.jpg"}, cfg, std::ref(runner));
 
   ASSERT_EQ(runner.calls().size(), 1u);
   const std::string& script = runner.calls()[0][2];
@@ -148,7 +208,7 @@ TEST(PerformActionEmailTest, NoRecipientConfiguredOmitsToRecipient) {
   ASSERT_TRUE(cfg.email_to.empty());
   RecordingRunner runner;
 
-  PerformAction("EMAIL", "/tmp/scan.jpg", cfg, std::ref(runner));
+  PerformAction("EMAIL", {"/tmp/scan.jpg"}, cfg, std::ref(runner));
 
   ASSERT_EQ(runner.calls().size(), 1u);
   const std::string& script = runner.calls()[0][2];
@@ -159,7 +219,7 @@ TEST(PerformActionEmailTest, NonzeroExitIsIoError) {
   Config cfg = DefaultConfig();
   RecordingRunner runner(/*exit_status=*/1);
 
-  EXPECT_EQ(PerformAction("EMAIL", "/tmp/scan.jpg", cfg, std::ref(runner)),
+  EXPECT_EQ(PerformAction("EMAIL", {"/tmp/scan.jpg"}, cfg, std::ref(runner)),
             Status::kIoError);
 }
 
@@ -169,7 +229,7 @@ TEST(PerformActionTest, DefaultOverloadUsesDefaultCommandRunner) {
   // DefaultCommandRunner without crashing for the FILE/no-op cases,
   // which never call the runner at all.
   const Config cfg = DefaultConfig();
-  EXPECT_EQ(PerformAction("FILE", "/tmp/whatever.jpg", cfg), Status::kOk);
+  EXPECT_EQ(PerformAction("FILE", {"/tmp/whatever.jpg"}, cfg), Status::kOk);
 }
 
 }  // namespace

@@ -32,9 +32,22 @@ target_include_directories(brscan PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
 target_link_libraries(brscan PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
-# The end-to-end scanning CLI. Links only against the brscan library --
-# never talks to a socket or the protocol codecs directly.
-add_executable(brscan-cli tools/brscan-cli.cpp tools/scan_output.cpp)
+# The end-to-end scanning CLI. Links against the brscan library for the
+# scan protocol itself, plus daemon/output_writer.mm (Task 1c.2b's
+# --format/--tiff-compression/--separate flags) for turning the scanned
+# pages into the requested file(s). output_writer.mm's PDF/TIFF paths
+# decode each page via daemon/action_ocr.mm's CreateCGImageFromScanResult
+# and compose PDFs via its WriteSearchablePdf (with searchable always
+# false from the CLI -- OCR is a daemon destination concern), so that
+# source and its Vision/CoreGraphics framework dependencies are pulled in
+# here too, even though the CLI itself never requests a text layer.
+add_executable(brscan-cli
+  tools/brscan-cli.cpp
+  tools/scan_output.cpp
+  daemon/action_ocr.mm
+  daemon/output_writer.mm
+)
+target_include_directories(brscan-cli PRIVATE daemon tools)
 target_link_libraries(brscan-cli PRIVATE brscan)
 target_link_libraries(brscan-cli PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan-cli PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
@@ -64,6 +77,7 @@ set(OCR_FRAMEWORKS
   ${PDFKIT_FRAMEWORK}
   ${APPKIT_FRAMEWORK}
 )
+target_link_libraries(brscan-cli PRIVATE ${OCR_FRAMEWORKS})
 
 # action_ocr.mm (and its test) use ARC for their Objective-C objects
 # (NSData, VN*, NS*); Core Foundation/CoreGraphics/CoreText opaque types

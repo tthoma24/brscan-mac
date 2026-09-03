@@ -21,6 +21,39 @@ your config) and what happens to the finished scan:
 | **OCR** | Recognize the text with the macOS Vision framework and save a searchable PDF — the image with a selectable, copyable text layer over it. |
 | **E-mail** | Save it, then open a new Mail message with the scan attached, ready for you to review and send. It is never sent automatically. |
 
+## Output format
+
+Each destination also has its own output file format, configured with
+`<dest>.format` in the config file (`<dest>` is `file`, `image`, `ocr`, or
+`email`): `pdf`, `tiff`, `jpeg`, `png`, or `native` (the default). `native`
+writes one file per page in the format the destination's scan mode implies
+-- JPEG for color, PGM for gray/truegray, PBM for black & white -- the same
+behavior as before this setting existed. Any other format instead writes a
+single JPEG/PNG per page, or one combined PDF/TIFF holding every page.
+
+**OCR always yields a searchable PDF.** Because OCR's whole point is text
+you can select and search, its output format defaults to a PDF with a
+Vision-recognized text layer over each page, even if you leave
+`ocr.format` unset (or set to `native`) -- there's no native-file option
+for OCR specifically. If you set `ocr.format` to `tiff`/`jpeg`/`png`
+explicitly, that's still honored, just without a text layer (Vision only
+lays text into a PDF page).
+
+For a PDF or TIFF, `<dest>.separation` controls how many pages land in each
+file: `combine` (the default) puts every page from one button press into a
+single file; `every:N` starts a new file every N pages instead (for
+example `every:1` with a 2-page scan produces two separate PDFs, each
+named with a `-docNNN` suffix). Separation doesn't apply to jpeg/png/native
+output, which always writes one file per page regardless.
+
+`<dest>.tiff_compression` (`lzw`, `g3`, or `g4`; default `lzw`) only
+matters for `<dest>.format = tiff`. `g3`/`g4` are 1-bit fax codecs that
+only apply to a black & white page; a color or gray page requested with
+`g3`/`g4` falls back to `lzw` instead of being thresholded to bilevel.
+
+See `config/brscan-scand.conf.example` for the commented key list and
+defaults.
+
 ## How it works
 
 The Scan button uses Brother's own registration-and-notification mechanism,

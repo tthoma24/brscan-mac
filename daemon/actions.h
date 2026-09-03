@@ -35,36 +35,46 @@ using CommandRunner = std::function<int(const std::vector<std::string>& argv)>;
 int DefaultCommandRunner(const std::vector<std::string>& argv);
 
 // Performs the destination action for `func` (FILE/IMAGE/OCR/EMAIL) on the
-// scan already saved at `saved_path` (see HandleButtonEvent in
-// daemon/handle_event.h, which calls this after WriteOutput succeeds).
+// files already written for this press (see HandleButtonEvent in
+// daemon/handle_event.h, which calls this after
+// daemon/output_writer.h's WriteConfiguredOutput has produced `written` --
+// the user-configured format's file(s): one native file per page, one
+// combined PDF/TIFF, or several `-docNNN` documents under `every:N`
+// separation).
 //
-//   - FILE: a no-op. Saving the file *is* the FILE action -- by the time
-//     this runs, WriteOutput has already written it to `saved_path`.
-//   - IMAGE: opens `saved_path` with `/usr/bin/open` (the file's default
-//     app, or `cfg.image_app` via `open -a` if set).
-//   - OCR: runs Vision text recognition over `saved_path` (see
-//     daemon/action_ocr.h) and writes a searchable PDF next to it (same
-//     basename, `.pdf` extension). The original scanned image is kept.
-//   - EMAIL: opens a new Mail.app outgoing message with `saved_path`
-//     attached, addressed to `cfg.email_to` if set, and brings Mail to
-//     the front -- left for the user to review and send. The message is
-//     never sent automatically.
+//   - FILE: a no-op. Saving the file(s) *is* the FILE action -- by the
+//     time this runs, WriteConfiguredOutput has already written them.
+//   - IMAGE: opens the FIRST file in `written` with `/usr/bin/open` (the
+//     file's default app, or `cfg.image_app` via `open -a` if set).
+//   - OCR: a no-op. The searchable PDF is the OCR destination's
+//     deliverable, and it was already produced upstream by
+//     WriteConfiguredOutput(searchable=true) -- see daemon/handle_event.cpp,
+//     which forces OCR's OutputSettings to PDF+searchable before calling
+//     it. (daemon/action_ocr.h's OcrImageToSearchablePdf still exists and
+//     is still tested on its own; it's just no longer invoked from here.)
+//   - EMAIL: opens a new Mail.app outgoing message with every file in
+//     `written` attached (a combined PDF/TIFF is a single attachment;
+//     per-page or `every:N`-separated output is several), addressed to
+//     `cfg.email_to` if set, and brings Mail to the front -- left for the
+//     user to review and send. The message is never sent automatically.
 //   - Any other string: treated as a no-op (logged, kOk) rather than as
 //     an error, since the scan itself already succeeded and was saved.
 //
 // This overload runs IMAGE's `open` and EMAIL's `osascript` through
 // DefaultCommandRunner. Returns Status::kOk on success; on a destination
-// action's own failure (e.g. `open` exits nonzero, or Vision's OCR
-// fails), returns a Status describing that failure -- the caller
-// (HandleButtonEvent) already has the saved file either way, since the
-// scan and the save both happened before this runs.
-Status PerformAction(const std::string& func, const std::string& saved_path,
+// action's own failure (e.g. `open` exits nonzero), returns a Status
+// describing that failure -- the caller (HandleButtonEvent) already has
+// the written file(s) either way, since the scan and the write both
+// happened before this runs.
+Status PerformAction(const std::string& func,
+                      const std::vector<std::string>& written,
                       const Config& cfg);
 
 // Same as above, but runs IMAGE's and EMAIL's external commands through
 // `runner` instead of DefaultCommandRunner. Used by tests to assert the
 // exact argv (and AppleScript text) without spawning anything real.
-Status PerformAction(const std::string& func, const std::string& saved_path,
+Status PerformAction(const std::string& func,
+                      const std::vector<std::string>& written,
                       const Config& cfg, const CommandRunner& runner);
 
 }  // namespace brscan::scand

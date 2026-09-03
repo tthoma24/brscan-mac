@@ -49,30 +49,33 @@ std::string BuildOutputPath(const std::string& save_dir,
 // a file path unvalidated. Otherwise resolves `event.func` to Params via
 // ParamsForFunc(cfg, ...), runs RunScan over `transport` (which, for the
 // document feeder, may return more than one page -- see
-// libbrscan/scanner.h), writes every page under cfg.save_dir via
-// BuildOutputPath()/tools/scan_output.h's WritePages() -- refusing to
-// write (Status::kIoError) if the base path, once resolved, does not
-// actually land inside cfg.save_dir, as a second independent check on top
-// of BuildOutputPath()'s own sanitization -- and dispatches
-// PerformAction() on page 1's *actual* file (tools/scan_output.h's
-// PagePath(base, 1, page_count) -- the base path itself for a single-page
-// scan, since WritePages never numbers a lone page, or the `-001`-suffixed
-// file for a multi-page one, since WritePages never writes the bare base
-// path when there's more than one page). TODO(Task 1c.2): drive
-// PerformAction from the full multi-page/PDF output instead of page 1
-// alone. `transport` must already be Transport::Connect()ed; this function
-// neither connects nor disconnects it (matching RunScan's own contract) so
-// the caller controls the connection's lifetime.
+// libbrscan/scanner.h), and writes the pages in the format
+// config.h's OutputSettingsForFunc(cfg, event.func) configures for this
+// FUNC (see daemon/output_writer.h's WriteConfiguredOutput -- a combined
+// PDF/TIFF, per-page native/JPEG/PNG files, or several `every:N`-separated
+// documents). OCR's OutputSettings is promoted to a searchable PDF here
+// (native has no text layer to be "searchable"), overriding a configured
+// or default-native format; any other explicitly configured format is
+// left as-is. The base path comes from BuildOutputPath(), refusing to
+// write (Status::kIoError) if that path, once resolved, does not actually
+// land inside cfg.save_dir (a second independent check on top of
+// BuildOutputPath()'s own sanitization), and every path
+// WriteConfiguredOutput actually writes is re-checked the same way before
+// PerformAction() ever sees it (a third, since those paths are still
+// derived from the same untrusted base). PerformAction() then runs on the
+// full list of written files, not just the first. `transport` must
+// already be Transport::Connect()ed; this function neither connects nor
+// disconnects it (matching RunScan's own contract) so the caller controls
+// the connection's lifetime.
 //
-// On success, sets `*saved_path` to that same page-1 file (never the
-// unwritten base path for a multi-page scan) and returns whatever
-// PerformAction() returned (Status::kOk today; see daemon/actions.h).
-// `*saved_path` is left untouched on failure. Returns RunScan's status
-// unchanged if the scan itself failed (including Status::kProtocolError
-// if RunScan reported success with zero pages -- not expected, but
-// guarded rather than assumed), or Status::kIoError if the scan succeeded
-// but a page could not be written (including the save_dir-escape refusal
-// above).
+// On success, sets `*saved_path` to the first written file and returns
+// whatever PerformAction() returned (Status::kOk today; see
+// daemon/actions.h). `*saved_path` is left untouched on failure. Returns
+// RunScan's status unchanged if the scan itself failed (including
+// Status::kProtocolError if RunScan reported success with zero pages --
+// not expected, but guarded rather than assumed), or Status::kIoError if
+// the scan succeeded but the configured output could not be written
+// (including the save_dir-escape refusals above).
 //
 // This overload runs PerformAction()'s IMAGE/EMAIL external commands
 // through DefaultCommandRunner (see daemon/actions.h) -- i.e. this is the

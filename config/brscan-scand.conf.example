@@ -51,6 +51,44 @@
 # email.mode = gray
 # email.dpi = 200
 
+# --- Per-destination output format -------------------------------------------
+#
+# Each destination also takes its own output file format, mirroring
+# iPrint&Scan Settings' "File Type" and "Document" (separation) choices:
+#
+#   <dest>.format             pdf | tiff | jpeg | png | native (default
+#                             native: one file per page, in the format
+#                             <dest>.mode implies -- JPEG for color, PGM for
+#                             gray/truegray, PBM for bw/errdiff -- exactly
+#                             today's behavior)
+#   <dest>.tiff_compression   lzw | g3 | g4 (default lzw; only affects
+#                             <dest>.format = tiff; g3/g4 are 1-bit fax
+#                             codecs and only apply to a bilevel (bw/errdiff)
+#                             page -- a color/gray page requested with g3/g4
+#                             falls back to lzw instead of thresholding)
+#   <dest>.separation         combine | every:N (N a positive integer;
+#                             default combine -- one PDF/TIFF file for every
+#                             page. every:N starts a new file every N pages
+#                             instead, named "..-doc001.pdf", "..-doc002.pdf",
+#                             etc. Only applies to pdf/tiff -- the per-page
+#                             formats (jpeg/png/native) always write one file
+#                             per page regardless.)
+#
+# OCR is special: its deliverable is always a searchable PDF, so
+# ocr.format=native (the default) is automatically treated as pdf for OCR
+# specifically -- there's no way to get OCR to write a native per-page file
+# instead. Setting ocr.format explicitly to tiff/jpeg/png still works, but
+# then there's no searchable text layer (Vision OCR only lays text into a
+# PDF page).
+
+# file.format = pdf
+# file.separation = every:1
+
+# image.format = jpeg
+
+# email.format = pdf
+# email.tiff_compression = g4
+
 # --- Destination action settings --------------------------------------------
 
 # IMAGE destination: the app that opens the saved scan, as `open -a <app>`.
