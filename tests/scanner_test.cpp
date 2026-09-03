@@ -305,6 +305,63 @@ TEST(RunScan, ColorFlatbedTwelveByteHeaderReassembles) {
   ASSERT_EQ(pages[0].data, jpeg);
 }
 
+// Regression for the "0xfff4 is a continues-sentinel, not an exact length"
+// bug (see ReadChunkedJpeg in scanner.cpp). On real ADF hardware a chunk's
+// header can declare kMaxChunkBytes (0xfff4) while the chunk physically
+// carries FEWER bytes -- the next block header begins before 0xfff4 bytes
+// have arrived. Here chunk 0 declares 0xfff4 but emits only 40000 bytes
+// before chunk 1's header. The old reader trusted 0xfff4, read 40000 real
+// bytes plus 25524 bytes of chunk 1's header-and-payload as if they were
+// image data, then tried to parse a block header from the middle of chunk
+// 1 -- desyncing the stream into kProtocolError. The fixed reader finds
+// the next header at +40000 and reads exactly that many bytes, so the JPEG
+// reassembles and decodes. Uses EncodeBlockHeader12 (the 12-byte shape the
+// real device sends, which the boundary scan keys on) and synthetic bytes
+// only -- no captured scan content.
+TEST(RunScan, ColorFlatbedShortSentinelChunkReassembles) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,3460,427,5052,"));
+
+  const auto jpeg = MakeLargeSyntheticJpeg(300, 300);
+  ASSERT_GT(jpeg.size(), 0xfff4u + 40000u)
+      << "fixture must span a short sentinel chunk plus more";
+
+  constexpr size_t kMaxChunkBytes = 0xfff4;
+  constexpr size_t kShortBody = 40000;  // < kMaxChunkBytes: the anomaly.
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+
+  // Chunk 0: header DECLARES the 0xfff4 sentinel but carries only 40000
+  // bytes before the next header -- the exact real-hardware anomaly.
+  append(EncodeBlockHeader12(static_cast<uint16_t>(kMaxChunkBytes)));
+  stream.insert(stream.end(), jpeg.begin(), jpeg.begin() + kShortBody);
+
+  // Remaining bytes as ordinary full 0xfff4 chunks plus an honest short
+  // final chunk.
+  for (size_t off = kShortBody; off < jpeg.size();) {
+    const size_t remaining = jpeg.size() - off;
+    const size_t chunk_len = std::min(remaining, kMaxChunkBytes);
+    append(EncodeBlockHeader12(static_cast<uint16_t>(chunk_len)));
+    stream.insert(stream.end(), jpeg.begin() + off, jpeg.begin() + off + chunk_len);
+    off += chunk_len;
+  }
+  t.QueueRead(stream);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kRgb);
+  EXPECT_EQ(pages[0].width, 300);
+  EXPECT_EQ(pages[0].height, 300);
+  ASSERT_EQ(pages[0].data, jpeg);
+}
+
 TEST(RunScan, GrayFlatbedRoundTrips) {
   brscan::FakeTransport t;
   QueuePreamble(&t);
