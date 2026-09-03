@@ -39,6 +39,43 @@ target_link_libraries(brscan-cli PRIVATE brscan)
 target_link_libraries(brscan-cli PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan-cli PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
+# Frameworks for the OCR destination action (daemon/action_ocr.mm): Vision
+# does the text recognition; the rest are the CoreGraphics/CoreText/ImageIO
+# plumbing used to load the saved scan and compose the searchable PDF.
+# PDFKit and AppKit aren't used by action_ocr.mm itself, but PDFKit is
+# what tests/action_ocr_test.mm uses to read the produced PDF back for
+# verification (see CMakeLists.txt's brscan_tests target below), and
+# PDFKit pulls in AppKit.
+find_library(VISION_FRAMEWORK Vision REQUIRED)
+find_library(CORETEXT_FRAMEWORK CoreText REQUIRED)
+find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+find_library(IMAGEIO_FRAMEWORK ImageIO REQUIRED)
+find_library(PDFKIT_FRAMEWORK PDFKit REQUIRED)
+find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+set(OCR_FRAMEWORKS
+  ${VISION_FRAMEWORK}
+  ${CORETEXT_FRAMEWORK}
+  ${COREGRAPHICS_FRAMEWORK}
+  ${COREFOUNDATION_FRAMEWORK}
+  ${FOUNDATION_FRAMEWORK}
+  ${IMAGEIO_FRAMEWORK}
+  ${PDFKIT_FRAMEWORK}
+  ${APPKIT_FRAMEWORK}
+)
+
+# action_ocr.mm (and its test) use ARC for their Objective-C objects
+# (NSData, VN*, NS*); Core Foundation/CoreGraphics/CoreText opaque types
+# are unaffected by this flag and stay manually retained/released either
+# way. CMake infers Objective-C++ compilation for these from the .mm
+# extension on its own.
+set_source_files_properties(
+  daemon/action_ocr.mm
+  tests/action_ocr_test.mm
+  PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
+)
+
 # The Scan-button daemon: registers with the printer, listens for button
 # presses on UDP 54925, pulls each scan, and saves it (Plan 1b). Its own
 # protocol pieces (SNMP registration, the UDP listener, config, and FUNC
@@ -51,6 +88,7 @@ add_executable(brscan-scand
   daemon/button_listener.cpp
   daemon/config.cpp
   daemon/actions.cpp
+  daemon/action_ocr.mm
   daemon/handle_event.cpp
   daemon/sender_check.cpp
 )
@@ -58,6 +96,7 @@ target_include_directories(brscan-scand PRIVATE daemon tools)
 target_link_libraries(brscan-scand PRIVATE brscan)
 target_link_libraries(brscan-scand PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan-scand PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
+target_link_libraries(brscan-scand PRIVATE ${OCR_FRAMEWORKS})
 
 # Tests.
 include(CTest)
@@ -88,6 +127,8 @@ if(BUILD_TESTING)
     tests/config_test.cpp
     daemon/actions.cpp
     tests/actions_test.cpp
+    daemon/action_ocr.mm
+    tests/action_ocr_test.mm
     daemon/handle_event.cpp
     tests/handle_event_test.cpp
     daemon/sender_check.cpp
@@ -99,6 +140,7 @@ if(BUILD_TESTING)
   target_include_directories(brscan_tests PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
   target_link_libraries(brscan_tests PRIVATE ${TURBOJPEG_LIBRARIES})
   target_link_directories(brscan_tests PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
+  target_link_libraries(brscan_tests PRIVATE ${OCR_FRAMEWORKS})
   target_compile_definitions(brscan_tests PRIVATE
     BRSCAN_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 

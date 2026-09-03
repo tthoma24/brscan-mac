@@ -55,6 +55,19 @@ struct Config {
   brscan::Params image_params;
   brscan::Params ocr_params;
   brscan::Params email_params;
+
+  // IMAGE-destination action setting (see daemon/actions.cpp's
+  // PerformImageAction): the app name passed to `open -a <image_app>`
+  // when opening a saved scan. Empty means no `-a` flag at all -- `open`
+  // then launches the file's default app for its extension.
+  std::string image_app;
+
+  // EMAIL-destination action setting (see daemon/actions.cpp's
+  // PerformEmailAction): the address a freshly composed outgoing Mail.app
+  // message is pre-addressed to. Empty leaves the message's To: field
+  // blank for the user to fill in -- the message is never sent
+  // automatically either way.
+  std::string email_to;
 };
 
 // This machine's host name (gethostname()), or "Mac" if that call fails.
@@ -94,6 +107,11 @@ Config DefaultConfig();
 //                        `dns-sd -B _scanner._tcp`.
 //   display_name        name shown in the printer's Scan menu
 //   save_dir            FILE-destination output directory (~ expanded)
+//   image_app           app name for the IMAGE destination's `open -a`
+//                        (empty: use the file's default app)
+//   email_to            recipient address the EMAIL destination's
+//                        outgoing Mail message is pre-addressed to
+//                        (empty: leave To: blank)
 //   <dest>.mode         color | gray | bw | errdiff | truegray
 //   <dest>.dpi          positive integer, sets both x_dpi and y_dpi
 //   <dest>.source       flatbed | adf | adf-duplex
