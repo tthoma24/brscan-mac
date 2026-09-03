@@ -34,7 +34,7 @@ target_link_directories(brscan PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
 # The end-to-end scanning CLI. Links only against the brscan library --
 # never talks to a socket or the protocol codecs directly.
-add_executable(brscan-cli tools/brscan-cli.cpp)
+add_executable(brscan-cli tools/brscan-cli.cpp tools/scan_output.cpp)
 target_link_libraries(brscan-cli PRIVATE brscan)
 target_link_libraries(brscan-cli PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan-cli PRIVATE ${TURBOJPEG_LIBRARY_DIRS})

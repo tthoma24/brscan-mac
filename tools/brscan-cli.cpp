@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -14,6 +13,7 @@
 #include "brscan/scanner.h"
 #include "brscan/transport_tcp.h"
 #include "brscan/types.h"
+#include "scan_output.h"
 
 namespace {
 
@@ -161,80 +161,6 @@ bool ParseArgs(int argc, char** argv, Args* out) {
   return true;
 }
 
-// A human-readable line for each failure Status RunScan can report, per
-// libbrscan/scanner.h's doc comment.
-std::string DescribeFailure(brscan::Status status) {
-  switch (status) {
-    case brscan::Status::kBusy:
-      return "scanner is busy (another job is in progress)";
-    case brscan::Status::kNoPaper:
-      return "no paper detected in the document feeder";
-    case brscan::Status::kCancelled:
-      return "scan was cancelled";
-    case brscan::Status::kTimeout:
-      return "scan timed out (the device stopped responding -- possibly "
-             "cancelled at the panel)";
-    case brscan::Status::kIoError:
-      return "connection error talking to the scanner";
-    case brscan::Status::kProtocolError:
-      return "unexpected data from the scanner (protocol error)";
-    case brscan::Status::kOk:
-      return "ok";
-  }
-  return "unknown error";
-}
-
-int ExitCodeFor(brscan::Status status) {
-  switch (status) {
-    case brscan::Status::kBusy: return 10;
-    case brscan::Status::kNoPaper: return 11;
-    case brscan::Status::kCancelled: return 12;
-    case brscan::Status::kTimeout: return 13;
-    case brscan::Status::kIoError: return 14;
-    case brscan::Status::kProtocolError: return 15;
-    case brscan::Status::kOk: return 0;
-  }
-  return 1;
-}
-
-// Writes `result` to `path`: the JPEG bytes as-is for color, a binary PGM
-// (P5) for gray (GRAY64 raw or GRAY256/RLENGTH, both PixelFormat::kGray),
-// or a binary PBM (P4) for the 1-bit modes (TEXT/ERRDIF,
-// PixelFormat::kBitonal -- see the bit-packing convention documented on
-// PixelFormat::kBitonal in types.h, which is exactly what P4 expects, so
-// `result.data` is written out unchanged). Returns false (after printing
-// an error) if the file can't be opened for writing.
-bool WriteOutput(const brscan::ScanResult& result, const std::string& path) {
-  std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f) {
-    std::cerr << "Could not open '" << path << "' for writing\n";
-    return false;
-  }
-
-  switch (result.format) {
-    case brscan::PixelFormat::kRgb:
-      f.write(reinterpret_cast<const char*>(result.data.data()),
-              static_cast<std::streamsize>(result.data.size()));
-      break;
-    case brscan::PixelFormat::kGray:
-      f << "P5\n" << result.width << " " << result.height << "\n255\n";
-      f.write(reinterpret_cast<const char*>(result.data.data()),
-              static_cast<std::streamsize>(result.data.size()));
-      break;
-    case brscan::PixelFormat::kBitonal:
-      f << "P4\n" << result.width << " " << result.height << "\n";
-      f.write(reinterpret_cast<const char*>(result.data.data()),
-              static_cast<std::streamsize>(result.data.size()));
-      break;
-  }
-
-  if (!f) {
-    std::cerr << "Error writing '" << path << "'\n";
-    return false;
-  }
-  return true;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -260,8 +186,10 @@ int main(int argc, char** argv) {
   const brscan::Status connect_status = transport.Connect();
   if (connect_status != brscan::Status::kOk) {
     std::cerr << "Could not connect to " << args.host << ":" << args.port
-              << ": " << DescribeFailure(connect_status) << "\n";
-    return ExitCodeFor(connect_status) == 0 ? 1 : ExitCodeFor(connect_status);
+              << ": " << brscan::cli::DescribeFailure(connect_status) << "\n";
+    return brscan::cli::ExitCodeFor(connect_status) == 0
+               ? 1
+               : brscan::cli::ExitCodeFor(connect_status);
   }
 
   brscan::ScanResult result;
@@ -269,11 +197,11 @@ int main(int argc, char** argv) {
   transport.Disconnect();
 
   if (scan_status != brscan::Status::kOk) {
-    std::cerr << "Scan failed: " << DescribeFailure(scan_status) << "\n";
-    return ExitCodeFor(scan_status);
+    std::cerr << "Scan failed: " << brscan::cli::DescribeFailure(scan_status) << "\n";
+    return brscan::cli::ExitCodeFor(scan_status);
   }
 
-  if (!WriteOutput(result, args.output)) return 1;
+  if (!brscan::cli::WriteOutput(result, args.output)) return 1;
 
   std::cout << "Wrote " << args.output << " (" << result.width << "x"
             << result.height << ")\n";
