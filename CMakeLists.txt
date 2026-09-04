@@ -102,6 +102,7 @@ add_executable(brscan-scand
   tools/scan_output.cpp
   daemon/snmp_register.cpp
   daemon/button_listener.cpp
+  daemon/button_config.cpp
   daemon/config.cpp
   daemon/actions.cpp
   daemon/action_ocr.mm
@@ -141,6 +142,8 @@ if(BUILD_TESTING)
     tests/snmp_register_test.cpp
     daemon/button_listener.cpp
     tests/button_listener_test.cpp
+    daemon/button_config.cpp
+    tests/button_config_test.cpp
     daemon/config.cpp
     tests/config_test.cpp
     daemon/actions.cpp
