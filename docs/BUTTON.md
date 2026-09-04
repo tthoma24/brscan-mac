@@ -109,7 +109,7 @@ parser stays decoupled and independently testable.
 | `E` | `duplex_edge` | `LON`, `SHO` | Raw token; only meaningful when `duplex` is true. |
 | `R` | `dpi` | e.g. `200`, `300` | A single value here (`ESC I`/`ESC X` carry an `x,y` pair instead; see PROTOCOL.md). |
 | `M` | `mode` | `CGRAY` (color), `TEXT` (black & white) | Raw token. |
-| `P` | `paper` | `LETTER`, `LEGAL`, `A4`, `LEDGER`, `A3`, `A5`, `EXECUTIVE`, `PHOTO`, `BCARD` | Raw token; not mapped to a scan area by this parser. |
+| `P` | `paper` | `LETTER`, `LEGAL`, `A4`, `LEDGER`, `A3`, `A5`, `EXECUTIVE`, `PHOTO`, `BCARD` | Raw token; not mapped to a scan area by this parser. `daemon/paper_size.h`'s `AreaForPaper` holds the captured scan area for each of these 9 tokens, but nothing wires that lookup to this field yet -- that's a later task. |
 | `A` | `area_flag` | `0` | Observed always 0 (auto-area); the real scan area is computed downstream. |
 | `T` | `output_type` | `PDF(Image)`, `MULTI-TIFF`, `JPEG`, `TXT`, `HTML`, `RTF` | Raw token (parens and hyphen kept verbatim); not mapped to this project's `OutputFormat` by this parser. |
 | `W` | `skip_blank` | `0`/`1` | |
