@@ -69,6 +69,17 @@ struct Config {
   OutputSettings ocr_output;
   OutputSettings email_output;
 
+  // Per-FUNC paper-size token (see daemon/paper_size.h's AreaForPaper),
+  // e.g. "LETTER". Stored as the raw `P=`-style token, not validated
+  // against daemon/paper_size.h's table and not turned into a
+  // brscan::Area here -- that mapping, and any precedence against the
+  // scan button's own config-command paper token, is a later task's job
+  // (Task 1d.4). Empty means "no explicit paper configured".
+  std::string file_paper;
+  std::string image_paper;
+  std::string ocr_paper;
+  std::string email_paper;
+
   // IMAGE-destination action setting (see daemon/actions.cpp's
   // PerformImageAction): the app name passed to `open -a <image_app>`
   // when opening a saved scan. Empty means no `-a` flag at all -- `open`
@@ -134,6 +145,10 @@ Config DefaultConfig();
 //                        lzw | g3 | g4 (default lzw; only affects TIFF)
 //   <dest>.separation   combine | every:N (N a positive int; default
 //                        combine -- one container for all pages)
+//   <dest>.paper        LETTER | LEGAL | A4 | LEDGER | A3 | A5 | EXECUTIVE |
+//                        PHOTO | BCARD (default empty -- no explicit
+//                        paper; stored raw, not validated here -- see
+//                        daemon/paper_size.h)
 // where <dest> is one of file, image, ocr, email.
 Config ParseConfig(const std::string& text);
 
@@ -158,6 +173,15 @@ const brscan::Params& ParamsForFunc(const Config& cfg, const std::string& func);
 // behavior.
 const OutputSettings& OutputSettingsForFunc(const Config& cfg,
                                             const std::string& func);
+
+// The raw `<dest>.paper` token configured for a button event's FUNC
+// (FILE/IMAGE/OCR/EMAIL, matched case-sensitively per the wire protocol --
+// see daemon/button_listener.h's ButtonEvent::func). Returns
+// cfg.file_paper for any other string, mirroring ParamsForFunc's
+// FILE-as-safe-fallback behavior. May be empty (no explicit paper
+// configured); this accessor does not validate or map the token to an
+// area -- see daemon/paper_size.h for that.
+const std::string& PaperForFunc(const Config& cfg, const std::string& func);
 
 // True if `func` is one of the four known FUNCs (kFuncFile/kFuncImage/
 // kFuncOcr/kFuncEmail above), false for anything else. `func` comes
