@@ -153,9 +153,14 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     std::cout << "[handle_event] FUNC=" << event.func << ": "
                << (plan->touch_panel_on ? "Touch-Panel-ON (printer settings)"
                                          : "Touch-Panel-OFF (daemon config)")
-               << ", dpi=" << plan->params.x_dpi << " source="
-               << (plan->params.source == brscan::Source::kAdf ? "adf"
-                                                                 : "flatbed")
+               << ", dpi=" << plan->params.x_dpi
+               // source= is deliberately not logged here: the button flow
+               // sends no source-select command (no ESC S / ESC D), so
+               // plan->params.source is just this daemon's configured
+               // default, not what the device actually scanned from --
+               // reporting it would misrepresent e.g. an ADF-fed scan as
+               // "flatbed". The device, not the daemon, decides the real
+               // source.
                << "\n";
     return plan->params;
   };
@@ -242,9 +247,15 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
                << written.front() << " (" << precedence << " settings)\n";
   } else {
+    // List every written path (not just the first) so the daemon log
+    // reflects everything a multi-page/every:N-separated scan actually
+    // produced.
     std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
-               << written.size() << " files, starting at " << written.front()
-               << " (" << precedence << " settings)\n";
+               << written.size() << " files (" << precedence
+               << " settings):\n";
+    for (const std::string& file : written) {
+      std::cout << "  " << file << "\n";
+    }
   }
 
   return PerformAction(event.func, written, cfg, runner);

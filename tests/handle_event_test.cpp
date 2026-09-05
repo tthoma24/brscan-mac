@@ -336,12 +336,14 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
 // Regression test for a Task 1c.1 review finding: WritePages (tools/
 // scan_output.h) never writes the bare, unnumbered base path for a
 // multi-page scan -- only "-001", "-002", etc. HandleButtonEvent must
-// report and act on the actual numbered page-1 file, not a path that was
-// never written to disk. A 2-page synthetic ADF-shaped gray scan (same
-// inter-page 10-byte marker framing as tests/scanner_test.cpp's
-// GrayAdfMultiPageReturnsAllPages) drives this through IMAGE so the
-// recording CommandRunner shows exactly what PerformAction ran against.
-TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndActsOnPageOne) {
+// report the actual numbered page-1 file as saved_path, not a path that
+// was never written to disk, and IMAGE must open every numbered page
+// (see daemon/actions.h's IMAGE bullet). A 2-page synthetic ADF-shaped
+// gray scan (same inter-page 10-byte marker framing as
+// tests/scanner_test.cpp's GrayAdfMultiPageReturnsAllPages) drives this
+// through IMAGE so the recording CommandRunner shows exactly what
+// PerformAction ran against.
+TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndOpensBoth) {
   brscan::FakeTransport t;
   // width_px=4, height_px=3 (same offer as ImageFuncUsesImageParamsDistinctFromFile;
   // see that test's comment on why the offer's own height_px is dead
@@ -407,14 +409,16 @@ TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndActsOnPageOne) {
       page2_file.begin() + static_cast<long>(want_header.size()), page2_file.end());
   EXPECT_EQ(page2_payload, raw2);
 
-  // The FUNC action (IMAGE -> `/usr/bin/open`) must run against the file
-  // that actually exists on disk -- the page-1 numbered file -- not the
-  // never-written base path. This is the exact check that would have
-  // caught the Critical: before the fix, this ran `/usr/bin/open` on a
-  // nonexistent path.
+  // The FUNC action (IMAGE -> `/usr/bin/open`) must run against the files
+  // that actually exist on disk -- both numbered page files, in order --
+  // not the never-written base path. This is the exact check that would
+  // have caught the Critical: before the fix, this ran `/usr/bin/open` on
+  // a nonexistent path; it now also confirms both pages, not just the
+  // first, are opened.
   ASSERT_EQ(runner_.calls().size(), 1u);
-  EXPECT_EQ(runner_.calls()[0][0], "/usr/bin/open");
-  EXPECT_EQ(runner_.calls()[0].back(), saved_path);
+  const std::vector<std::string> want = {"/usr/bin/open", saved_path,
+                                          page2_path};
+  EXPECT_EQ(runner_.calls()[0], want);
 }
 
 // Task 1c.2b: a FUNC configured with a non-native `<dest>.format` must

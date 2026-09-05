@@ -44,8 +44,10 @@ int DefaultCommandRunner(const std::vector<std::string>& argv);
 //
 //   - FILE: a no-op. Saving the file(s) *is* the FILE action -- by the
 //     time this runs, WriteConfiguredOutput has already written them.
-//   - IMAGE: opens the FIRST file in `written` with `/usr/bin/open` (the
-//     file's default app, or `cfg.image_app` via `open -a` if set).
+//   - IMAGE: opens EVERY file in `written` with a single `/usr/bin/open`
+//     invocation (the file's default app, or `cfg.image_app` via `open -a`
+//     if set) -- matching the manufacturer driver's Scan-to-Image, which
+//     opens every per-page JPEG it produces.
 //   - OCR: a no-op. The searchable PDF is the OCR destination's
 //     deliverable, and it was already produced upstream by
 //     WriteConfiguredOutput(searchable=true) -- see daemon/handle_event.cpp,

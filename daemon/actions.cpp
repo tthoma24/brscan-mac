@@ -61,24 +61,32 @@ std::string BuildEmailAppleScript(const std::vector<std::string>& attachments,
   return script.str();
 }
 
-Status PerformImageAction(const std::string& saved_path, const Config& cfg,
-                           const CommandRunner& runner) {
+// Opens every path in `written` with a single `/usr/bin/open` invocation
+// (macOS `open` accepts multiple files and opens each in turn) -- matching
+// the manufacturer driver's Scan-to-Image, which opens every per-page JPEG
+// it produces rather than just the first.
+Status PerformImageAction(const std::vector<std::string>& written,
+                           const Config& cfg, const CommandRunner& runner) {
   std::vector<std::string> argv = {"/usr/bin/open"};
   if (!cfg.image_app.empty()) {
     argv.push_back("-a");
     argv.push_back(cfg.image_app);
   }
-  argv.push_back(saved_path);
+  argv.insert(argv.end(), written.begin(), written.end());
 
   const int rc = runner(argv);
   if (rc != 0) {
     std::cerr << "[actions] IMAGE: '/usr/bin/open' exited with status " << rc
-               << " for " << saved_path << "\n";
+               << " for " << written.size()
+               << (written.size() == 1 ? " file\n" : " files\n");
     return Status::kIoError;
   }
-  std::cout << "[actions] IMAGE: opened " << saved_path;
+  std::cout << "[actions] IMAGE: opened " << written.size()
+             << (written.size() == 1 ? " file" : " files");
   if (!cfg.image_app.empty()) std::cout << " with " << cfg.image_app;
-  std::cout << "\n";
+  std::cout << " (" << written.front();
+  for (size_t i = 1; i < written.size(); ++i) std::cout << ", " << written[i];
+  std::cout << ")\n";
   return Status::kOk;
 }
 
@@ -137,7 +145,7 @@ Status PerformAction(const std::string& func,
       std::cerr << "[actions] IMAGE: no output file to open\n";
       return Status::kIoError;
     }
-    return PerformImageAction(written.front(), cfg, runner);
+    return PerformImageAction(written, cfg, runner);
   }
   if (func == kFuncOcr) {
     // WriteConfiguredOutput already produced the searchable PDF (see

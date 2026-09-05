@@ -75,8 +75,10 @@ TEST(PerformActionImageTest, ConfiguredAppAddsDashA) {
 }
 
 // A multi-page write (e.g. per-page native/JPEG/PNG output) produces
-// several files; IMAGE opens only the first one.
-TEST(PerformActionImageTest, MultiFileWrittenOpensOnlyTheFirst) {
+// several files; IMAGE opens every one of them, in order, via a single
+// `open` invocation -- matching the manufacturer driver's Scan-to-Image,
+// which opens every per-page JPEG it produces.
+TEST(PerformActionImageTest, MultiFileWrittenOpensAllInASingleInvocation) {
   Config cfg = DefaultConfig();
   RecordingRunner runner;
 
@@ -86,7 +88,27 @@ TEST(PerformActionImageTest, MultiFileWrittenOpensOnlyTheFirst) {
 
   EXPECT_EQ(status, Status::kOk);
   ASSERT_EQ(runner.calls().size(), 1u);
-  const std::vector<std::string> want = {"/usr/bin/open", "/tmp/scan-001.jpg"};
+  const std::vector<std::string> want = {"/usr/bin/open", "/tmp/scan-001.jpg",
+                                          "/tmp/scan-002.jpg"};
+  EXPECT_EQ(runner.calls()[0], want);
+}
+
+// Same multi-file case, but with a configured `image_app` -- the `-a app`
+// flag must precede the file list, and every file must still be present.
+TEST(PerformActionImageTest, MultiFileWithConfiguredAppAddsDashABeforeFiles) {
+  Config cfg = DefaultConfig();
+  cfg.image_app = "Preview";
+  RecordingRunner runner;
+
+  const Status status = PerformAction(
+      "IMAGE", {"/tmp/scan-001.jpg", "/tmp/scan-002.jpg", "/tmp/scan-003.jpg"},
+      cfg, std::ref(runner));
+
+  EXPECT_EQ(status, Status::kOk);
+  ASSERT_EQ(runner.calls().size(), 1u);
+  const std::vector<std::string> want = {
+      "/usr/bin/open", "-a", "Preview", "/tmp/scan-001.jpg",
+      "/tmp/scan-002.jpg", "/tmp/scan-003.jpg"};
   EXPECT_EQ(runner.calls()[0], want);
 }
 
