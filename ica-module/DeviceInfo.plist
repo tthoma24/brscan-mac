@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DeviceInfo.plist — per-device presentation metadata icdd reads alongside
+  DeviceMatchingInfo.plist. The load spike shipped without this file at all;
+  Apple's AirScanScanner.app carries one, so its absence is a candidate reason
+  our matched device never surfaced. Added in Plan 2 Task 1b.
+
+  SCHEMA (from Apple's
+  /System/Library/Image Capture/Devices/AirScanScanner.app/Contents/Resources/
+  DeviceInfo.plist):
+
+      "device info version" = "3.0";
+      devices = {
+          "<device key>" = { iconFile = "<path to .icns>"; };
+      };
+
+  AirScan keys the single "devices" entry by its module name "AirScanScanner"
+  and gives it a generic .icns. It is not settled from the public interface
+  whether icdd keys this dict by the module name or by the matched Bonjour
+  device name, so we register BOTH keys to the same synthetic metadata: the
+  module name (mirroring AirScan) and our synthetic device name
+  BRW00AABBCCDDEE. Extra keys are inert if unused.
+
+  iconFile points at a stock system .icns (we ship no artwork in the spike);
+  the file only needs to exist so icdd can present the device.
+
+  Clean-room: schema learned from the public plist, values are our own.
+-->
+<plist version="1.0">
+<dict>
+  <key>device info version</key>
+  <string>3.0</string>
+  <key>devices</key>
+  <dict>
+    <key>BrscanICALoadSpike</key>
+    <dict>
+      <key>iconFile</key>
+      <string>/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericNetworkIcon.icns</string>
+    </dict>
+    <key>BRW00AABBCCDDEE</key>
+    <dict>
+      <key>iconFile</key>
+      <string>/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericNetworkIcon.icns</string>
+    </dict>
+  </dict>
+</dict>
+</plist>
