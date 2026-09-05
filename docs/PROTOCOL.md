@@ -252,8 +252,13 @@ A reader must not route the 10-byte marker through the same header parser
 that decodes `64`/`40`/`42`-type payload blocks: doing so consumes the 2
 bytes right after the marker as part of a (bogus) 12/13-byte header,
 desynchronizing the rest of the stream. Read the marker as a fixed 10-byte
-count, then peek (without consuming) the next 2 bytes to decide whether to
-stop or loop back for another page.
+count, then peek (without consuming) **one** byte to decide whether to stop
+(leading `0x80`) or loop back for another page -- not two, per the
+driver-flow-vs-button-flow distinction above. This codebase applies that
+single-byte check in both readout implementations: the color path
+(`RunColorScan`) and the RLENGTH/gray path (the non-color loop in
+`RunReadout`, covering Black & White, Error Diffusion, True Gray, and plain
+Gray).
 
 ### Duplex interleaving (color) — pages are multiplexed by `pidx`
 

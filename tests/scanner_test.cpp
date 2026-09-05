@@ -195,6 +195,19 @@ std::vector<uint8_t> EncodeJobFinalTerminator(uint8_t pidx) {
   return out;
 }
 
+// The real scan-button job-final terminator: the end-of-page marker
+// followed by a SINGLE 0x80, after which the device closes the connection
+// (modeled by the FakeTransport queue ending). This is what the device
+// actually sends in the button flow (reference/brscan-daemon-live.pcap and
+// the vendor's own reference/brscan-button-options.pcap) -- NOT the driver
+// flow's 0x80 0x80. Hoisted here (rather than left in the RunButtonScan
+// namespace block below) so the RLENGTH/gray RunScan tests can use it too.
+std::vector<uint8_t> EncodeButtonJobFinal(uint8_t pidx) {
+  std::vector<uint8_t> out = EncodeEndOfPageMarker(pidx);
+  out.push_back(0x80);
+  return out;
+}
+
 // True if `haystack` contains `needle` as a contiguous subsequence. Used to
 // assert which source-select command RunScan actually put on the wire.
 bool Contains(const std::vector<uint8_t>& haystack,
@@ -420,6 +433,43 @@ TEST(RunScan, BlackWhiteFlatbedRoundTrips) {
   EXPECT_EQ(pages[0].height, 2);
   const std::vector<uint8_t> want = {0xAA, 0xBB, 0xCC, 0xDD};
   EXPECT_EQ(pages[0].data, want);
+}
+
+// Mirrors BlackWhiteFlatbedRoundTrips but with EncodeButtonJobFinal (the
+// scan-button flow's single-`0x80` job-final terminator) in place of the
+// driver flow's EncodeJobFinalTerminator (`0x80 0x80`). The RLENGTH/gray
+// readout loop must end the job on this single-byte terminator instead of
+// blocking for a second `0x80` that never arrives -- the same bug PR #36
+// fixed for RunColorScan, now in this loop (live BW/TIFF scan-button
+// timeout).
+TEST(RunScan, BlackWhiteFlatbedSingleByteJobFinalEndsScan) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=9 (row_bytes = ceil(9/8) = 2), height_px=2.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,2,"));
+
+  // Row 0: PackBits literal run of 2 bytes -> {0xAA, 0xBB}.
+  auto row0 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row0_payload = {0x01, 0xAA, 0xBB};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  // Row 1: PackBits literal run of 2 bytes -> {0xCC, 0xDD}.
+  auto row1 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row1_payload = {0x01, 0xCC, 0xDD};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+  t.QueueRead(EncodeButtonJobFinal(1));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kBitonal);
+  EXPECT_EQ(pages[0].width, 9);
+  EXPECT_EQ(pages[0].height, 2);
+  const std::vector<uint8_t> want2 = {0xAA, 0xBB, 0xCC, 0xDD};
+  EXPECT_EQ(pages[0].data, want2);
 }
 
 TEST(RunScan, TrueGrayFlatbedRawFallbackRowsRoundTrip) {
@@ -905,6 +955,54 @@ TEST(RunScan, BlackWhiteAdfMultiPageReturnsAllPages) {
   EXPECT_EQ(pages[1].data, want2);
 }
 
+// Mirrors BlackWhiteAdfMultiPageReturnsAllPages but the job's last page ends
+// with EncodeButtonJobFinal (single `0x80`) instead of
+// EncodeJobFinalTerminator (`0x80 0x80`), for parity with the color path's
+// MultiPageSingleByteJobFinalReturnsAllPages test.
+TEST(RunScan, BlackWhiteAdfMultiPageSingleByteJobFinalReturnsAllPages) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,2,"));
+
+  // Page 1: rows {0xAA, 0xBB} and {0xCC, 0xDD}, each a 2-byte literal run.
+  auto p1row0 = EncodeRlengthBlockHeader(0x42, 3, 1);
+  const std::vector<uint8_t> p1row0_payload = {0x01, 0xAA, 0xBB};
+  p1row0.insert(p1row0.end(), p1row0_payload.begin(), p1row0_payload.end());
+  t.QueueRead(p1row0);
+
+  auto p1row1 = EncodeRlengthBlockHeader(0x42, 3, 1);
+  const std::vector<uint8_t> p1row1_payload = {0x01, 0xCC, 0xDD};
+  p1row1.insert(p1row1.end(), p1row1_payload.begin(), p1row1_payload.end());
+  t.QueueRead(p1row1);
+  t.QueueRead(EncodeEndOfPageMarker(1));
+
+  // Page 2: rows {0x11, 0x22} and {0x33, 0x44}.
+  auto p2row0 = EncodeRlengthBlockHeader(0x42, 3, 2);
+  const std::vector<uint8_t> p2row0_payload = {0x01, 0x11, 0x22};
+  p2row0.insert(p2row0.end(), p2row0_payload.begin(), p2row0_payload.end());
+  t.QueueRead(p2row0);
+
+  auto p2row1 = EncodeRlengthBlockHeader(0x42, 3, 2);
+  const std::vector<uint8_t> p2row1_payload = {0x01, 0x33, 0x44};
+  p2row1.insert(p2row1.end(), p2row1_payload.begin(), p2row1_payload.end());
+  t.QueueRead(p2row1);
+  t.QueueRead(EncodeButtonJobFinal(2));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  for (const auto& page : pages) {
+    EXPECT_EQ(page.format, brscan::PixelFormat::kBitonal);
+    EXPECT_EQ(page.width, 9);
+    EXPECT_EQ(page.height, 2);
+  }
+  const std::vector<uint8_t> want3 = {0xAA, 0xBB, 0xCC, 0xDD};
+  const std::vector<uint8_t> want4 = {0x11, 0x22, 0x33, 0x44};
+  EXPECT_EQ(pages[0].data, want3);
+  EXPECT_EQ(pages[1].data, want4);
+}
+
 // A malformed end-of-page marker (byte[0] isn't the 0x82 anchor) must
 // surface as a protocol error, not a hang or a desync that misreads
 // whatever bytes follow as a bogus next page.
@@ -960,18 +1058,6 @@ const brscan::Area kButtonLetterArea = {478, 0, 2990, 3253};
 // ack -- the button flow sends neither ESC Q nor ESC S/ESC D).
 void QueueButtonGreeting(brscan::FakeTransport* t) {
   t->QueueRead(std::string("+OK 200\r\n"));
-}
-
-// The real scan-button job-final terminator: the end-of-page marker
-// followed by a SINGLE 0x80, after which the device closes the connection
-// (modeled by the FakeTransport queue ending). This is what the device
-// actually sends in the button flow (reference/brscan-daemon-live.pcap and
-// the vendor's own reference/brscan-button-options.pcap) -- NOT the driver
-// flow's 0x80 0x80.
-std::vector<uint8_t> EncodeButtonJobFinal(uint8_t pidx) {
-  std::vector<uint8_t> out = EncodeEndOfPageMarker(pidx);
-  out.push_back(0x80);
-  return out;
 }
 
 }  // namespace
