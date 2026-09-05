@@ -292,3 +292,202 @@ TEST(Command, EncodeInfoGrayUsesGray64Token) {
                                 /*duplex=*/false),
             want);
 }
+
+// --- Scan-button flow (ESC K, button ESC I / ESC X) ----------------------
+//
+// Byte targets from reference/protocol-notes-button-options.md (decoded
+// from reference/brscan-button-options.pcap, our own hardware; the command
+// byte strings carry no device identity or scan content -- safe as literal
+// fixtures here).
+
+namespace {
+
+// The scan area the printer computes for a Letter-size scan-button press at
+// 300 dpi (reference/protocol-notes-button-options.md's paper table). Used
+// as the explicit area in the button ESC X targets below.
+constexpr brscan::Area kButtonLetterArea = {478, 0, 2990, 3253};
+
+brscan::Params ButtonColorParams() {
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kColor;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  p.area = kButtonLetterArea;
+  p.button_flow = true;
+  return p;
+}
+
+}  // namespace
+
+TEST(Command, EncodeButtonQuery) {
+  // ESC K: the button-flow opener, `1b 4b 0a 80` (no body).
+  const std::vector<uint8_t> want = {0x1b, 0x4b, 0x0a, 0x80};
+  EXPECT_EQ(brscan::EncodeButtonQuery(), want);
+}
+
+TEST(Command, EncodeInfoButtonColorIncludesNormalScan) {
+  // Button ESC I for a color scan carries S=NORMAL_SCAN even though color
+  // normally would not (see EncodeInfoColorHasNoNormalScan for the
+  // non-button contrast).
+  const std::string want =
+      "\x1b" "I\n"
+      "R=300,300\n"
+      "M=CGRAY\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeInfo(300, 300, brscan::ScanMode::kColor,
+                                /*duplex=*/false, /*button_flow=*/true),
+            want_bytes);
+}
+
+TEST(Command, EncodeExecuteButtonColorLetter) {
+  // Button ESC X, color Letter@300 simplex, no remove-background: the
+  // RLENGTH-style field order with C=JPEG for color and G=0/L=0.
+  const std::string want =
+      "\x1b" "X\n"
+      "R=300,300\n"
+      "M=CGRAY\n"
+      "C=JPEG\n"
+      "J=MID\n"
+      "B=50\n"
+      "N=50\n"
+      "A=478,0,2990,3253\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "P=0\n"
+      "E=0\n"
+      "G=0\n"
+      "L=0\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeExecute(ButtonColorParams()), want_bytes);
+}
+
+TEST(Command, EncodeExecuteButtonColorRemoveBackgroundMedium) {
+  // Same as EncodeExecuteButtonColorLetter but with remove-background at the
+  // medium level: G=1, L=128.
+  auto p = ButtonColorParams();
+  p.remove_background = true;
+  p.remove_background_level = 128;
+
+  const std::string want =
+      "\x1b" "X\n"
+      "R=300,300\n"
+      "M=CGRAY\n"
+      "C=JPEG\n"
+      "J=MID\n"
+      "B=50\n"
+      "N=50\n"
+      "A=478,0,2990,3253\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "P=0\n"
+      "E=0\n"
+      "G=1\n"
+      "L=128\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeExecute(p), want_bytes);
+}
+
+TEST(Command, EncodeExecuteButtonBlackWhiteMatchesRlengthBranch) {
+  // Button BW (M=TEXT) uses C=RLENGTH -- identical to the non-button RLENGTH
+  // branch output for the same params. Assert both the literal bytes and
+  // byte-equality with the button_flow=false encoding (the regression guard
+  // that the button change left the RLENGTH path untouched for TEXT).
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kBlackWhite;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  p.area = kButtonLetterArea;
+  p.button_flow = true;
+
+  const std::string want =
+      "\x1b" "X\n"
+      "R=300,300\n"
+      "M=TEXT\n"
+      "C=RLENGTH\n"
+      "J=MID\n"
+      "B=50\n"
+      "N=50\n"
+      "A=478,0,2990,3253\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "P=0\n"
+      "E=0\n"
+      "G=0\n"
+      "L=0\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeExecute(p), want_bytes);
+
+  brscan::Params non_button = p;
+  non_button.button_flow = false;
+  EXPECT_EQ(brscan::EncodeExecute(p), brscan::EncodeExecute(non_button));
+}
+
+// --- Regression guards: the button-flow additions must not change the
+// bytes of the pre-existing (non-button) color or RLENGTH ESC X commands.
+
+TEST(Command, EncodeExecuteExistingColorUnchanged) {
+  // Non-button color still takes the older CGRAY/GRAY64 branch: field order
+  // B,N,M,C,J,R,A,D,P,E,G with C=JPEG, E=1, and NO S=/L= lines -- distinct
+  // from the button/RLENGTH order above. Locked here against a literal so a
+  // future button-flow edit that leaked into this branch would be caught.
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kColor;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  p.area = {0, 0, 100, 200};
+  // button_flow defaults false; remove_background defaults false/0.
+
+  const std::string want =
+      "\x1b" "X\n"
+      "B=50\n"
+      "N=50\n"
+      "M=CGRAY\n"
+      "C=JPEG\n"
+      "J=MID\n"
+      "R=300,300\n"
+      "A=0,0,100,200\n"
+      "D=SIN\n"
+      "P=0\n"
+      "E=1\n"
+      "G=0\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeExecute(p), want_bytes);
+}
+
+TEST(Command, EncodeExecuteExistingRlengthUnchanged) {
+  // Non-button RLENGTH (M=TEXT) is byte-identical to the captured bytes
+  // asserted in EncodeExecuteTextMatchesCapturedBytes -- re-asserted here as
+  // an explicit "button change didn't touch me" guard against the same
+  // literal.
+  brscan::Params p;
+  p.mode = brscan::ScanMode::kBlackWhite;
+  p.x_dpi = 300;
+  p.y_dpi = 300;
+  p.area = {0, 0, 3472, 4913};
+
+  const std::string want =
+      "\x1b" "X\n"
+      "R=300,300\n"
+      "M=TEXT\n"
+      "C=RLENGTH\n"
+      "J=MID\n"
+      "B=50\n"
+      "N=50\n"
+      "A=0,0,3472,4913\n"
+      "D=SIN\n"
+      "S=NORMAL_SCAN\n"
+      "P=0\n"
+      "E=0\n"
+      "G=0\n"
+      "L=0\n"
+      "\x80";
+  const std::vector<uint8_t> want_bytes(want.begin(), want.end());
+  EXPECT_EQ(brscan::EncodeExecute(p), want_bytes);
+}

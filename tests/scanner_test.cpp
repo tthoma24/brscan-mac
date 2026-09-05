@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 
 #include "brscan/transport_tcp.h"
 #include "brscan/types.h"
+#include "command.h"
 #include "fake_transport.h"
 
 namespace {
@@ -925,6 +927,209 @@ TEST(RunScan, MalformedEndOfPageMarkerIsProtocolError) {
   const auto status = brscan::RunScan(t, ColorParams(), &pages);
   EXPECT_EQ(status, brscan::Status::kProtocolError);
   EXPECT_TRUE(pages.empty());
+}
+
+// --- Scan-button flow (RunButtonScan) -------------------------------------
+
+namespace {
+
+// The config-command frame the printer pushes after ESC K: `0x30 <len>
+// 0x00` then the KEY=VALUE payload (see docs/BUTTON.md's "Config command"
+// and reference/protocol-notes-button-options.md). <len> is the payload's
+// byte count. Carries no device identity or scan content.
+std::vector<uint8_t> EncodeButtonConfigFrame(const std::string& payload) {
+  std::vector<uint8_t> out;
+  out.push_back(0x30);
+  out.push_back(static_cast<uint8_t>(payload.size()));
+  out.push_back(0x00);
+  out.insert(out.end(), payload.begin(), payload.end());
+  return out;
+}
+
+// A baseline File/Color/PDF/Letter config payload, verbatim from
+// reference/protocol-notes-button-options.md's captured fixtures.
+const char* const kColorLetterConfigPayload =
+    "F=FILE\nD=SIN\nE=LON\nR=300\nM=CGRAY\nP=LETTER\nA=0\n"
+    "T=PDF(Image)\nW=0\nG=0\nX=0\n";
+
+// The Letter-size scan area at 300 dpi the daemon's callback would supply
+// (reference/protocol-notes-button-options.md paper table).
+const brscan::Area kButtonLetterArea = {478, 0, 2990, 3253};
+
+// Queues the button-flow greeting only (no ESC Q reply, no source-select
+// ack -- the button flow sends neither ESC Q nor ESC S/ESC D).
+void QueueButtonGreeting(brscan::FakeTransport* t) {
+  t->QueueRead(std::string("+OK 200\r\n"));
+}
+
+}  // namespace
+
+// Full color scan-button session over a mock transport: greeting, ESC K ->
+// config frame, ESC I -> offer, ESC X -> one JPEG page + job-final
+// terminator. Asserts the callback saw the exact config-frame bytes, the
+// returned page, and that the wire carried ESC K / button ESC I / button
+// ESC X and NONE of ESC Q, ESC S, or ESC D.
+TEST(RunButtonScan, ColorSessionReturnsPageAndSendsButtonCommands) {
+  brscan::FakeTransport t;
+  QueueButtonGreeting(&t);
+  const auto config_frame = EncodeButtonConfigFrame(kColorLetterConfigPayload);
+  t.QueueRead(config_frame);
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  const auto jpeg = MakeSyntheticJpeg(16, 8);
+  auto block = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()), 1);
+  block.insert(block.end(), jpeg.begin(), jpeg.end());
+  t.QueueRead(block);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<uint8_t> seen_config;
+  int calls = 0;
+  const brscan::ButtonParamsFn cb =
+      [&](const std::vector<uint8_t>& config) -> std::optional<brscan::Params> {
+    ++calls;
+    seen_config = config;
+    brscan::Params p;
+    p.mode = brscan::ScanMode::kColor;
+    p.x_dpi = 300;
+    p.y_dpi = 300;
+    p.area = kButtonLetterArea;
+    return p;
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunButtonScan(t, cb, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+
+  // (a) callback invoked once with the exact full config frame.
+  EXPECT_EQ(calls, 1);
+  EXPECT_EQ(seen_config, config_frame);
+
+  // (c) one page, correct dimensions/bytes.
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kRgb);
+  EXPECT_EQ(pages[0].width, 16);
+  EXPECT_EQ(pages[0].height, 8);
+  EXPECT_EQ(pages[0].data, jpeg);
+
+  // (b) the wire carried ESC K, button ESC I (S=NORMAL_SCAN), button ESC X
+  // (with the returned area), and NO ESC Q / ESC S / ESC D.
+  brscan::Params exec = *cb(config_frame);  // same Params the flow computed.
+  exec.button_flow = true;
+  EXPECT_TRUE(Contains(t.written(), brscan::EncodeButtonQuery()))
+      << "button flow must issue ESC K";
+  EXPECT_TRUE(Contains(t.written(),
+                       brscan::EncodeInfo(300, 300, brscan::ScanMode::kColor,
+                                          /*duplex=*/false,
+                                          /*button_flow=*/true)))
+      << "button flow must issue ESC I with S=NORMAL_SCAN";
+  EXPECT_TRUE(Contains(t.written(), brscan::EncodeExecute(exec)))
+      << "button flow must issue the button ESC X with the returned area";
+  // 0x1b 0x51 = ESC Q, 0x1b 0x53 = ESC S, 0x1b 0x44 = ESC D.
+  EXPECT_FALSE(Contains(t.written(), {0x1b, 0x51})) << "no ESC Q in button flow";
+  EXPECT_FALSE(Contains(t.written(), {0x1b, 0x53})) << "no ESC S in button flow";
+  EXPECT_FALSE(Contains(t.written(), {0x1b, 0x44})) << "no ESC D in button flow";
+}
+
+// Multi-page color scan-button session: two JPEG pages, proving the shared
+// RunReadout page loop is wired into the button flow too (not just RunScan).
+TEST(RunButtonScan, ColorMultiPageReturnsAllPages) {
+  brscan::FakeTransport t;
+  QueueButtonGreeting(&t);
+  t.QueueRead(EncodeButtonConfigFrame(kColorLetterConfigPayload));
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  const auto jpeg1 = MakeSyntheticJpeg(16, 8);
+  const auto jpeg2 = MakeSyntheticJpeg(16, 8);
+  auto block1 = EncodeBlockHeader(static_cast<uint16_t>(jpeg1.size()), 1);
+  block1.insert(block1.end(), jpeg1.begin(), jpeg1.end());
+  t.QueueRead(block1);
+  t.QueueRead(EncodeEndOfPageMarker(1));  // tail: next page's `64 07`.
+  auto block2 = EncodeBlockHeader(static_cast<uint16_t>(jpeg2.size()), 2);
+  block2.insert(block2.end(), jpeg2.begin(), jpeg2.end());
+  t.QueueRead(block2);
+  t.QueueRead(EncodeJobFinalTerminator(2));  // tail: `80 80`, job done.
+
+  const brscan::ButtonParamsFn cb =
+      [&](const std::vector<uint8_t>&) -> std::optional<brscan::Params> {
+    brscan::Params p;
+    p.mode = brscan::ScanMode::kColor;
+    p.x_dpi = 300;
+    p.y_dpi = 300;
+    p.area = kButtonLetterArea;
+    return p;
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunButtonScan(t, cb, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[0].data, jpeg1);
+  EXPECT_EQ(pages[1].data, jpeg2);
+}
+
+// A callback returning std::nullopt (an unusable config) aborts the session
+// as a protocol error, with no partial pages.
+TEST(RunButtonScan, NulloptCallbackReportsProtocolError) {
+  brscan::FakeTransport t;
+  QueueButtonGreeting(&t);
+  const auto config_frame = EncodeButtonConfigFrame(kColorLetterConfigPayload);
+  t.QueueRead(config_frame);
+
+  std::vector<uint8_t> seen_config;
+  const brscan::ButtonParamsFn cb =
+      [&](const std::vector<uint8_t>& config) -> std::optional<brscan::Params> {
+    seen_config = config;
+    return std::nullopt;
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunButtonScan(t, cb, &pages);
+  EXPECT_EQ(status, brscan::Status::kProtocolError);
+  EXPECT_TRUE(pages.empty());
+  // The callback is still handed the full config frame before it declines.
+  EXPECT_EQ(seen_config, config_frame);
+}
+
+// A malformed config frame (bad leading byte) is rejected before the
+// callback is ever consulted.
+TEST(RunButtonScan, MalformedConfigFrameReportsProtocolError) {
+  brscan::FakeTransport t;
+  QueueButtonGreeting(&t);
+  // Header byte 0 is 0x31, not the required 0x30 -- malformed.
+  t.QueueRead(std::vector<uint8_t>{0x31, 0x02, 0x00, 0x41, 0x42});
+
+  int calls = 0;
+  const brscan::ButtonParamsFn cb =
+      [&](const std::vector<uint8_t>&) -> std::optional<brscan::Params> {
+    ++calls;
+    return brscan::Params{};
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunButtonScan(t, cb, &pages);
+  EXPECT_EQ(status, brscan::Status::kProtocolError);
+  EXPECT_TRUE(pages.empty());
+  EXPECT_EQ(calls, 0) << "malformed frame must not reach the callback";
+}
+
+// A busy greeting (-NG 401) maps to kBusy, exactly as in RunScan, before any
+// button command is sent or the callback is consulted.
+TEST(RunButtonScan, BusyGreetingReportsBusy) {
+  brscan::FakeTransport t;
+  t.QueueRead(std::string("-NG 401\r\n"));
+
+  int calls = 0;
+  const brscan::ButtonParamsFn cb =
+      [&](const std::vector<uint8_t>&) -> std::optional<brscan::Params> {
+    ++calls;
+    return brscan::Params{};
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunButtonScan(t, cb, &pages);
+  EXPECT_EQ(status, brscan::Status::kBusy);
+  EXPECT_TRUE(pages.empty());
+  EXPECT_EQ(calls, 0);
 }
 
 // Live, opt-in: connects to a real device and runs a small color flatbed

@@ -51,6 +51,14 @@ struct Params {
   int contrast = 50;
   Area area = {0, 0, 0, 0};
   bool duplex = false;
+  // Scan-button flow selectors. When button_flow is set, EncodeInfo emits
+  // S=NORMAL_SCAN even for color and EncodeExecute uses the RLENGTH-style
+  // field order with C=JPEG for color (see docs/BUTTON.md's "Scan-button
+  // wire flow" and command.cpp). All three default so the normal
+  // RunScan/CLI path is byte-for-byte unchanged.
+  bool button_flow = false;
+  bool remove_background = false;    // G= in the button ESC X.
+  int remove_background_level = 0;   // L= in the button ESC X (0/64/128/192).
 };
 
 // The scanner's granted-parameters reply to ESC I, decoded from the

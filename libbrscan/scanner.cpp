@@ -525,6 +525,181 @@ Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
   return Status::kOk;
 }
 
+// Reads the ESC I offer reply -- [1-byte status][2-byte LE length][text][NUL]
+// -- off the wire and returns the parsed Offer. Shared by RunScan and
+// RunButtonScan: both negotiate with ESC I and MUST consume this reply in
+// full before ESC X, whether or not they end up using its granted area.
+//
+// The status byte's value (0x00 in every sample seen, live or captured) is
+// skipped, not validated -- nothing in either flow depends on it (a live
+// probe and a re-read of reference/streams/s0_in.bin placed it as a separate
+// leading byte here, not the tail of the preceding reply). The offer text
+// carries a trailing NUL inside its length-prefixed frame; it's stripped
+// before ParseOffer, which expects the CSV to end at its own terminating
+// comma.
+Status ReadOfferReply(Framer* framer, int timeout_ms, Offer* offer) {
+  std::vector<uint8_t> offer_status;
+  Status status = framer->ReadExact(1, timeout_ms, &offer_status);
+  if (status != Status::kOk) return status;
+
+  std::vector<uint8_t> len_bytes;
+  status = framer->ReadExact(2, timeout_ms, &len_bytes);
+  if (status != Status::kOk) return status;
+  const size_t offer_len = static_cast<size_t>(len_bytes[0]) |
+                           (static_cast<size_t>(len_bytes[1]) << 8);
+
+  std::vector<uint8_t> offer_bytes;
+  status = framer->ReadExact(offer_len, timeout_ms, &offer_bytes);
+  if (status != Status::kOk) return status;
+  if (!offer_bytes.empty() && offer_bytes.back() == 0) offer_bytes.pop_back();
+  const std::string offer_csv(offer_bytes.begin(), offer_bytes.end());
+  const auto parsed = ParseOffer(offer_csv);
+  if (!parsed.has_value()) return Status::kProtocolError;
+  *offer = *parsed;
+  return Status::kOk;
+}
+
+// If exec_params.area is the zero value ({0,0,0,0}, "not set by the caller"),
+// replaces it with the full area the ESC I offer just granted. Shared by both
+// entry points; the scan-button flow normally supplies a concrete paper-table
+// area, so this is the fallback path there rather than the usual one.
+void ApplyOfferAreaFallback(const Offer& offer, Params* exec_params) {
+  const Area& a = exec_params->area;
+  if (a.x0 == 0 && a.y0 == 0 && a.x1 == 0 && a.y1 == 0) {
+    exec_params->area = Area{0, 0, offer.width_px, offer.height_px};
+  }
+}
+
+// Runs the block-header/payload readout that follows ESC X: one ScanResult
+// per page, looped until the device's job-final terminator. Shared verbatim
+// by RunScan and RunButtonScan -- the two differ only in their ESC K/ESC Q +
+// source-select + ESC I/ESC X preamble; from ESC X onward the wire framing is
+// identical (same block headers, same 10-byte end-of-page markers, same
+// duplex de-interleaving), so this is the single readout implementation both
+// call rather than a copy in each. It does NOT clear *out on error -- the
+// caller owns the "out is empty on any non-kOk Status" contract and clears it
+// before returning.
+Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
+                  std::vector<ScanResult>* out) {
+  // Color (CGRAY/C=JPEG) has its own de-interleaving readout: a duplex feed
+  // multiplexes the two sides' chunks by page index, so it cannot use the
+  // one-whole-page-at-a-time sequential loop below. RunColorScan handles
+  // simplex, duplex, and single-page flatbed alike.
+  if (exec_params.mode == ScanMode::kColor) {
+    return RunColorScan(framer, timeout_ms, out);
+  }
+
+  // TODO(duplex gray/RLENGTH): the gray (GRAY64/C=NONE) and RLENGTH
+  // (Black & White/Error Diffusion/True Gray) paths below read one whole
+  // page at a time in EOP order. That is correct for simplex ADF and
+  // flatbed, and matches every gray/RLENGTH sample captured (all
+  // simplex/single-page -- see PROVENANCE.md), but duplex interleaving has
+  // only ever been observed and captured for color. If the device also
+  // interleaves duplex gray/RLENGTH chunks by page index, this loop would
+  // desync; that case is uncaptured and out of scope here. Generalizing
+  // these modes to the same page-index de-interleaving RunColorScan does
+  // would require a real duplex gray/RLENGTH capture to confirm the framing.
+  for (;;) {
+    BlockHeader header;
+    Status status = ReadBlockHeader(framer, timeout_ms, &header);
+    if (status != Status::kOk) return status;
+
+    ScanResult page;
+
+    if (exec_params.mode == ScanMode::kBlackWhite ||
+        exec_params.mode == ScanMode::kErrorDiffusion ||
+        exec_params.mode == ScanMode::kTrueGray) {
+      const bool bitonal = exec_params.mode != ScanMode::kTrueGray;
+      const int width = exec_params.area.x1 - exec_params.area.x0;
+      const int height = exec_params.area.y1 - exec_params.area.y0;
+      if (width <= 0 || height <= 0) return Status::kProtocolError;
+      const size_t row_bytes = RlengthRowBytes(width, bitonal);
+
+      std::vector<uint8_t> pixels;
+      status = ReadRlengthRows(framer, header, height, row_bytes, timeout_ms,
+                               &pixels);
+      if (status != Status::kOk) return status;
+
+      Image image;
+      const Status decode_status =
+          bitonal ? WrapBitonalImage(width, height, pixels, &image)
+                  : DecodeGrayRaw(width, height, pixels.data(), pixels.size(),
+                                  &image);
+      if (decode_status != Status::kOk) return decode_status;
+
+      page.format = bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
+      page.width = width;
+      page.height = height;
+      page.data = std::move(pixels);
+    } else {
+      // Gray: raw payload, exactly width * height bytes, no embedded
+      // headers (see ReadRawGray). Width comes from this block's header
+      // (confirmed reliable for a gray payload); height comes from the
+      // requested area, since gray has no length field analogous to the
+      // JPEG case to confirm it against.
+      //
+      // Residual risk: `height` here is what we *asked for*, not
+      // something the device confirms back -- unlike color, where the
+      // actual JPEG dimensions come from the decoded image itself. If the
+      // device ever auto-crops a gray scan's delivered height short of
+      // the requested area (as Task 6's report notes it does for some
+      // same-offer color scans, trimming to detected paper edges),
+      // ReadRawGray would block waiting for bytes that never arrive
+      // rather than returning the shorter image, surfacing as
+      // Status::kTimeout. Not observed in this task's live gray scans,
+      // but not independently ruled out either.
+      const int width = header.width;
+      const int height = exec_params.area.y1 - exec_params.area.y0;
+      if (width <= 0 || height <= 0) return Status::kProtocolError;
+      const size_t expected =
+          static_cast<size_t>(width) * static_cast<size_t>(height);
+
+      std::vector<uint8_t> raw;
+      status = ReadRawGray(framer, expected, timeout_ms, &raw);
+      if (status != Status::kOk) return status;
+
+      Image image;
+      const Status decode_status =
+          DecodeGrayRaw(width, height, raw.data(), raw.size(), &image);
+      if (decode_status != Status::kOk) return decode_status;
+
+      page.format = PixelFormat::kGray;
+      page.width = width;
+      page.height = height;
+      page.data = std::move(raw);
+    }
+
+    out->push_back(std::move(page));
+
+    // End-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00, exactly 10
+    // bytes (see docs/PROTOCOL.md, "Multi-page (ADF)"). Read it as a fixed
+    // count plus a 2-byte peek rather than routing it through
+    // ReadBlockHeader, which would consume the 2 bytes right after it --
+    // either the job-final `80 80` or the next page's block header -- and
+    // desync the rest of the stream.
+    std::vector<uint8_t> marker;
+    status = framer->ReadExact(10, timeout_ms, &marker);
+    if (status != Status::kOk) return status;
+    if (marker[0] != 0x82 || marker[1] != 0x07 || marker[5] != 0x84) {
+      return Status::kProtocolError;
+    }
+
+    std::vector<uint8_t> tail;
+    status = framer->Peek(2, timeout_ms, &tail);
+    if (status != Status::kOk) return status;
+    if (tail[0] == 0x80 && tail[1] == 0x80) {
+      std::vector<uint8_t> consumed;
+      status = framer->ReadExact(2, timeout_ms, &consumed);
+      if (status != Status::kOk) return status;
+      break;  // Job-final terminator: no more pages.
+    }
+    // Otherwise `tail` is the next page's block header (e.g. `64 07` for
+    // color) -- loop back to ReadBlockHeader without consuming it.
+  }
+
+  return Status::kOk;
+}
+
 }  // namespace
 
 Status RunScan(Transport& transport, const Params& params,
@@ -588,42 +763,16 @@ Status RunScan(Transport& transport, const Params& params,
   status = send(EncodeInfo(params.x_dpi, params.y_dpi, params.mode, params.duplex));
   if (status != Status::kOk) return status;
 
-  // The offer reply is [1-byte status][2-byte LE length][text][NUL]. A
-  // live probe against the real device (and a closer re-read of
-  // reference/streams/s0_in.bin) placed this status byte precisely: it's
-  // a separate byte here, not the last byte of the preceding ESC Q reply
-  // as this task's initial protocol-notes.md-only analysis assumed. Its
-  // value (0x00 in every sample seen) isn't validated, only skipped,
-  // since nothing in this flow depends on it.
-  std::vector<uint8_t> offer_status;
-  status = framer.ReadExact(1, kAckTimeoutMs, &offer_status);
+  // Read and parse the ESC I offer reply (drained in full before ESC X;
+  // see ReadOfferReply for the framing).
+  Offer offer;
+  status = ReadOfferReply(&framer, kAckTimeoutMs, &offer);
   if (status != Status::kOk) return status;
-
-  std::vector<uint8_t> len_bytes;
-  status = framer.ReadExact(2, kAckTimeoutMs, &len_bytes);
-  if (status != Status::kOk) return status;
-  const size_t offer_len =
-      static_cast<size_t>(len_bytes[0]) | (static_cast<size_t>(len_bytes[1]) << 8);
-
-  std::vector<uint8_t> offer_bytes;
-  status = framer.ReadExact(offer_len, kAckTimeoutMs, &offer_bytes);
-  if (status != Status::kOk) return status;
-  // The offer text is followed by a trailing NUL inside its length-prefixed
-  // frame (confirmed in every captured sample); strip it before handing
-  // the CSV to ParseOffer, which expects the text to end at its own
-  // terminating comma.
-  if (!offer_bytes.empty() && offer_bytes.back() == 0) offer_bytes.pop_back();
-  const std::string offer_csv(offer_bytes.begin(), offer_bytes.end());
-  const auto offer = ParseOffer(offer_csv);
-  if (!offer.has_value()) return Status::kProtocolError;
 
   // An all-zero Params::area means "not set by the caller": request the
   // full area the offer just granted.
   Params exec_params = params;
-  const Area& a = exec_params.area;
-  if (a.x0 == 0 && a.y0 == 0 && a.x1 == 0 && a.y1 == 0) {
-    exec_params.area = Area{0, 0, offer->width_px, offer->height_px};
-  }
+  ApplyOfferAreaFallback(offer, &exec_params);
 
   // Execute. This runs once regardless of how many pages the device ends
   // up streaming back: a document-feeder scan negotiates and starts a
@@ -633,132 +782,93 @@ Status RunScan(Transport& transport, const Params& params,
   status = send(EncodeExecute(exec_params));
   if (status != Status::kOk) return status;
 
-  // On any failure from here on, `out` must not be left holding a partial
-  // page list (see scanner.h's doc comment on RunScan) -- clear it before
-  // returning whatever error status was found.
-  const auto fail = [&](Status s) {
+  // From ESC X onward the readout is identical to the button flow's, so it
+  // lives in RunReadout. On any failure, `out` must not be left holding a
+  // partial page list (see scanner.h's doc comment on RunScan) -- clear it
+  // before returning whatever error status was found.
+  status = RunReadout(&framer, exec_params, kScanTimeoutMs, out);
+  if (status != Status::kOk) {
     out->clear();
-    return s;
+    return status;
+  }
+  return Status::kOk;
+}
+
+Status RunButtonScan(Transport& transport,
+                     const ButtonParamsFn& params_from_config,
+                     std::vector<ScanResult>* out) {
+  if (out == nullptr) return Status::kProtocolError;
+  out->clear();
+
+  // Greeting -- identical to RunScan (Session::Open maps +OK 200 -> kOk,
+  // -NG 401 -> kBusy, anything else -> kProtocolError).
+  Status status = Session(&transport).Open();
+  if (status != Status::kOk) return status;
+
+  Framer framer(&transport);
+  const auto send = [&](const std::vector<uint8_t>& bytes) {
+    return transport.Write(bytes.data(), bytes.size());
   };
 
-  // Color (CGRAY/C=JPEG) has its own de-interleaving readout: a duplex feed
-  // multiplexes the two sides' chunks by page index, so it cannot use the
-  // one-whole-page-at-a-time sequential loop below. RunColorScan handles
-  // simplex, duplex, and single-page flatbed alike.
-  if (params.mode == ScanMode::kColor) {
-    status = RunColorScan(&framer, kScanTimeoutMs, out);
-    if (status != Status::kOk) return fail(status);
-    return Status::kOk;
+  // ESC K: the button-flow opener, in place of ESC Q. NO source-select
+  // command follows (the button flow issues neither ESC S FB nor ESC D
+  // ADF; see docs/BUTTON.md and reference/protocol-notes-button-options.md).
+  status = send(EncodeButtonQuery());
+  if (status != Status::kOk) return status;
+
+  // Read the pushed config-command frame: a 3-byte header (0x30 <len> 0x00)
+  // then <len> payload bytes. The full frame (header + payload) is handed to
+  // the callback verbatim. Unlike the ESC Q capability block, this frame is
+  // self-describing (its length byte), so it is read by exact count rather
+  // than drained to quiet.
+  std::vector<uint8_t> config;
+  status = framer.ReadExact(3, kAckTimeoutMs, &config);
+  if (status != Status::kOk) return status;
+  if (config[0] != 0x30 || config[2] != 0x00) return Status::kProtocolError;
+  const size_t payload_len = config[1];
+  std::vector<uint8_t> payload;
+  status = framer.ReadExact(payload_len, kAckTimeoutMs, &payload);
+  if (status != Status::kOk) return status;
+  config.insert(config.end(), payload.begin(), payload.end());
+
+  // Ask the caller to turn the pushed config into concrete scan Params.
+  // std::nullopt aborts the session as an unusable config (kProtocolError).
+  std::optional<Params> maybe_params = params_from_config(config);
+  if (!maybe_params.has_value()) return Status::kProtocolError;
+  Params params = *maybe_params;
+  // RunButtonScan *is* the button flow, so force the button ESC I/ESC X
+  // shape regardless of what the callback left in Params::button_flow -- a
+  // callback that forgot to set it must not silently fall back to the
+  // normal (ESC Q-style) color ESC X.
+  params.button_flow = true;
+
+  // ESC I with S=NORMAL_SCAN (button_flow=true even for color). No
+  // source-select preceded it.
+  status = send(EncodeInfo(params.x_dpi, params.y_dpi, params.mode,
+                           params.duplex, /*button_flow=*/true));
+  if (status != Status::kOk) return status;
+
+  // Drain and parse the offer reply. The button flow supplies a concrete
+  // paper-table area in Params::area, so the offer's area is only a
+  // fallback (an all-zero area) -- but its bytes MUST be consumed before
+  // ESC X either way.
+  Offer offer;
+  status = ReadOfferReply(&framer, kAckTimeoutMs, &offer);
+  if (status != Status::kOk) return status;
+
+  Params exec_params = params;
+  ApplyOfferAreaFallback(offer, &exec_params);
+
+  // ESC X in the button variant (selected by exec_params.button_flow).
+  status = send(EncodeExecute(exec_params));
+  if (status != Status::kOk) return status;
+
+  // The block/payload readout is identical to RunScan's from ESC X onward.
+  status = RunReadout(&framer, exec_params, kScanTimeoutMs, out);
+  if (status != Status::kOk) {
+    out->clear();
+    return status;
   }
-
-  // TODO(duplex gray/RLENGTH): the gray (GRAY64/C=NONE) and RLENGTH
-  // (Black & White/Error Diffusion/True Gray) paths below read one whole
-  // page at a time in EOP order. That is correct for simplex ADF and
-  // flatbed, and matches every gray/RLENGTH sample captured (all
-  // simplex/single-page -- see PROVENANCE.md), but duplex interleaving has
-  // only ever been observed and captured for color. If the device also
-  // interleaves duplex gray/RLENGTH chunks by page index, this loop would
-  // desync; that case is uncaptured and out of scope here. Generalizing
-  // these modes to the same page-index de-interleaving RunColorScan does
-  // would require a real duplex gray/RLENGTH capture to confirm the framing.
-  for (;;) {
-    BlockHeader header;
-    status = ReadBlockHeader(&framer, kScanTimeoutMs, &header);
-    if (status != Status::kOk) return fail(status);
-
-    ScanResult page;
-
-    if (params.mode == ScanMode::kBlackWhite ||
-        params.mode == ScanMode::kErrorDiffusion ||
-        params.mode == ScanMode::kTrueGray) {
-      const bool bitonal = params.mode != ScanMode::kTrueGray;
-      const int width = exec_params.area.x1 - exec_params.area.x0;
-      const int height = exec_params.area.y1 - exec_params.area.y0;
-      if (width <= 0 || height <= 0) return fail(Status::kProtocolError);
-      const size_t row_bytes = RlengthRowBytes(width, bitonal);
-
-      std::vector<uint8_t> pixels;
-      status = ReadRlengthRows(&framer, header, height, row_bytes,
-                                kScanTimeoutMs, &pixels);
-      if (status != Status::kOk) return fail(status);
-
-      Image image;
-      const Status decode_status =
-          bitonal ? WrapBitonalImage(width, height, pixels, &image)
-                  : DecodeGrayRaw(width, height, pixels.data(), pixels.size(),
-                                  &image);
-      if (decode_status != Status::kOk) return fail(decode_status);
-
-      page.format = bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
-      page.width = width;
-      page.height = height;
-      page.data = std::move(pixels);
-    } else {
-      // Gray: raw payload, exactly width * height bytes, no embedded
-      // headers (see ReadRawGray). Width comes from this block's header
-      // (confirmed reliable for a gray payload); height comes from the
-      // requested area, since gray has no length field analogous to the
-      // JPEG case to confirm it against.
-      //
-      // Residual risk: `height` here is what we *asked for*, not
-      // something the device confirms back -- unlike color, where the
-      // actual JPEG dimensions come from the decoded image itself. If the
-      // device ever auto-crops a gray scan's delivered height short of
-      // the requested area (as Task 6's report notes it does for some
-      // same-offer color scans, trimming to detected paper edges),
-      // ReadRawGray would block waiting for bytes that never arrive
-      // rather than returning the shorter image, surfacing as
-      // Status::kTimeout. Not observed in this task's live gray scans,
-      // but not independently ruled out either.
-      const int width = header.width;
-      const int height = exec_params.area.y1 - exec_params.area.y0;
-      if (width <= 0 || height <= 0) return fail(Status::kProtocolError);
-      const size_t expected =
-          static_cast<size_t>(width) * static_cast<size_t>(height);
-
-      std::vector<uint8_t> raw;
-      status = ReadRawGray(&framer, expected, kScanTimeoutMs, &raw);
-      if (status != Status::kOk) return fail(status);
-
-      Image image;
-      const Status decode_status =
-          DecodeGrayRaw(width, height, raw.data(), raw.size(), &image);
-      if (decode_status != Status::kOk) return fail(decode_status);
-
-      page.format = PixelFormat::kGray;
-      page.width = width;
-      page.height = height;
-      page.data = std::move(raw);
-    }
-
-    out->push_back(std::move(page));
-
-    // End-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00, exactly 10
-    // bytes (see docs/PROTOCOL.md, "Multi-page (ADF)"). Read it as a fixed
-    // count plus a 2-byte peek rather than routing it through
-    // ReadBlockHeader, which would consume the 2 bytes right after it --
-    // either the job-final `80 80` or the next page's block header -- and
-    // desync the rest of the stream.
-    std::vector<uint8_t> marker;
-    status = framer.ReadExact(10, kScanTimeoutMs, &marker);
-    if (status != Status::kOk) return fail(status);
-    if (marker[0] != 0x82 || marker[1] != 0x07 || marker[5] != 0x84) {
-      return fail(Status::kProtocolError);
-    }
-
-    std::vector<uint8_t> tail;
-    status = framer.Peek(2, kScanTimeoutMs, &tail);
-    if (status != Status::kOk) return fail(status);
-    if (tail[0] == 0x80 && tail[1] == 0x80) {
-      std::vector<uint8_t> consumed;
-      status = framer.ReadExact(2, kScanTimeoutMs, &consumed);
-      if (status != Status::kOk) return fail(status);
-      break;  // Job-final terminator: no more pages.
-    }
-    // Otherwise `tail` is the next page's block header (e.g. `64 07` for
-    // color) -- loop back to ReadBlockHeader without consuming it.
-  }
-
   return Status::kOk;
 }
 

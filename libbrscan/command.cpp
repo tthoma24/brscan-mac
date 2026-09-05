@@ -57,6 +57,8 @@ bool UsesRlength(ScanMode mode) {
 
 std::vector<uint8_t> EncodeQuery() { return Frame('Q', ""); }
 
+std::vector<uint8_t> EncodeButtonQuery() { return Frame('K', ""); }
+
 std::vector<uint8_t> EncodeReset() { return {kEsc, 'R'}; }
 
 std::vector<uint8_t> EncodeSelectFlatbed() { return Frame('S', "FB\n"); }
@@ -64,15 +66,18 @@ std::vector<uint8_t> EncodeSelectFlatbed() { return Frame('S', "FB\n"); }
 std::vector<uint8_t> EncodeSelectAdf() { return Frame('D', "ADF\n"); }
 
 std::vector<uint8_t> EncodeInfo(int x_dpi, int y_dpi, ScanMode mode,
-                                 bool duplex) {
+                                 bool duplex, bool button_flow) {
   std::string body;
   body += "R=" + std::to_string(x_dpi) + "," + std::to_string(y_dpi) + "\n";
   body += "M=" + std::string(ModeToken(mode)) + "\n";
   body += "D=" + std::string(DuplexToken(duplex)) + "\n";
   // Confirmed in the ESC I bytes of reference/streams/modes_{text,errdif,
   // gray256}_out.bin: iPrint&Scan's RLENGTH flow also carries S=NORMAL_SCAN
-  // here, appended after D= (the existing R,M,D order is unchanged).
-  if (UsesRlength(mode)) body += "S=NORMAL_SCAN\n";
+  // here, appended after D= (the existing R,M,D order is unchanged). The
+  // scan-button flow carries it for color too (button_flow; see
+  // reference/protocol-notes-button-options.md), so the condition is
+  // "RLENGTH mode OR button flow".
+  if (UsesRlength(mode) || button_flow) body += "S=NORMAL_SCAN\n";
   return Frame('I', body);
 }
 
@@ -81,7 +86,7 @@ std::vector<uint8_t> EncodeExecute(const Params& params) {
   const bool rlength = UsesRlength(params.mode);
 
   std::string body;
-  if (rlength) {
+  if (rlength || params.button_flow) {
     // Field order and param set here replicate iPrint&Scan's ESC X for the
     // RLENGTH modes byte-for-byte (reference/streams/modes_{text,errdif,
     // gray256}_out.bin all share this exact shape, differing only in the
@@ -91,10 +96,21 @@ std::vector<uint8_t> EncodeExecute(const Params& params) {
     // (docs/PROTOCOL.md) to accept either field order, so this is kept
     // byte-identical to the captured, known-working command rather than
     // merged into the older branch's ordering.
+    //
+    // The scan-button flow (params.button_flow) reuses this exact field
+    // order for color too (reference/protocol-notes-button-options.md),
+    // differing only in the C= token and the G=/L= remove-background values:
+    //   - C=: RLENGTH for an RLENGTH mode; otherwise JPEG for color
+    //     (button CGRAY) or NONE (button gray).
+    //   - G=/L=: from params.remove_background / remove_background_level.
+    // Both default so an RLENGTH (non-button) command is byte-identical to
+    // before: rlength => C=RLENGTH, and G=0/L=0 from the field defaults.
+    const char* c_token =
+        rlength ? "RLENGTH" : (color ? "JPEG" : "NONE");
     body += "R=" + std::to_string(params.x_dpi) + "," +
             std::to_string(params.y_dpi) + "\n";
     body += "M=" + std::string(ModeToken(params.mode)) + "\n";
-    body += "C=RLENGTH\n";
+    body += "C=" + std::string(c_token) + "\n";
     body += "J=MID\n";
     body += "B=" + std::to_string(params.brightness) + "\n";
     body += "N=" + std::to_string(params.contrast) + "\n";
@@ -106,8 +122,8 @@ std::vector<uint8_t> EncodeExecute(const Params& params) {
     body += "S=NORMAL_SCAN\n";
     body += "P=0\n";
     body += "E=0\n";
-    body += "G=0\n";
-    body += "L=0\n";
+    body += "G=" + std::to_string(params.remove_background ? 1 : 0) + "\n";
+    body += "L=" + std::to_string(params.remove_background_level) + "\n";
     return Frame('X', body);
   }
 
