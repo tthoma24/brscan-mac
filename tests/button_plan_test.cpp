@@ -187,7 +187,15 @@ TEST(PlanButtonScanTest, TouchPanelOffShortFormUsesConfiguredParamsAndOutput) {
   EXPECT_EQ(plan->params.mode, cfg.file_params.mode);
   EXPECT_EQ(plan->params.x_dpi, cfg.file_params.x_dpi);
   EXPECT_EQ(plan->params.y_dpi, cfg.file_params.y_dpi);
-  EXPECT_EQ(plan->params.duplex, cfg.file_params.duplex);
+  // NOT cfg.file_params.duplex: D= (2-sided) always comes from the parsed
+  // config regardless of Touch-Panel branch -- the printer's touch panel
+  // always exposes the 2-sided setting, even in "set from computer" (Touch-
+  // Panel-OFF) mode, so it is authoritative rather than following the
+  // OFF-branch's daemon-config precedence. This short_form's D=SIN happens
+  // to equal DefaultConfig()'s duplex=false either way; see
+  // TouchPanelOffShortFormDuplexAlwaysFromPrinter below for a case where
+  // they differ and this distinction actually matters.
+  EXPECT_FALSE(plan->params.duplex);
   EXPECT_EQ(plan->params.brightness, cfg.file_params.brightness);
   EXPECT_EQ(plan->params.contrast, cfg.file_params.contrast);
   EXPECT_TRUE(plan->params.button_flow);
@@ -200,6 +208,36 @@ TEST(PlanButtonScanTest, TouchPanelOffShortFormUsesConfiguredParamsAndOutput) {
              want_area->y1);
 
   EXPECT_EQ(plan->output.format, cfg.file_output.format);
+}
+
+// Regression test: D= (2-sided) always reflects the printer's touch-panel
+// setting -- the panel exposes it in both Touch-Panel modes, unlike
+// mode/dpi/brightness/contrast/source, which follow the daemon config in
+// Touch-Panel-OFF. A user who sets 2-sided on the touch panel and then
+// presses a destination without opening its settings screen (Touch-Panel-
+// OFF / "Auto") must still get a 2-sided scan, even though this FUNC's
+// configured image_params.duplex is false.
+TEST(PlanButtonScanTest, TouchPanelOffShortFormDuplexAlwaysFromPrinter) {
+  const std::string short_form = "F=IMAGE\nD=DUP\nE=LON\n";
+  Config cfg = DefaultConfig();
+  ASSERT_FALSE(cfg.image_params.duplex);
+
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "IMAGE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->touch_panel_on);
+  EXPECT_TRUE(plan->params.duplex);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOffShortFormDuplexSinIsFalse) {
+  const std::string short_form = "F=IMAGE\nD=SIN\nE=LON\n";
+  Config cfg = DefaultConfig();
+
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "IMAGE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->touch_panel_on);
+  EXPECT_FALSE(plan->params.duplex);
 }
 
 TEST(PlanButtonScanTest, TouchPanelOffNoPaperDefaultsToLetterAtDefaultDpi) {

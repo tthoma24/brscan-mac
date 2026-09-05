@@ -69,13 +69,22 @@ std::optional<ButtonScanPlan> PlanButtonScan(
   plan.params = ParamsForFunc(cfg, func);
   plan.params.button_flow = true;
 
+  // D= (2-sided) always reflects the printer's touch-panel setting, which
+  // the panel exposes in both Touch-Panel modes -- both the short "Auto"
+  // form and the full LCD-set form carry D=. So it is authoritative
+  // regardless of the ON/OFF precedence that governs the other scan/output
+  // fields below, unlike E=/edge (not plumbed into Params; the device
+  // handles the duplex edge internally -- see
+  // reference/protocol-notes-button-options.md), which is left alone.
+  plan.params.duplex = parsed->duplex;
+
   if (touch_panel_on) {
     // Touch-Panel-ON: the printer's own LCD-set settings are authoritative
-    // for mode/dpi/duplex/area/remove-background.
+    // for mode/dpi/area/remove-background (duplex is set above,
+    // unconditionally).
     plan.params.x_dpi = parsed->dpi;
     plan.params.y_dpi = parsed->dpi;
     plan.params.mode = ModeForToken(parsed->mode);
-    plan.params.duplex = parsed->duplex;
     plan.params.remove_background = parsed->remove_background;
     plan.params.remove_background_level = parsed->remove_background_level;
 
@@ -93,11 +102,12 @@ std::optional<ButtonScanPlan> PlanButtonScan(
                     "offer's full area instead\n";
     }
   } else {
-    // Touch-Panel-OFF: keep ParamsForFunc's mode/dpi/duplex/brightness/
-    // contrast as-is; only the area is derived here, from the daemon's
-    // configured paper for this FUNC, defaulting to kDefaultAutoPaper when
-    // none is configured (see its comment above -- Auto mode has no LCD
-    // paper size to fall back on).
+    // Touch-Panel-OFF: keep ParamsForFunc's mode/dpi/brightness/contrast as-
+    // is (duplex is set above, unconditionally, from the parsed config);
+    // only the area is derived here, from the daemon's configured paper for
+    // this FUNC, defaulting to kDefaultAutoPaper when none is configured
+    // (see its comment above -- Auto mode has no LCD paper size to fall
+    // back on).
     std::string paper = PaperForFunc(cfg, func);
     if (paper.empty()) paper = kDefaultAutoPaper;
     if (const std::optional<brscan::Area> area =
