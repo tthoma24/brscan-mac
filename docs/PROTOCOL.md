@@ -222,14 +222,26 @@ scan's payload (see "Image data" above). After a page's payload comes a
 82 07 00 <pidx> 00 84 00 00 00 00
 ```
 
-`pidx` is the 1-based index of the page that just ended. The 2 bytes
+`pidx` is the 1-based index of the page that just ended. The byte(s)
 immediately following this marker decide what comes next:
 
-- `80 80`: the job is done. Together with the marker above this forms the
-  12-byte job-final terminator, `82 07 00 <pidx> 00 84 00 00 00 00 80 80`.
-  A single-page (flatbed or one-sheet ADF) scan is simply this terminator
-  with `pidx = 1`, following the one page it sent -- which is why a
-  single-page reader that stops right there already works.
+- A leading `0x80`: the job is done. There are two terminator forms, which
+  a reader must treat identically -- **peek one byte** and stop on `0x80`
+  without waiting for or consuming a second one:
+  - **Driver flow** (vendor driver, persistent connection): `80 80` --
+    two bytes -- after which the *next* scan's data can follow on the same
+    connection. Together with the marker above this forms the 12-byte
+    job-final terminator, `82 07 00 <pidx> 00 84 00 00 00 00 80 80`. A
+    single-page (flatbed or one-sheet ADF) scan is simply this terminator
+    with `pidx = 1`, following the one page it sent.
+  - **Scan-button flow** (`ESC K`/button `ESC X`, see docs/BUTTON.md): a
+    **single** `0x80`, after which the device closes the connection --
+    there is no second `0x80` to wait for. A reader that requires two
+    bytes here (`Peek(2)`) blocks on the button flow until its read
+    timeout, since the device is idle waiting for the client to close.
+    A leading `0x80` is unambiguous either way: no block header leads with
+    `0x80` and the EOP marker above leads with `0x82`, so nothing else
+    could start with it.
 - Anything else: it's the next page's block header (`64 07` for color,
   `40 07`/`42 07` for the raw-gray/RLENGTH modes -- see "Image data" and
   "Row block framing" above), not a new marker. A reader must not consume

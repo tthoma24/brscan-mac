@@ -409,13 +409,19 @@ Status RunColorScan(Framer* framer, int timeout_ms,
       out->push_back(std::move(page));
       in_progress.erase(it);
 
+      // Peek the byte after the marker. A job-final terminator leads with
+      // 0x80; a next chunk's block header with 0x64 (or 0x00 0x64). The
+      // scan-button flow terminates a job with a SINGLE 0x80 and then
+      // closes the connection; the vendor driver flow (persistent
+      // connection) sends 0x80 0x80 before the next scan's data. A leading
+      // 0x80 ends the job either way -- headers never lead with 0x80 and
+      // the EOP marker leads with 0x82 -- so do NOT wait for a second 0x80:
+      // Peek(2) blocks to the read timeout against the button flow's
+      // single byte + connection close (the live 1d.5 failure).
       std::vector<uint8_t> tail;
-      s = framer->Peek(2, timeout_ms, &tail);
+      s = framer->Peek(1, timeout_ms, &tail);
       if (s != Status::kOk) return s;
-      if (tail[0] == 0x80 && tail[1] == 0x80) {
-        std::vector<uint8_t> consumed;
-        s = framer->ReadExact(2, timeout_ms, &consumed);
-        if (s != Status::kOk) return s;
+      if (tail[0] == 0x80) {
         // Job done. Any page still accumulating never got its marker: a
         // truncated/desynced stream, not a clean finish.
         if (!in_progress.empty()) return Status::kProtocolError;
