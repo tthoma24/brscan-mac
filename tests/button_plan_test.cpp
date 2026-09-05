@@ -116,7 +116,27 @@ TEST(PlanButtonScanTest, TouchPanelOnRemoveBackgroundSetsFlagAndLevel) {
   EXPECT_EQ(plan->params.remove_background_level, 128);
 }
 
-TEST(PlanButtonScanTest, TouchPanelOnUnknownPaperLeavesAreaZero) {
+TEST(PlanButtonScanTest, TouchPanelOnKnownPaperLegalUnchangedByDefaultGuard) {
+  // A concrete, valid area from a known P= token must survive the final
+  // zero-area safety-net guard untouched.
+  const std::string payload =
+      "F=FILE\nD=SIN\nE=LON\nR=300\nM=CGRAY\nP=LEGAL\nA=0\n"
+      "T=PDF(Image)\nW=0\nG=0\nX=0\n";
+  const Config cfg = DefaultConfig();
+  const auto plan = PlanButtonScan(BuildFrame(payload), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  const auto want_area = AreaForPaper("LEGAL", 300);
+  ASSERT_TRUE(want_area.has_value());
+  ExpectArea(plan->params.area, want_area->x0, want_area->y0, want_area->x1,
+             want_area->y1);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOnUnknownPaperFallsBackToDefaultGuard) {
+  // An unknown P= token leaves the area at zero mid-function (as before),
+  // but the final safety-net guard now replaces that zero area with
+  // kDefaultAutoPaper's ("LETTER") concrete area, rather than leaving it
+  // zero for RunButtonScan's ADF-offer (ymax=0) fallback to mishandle.
   const std::string payload =
       "F=FILE\nD=SIN\nE=LON\nR=300\nM=CGRAY\nP=NOT-A-REAL-PAPER\nA=0\n"
       "T=PDF(Image)\nW=0\nG=0\nX=0\n";
@@ -124,7 +144,10 @@ TEST(PlanButtonScanTest, TouchPanelOnUnknownPaperLeavesAreaZero) {
   const auto plan = PlanButtonScan(BuildFrame(payload), "FILE", cfg);
   ASSERT_TRUE(plan.has_value());
 
-  ExpectArea(plan->params.area, 0, 0, 0, 0);
+  const auto want_area = AreaForPaper("LETTER", 300);
+  ASSERT_TRUE(want_area.has_value());
+  ExpectArea(plan->params.area, want_area->x0, want_area->y0, want_area->x1,
+             want_area->y1);
 }
 
 TEST(PlanButtonScanTest, TouchPanelOnOcrFuncForcesSearchablePdfRegardlessOfT) {
@@ -168,25 +191,49 @@ TEST(PlanButtonScanTest, TouchPanelOffShortFormUsesConfiguredParamsAndOutput) {
   EXPECT_EQ(plan->params.brightness, cfg.file_params.brightness);
   EXPECT_EQ(plan->params.contrast, cfg.file_params.contrast);
   EXPECT_TRUE(plan->params.button_flow);
-  // No <dest>.paper configured -> area stays at ParamsForFunc's own
-  // (default zero) area.
-  ExpectArea(plan->params.area, 0, 0, 0, 0);
+  // No <dest>.paper configured -> the OFF-branch default (kDefaultAutoPaper,
+  // "LETTER") applies, at this FUNC's configured dpi (150) -- not the zero
+  // area ParamsForFunc's own default would otherwise leave in place.
+  const auto want_area = AreaForPaper("LETTER", cfg.file_params.x_dpi);
+  ASSERT_TRUE(want_area.has_value());
+  ExpectArea(plan->params.area, want_area->x0, want_area->y0, want_area->x1,
+             want_area->y1);
 
   EXPECT_EQ(plan->output.format, cfg.file_output.format);
 }
 
-TEST(PlanButtonScanTest, TouchPanelOffWithConfiguredPaperUsesAreaForPaper) {
+TEST(PlanButtonScanTest, TouchPanelOffNoPaperDefaultsToLetterAtDefaultDpi) {
+  // Mirrors the brief's exact case: an unmodified DefaultConfig() (no
+  // file.paper, default 300 dpi) must yield AreaForPaper("LETTER", 300),
+  // not a zero area.
   const std::string short_form = "F=FILE\nD=SIN\nE=LON\n";
-  Config cfg = DefaultConfig();
-  cfg.file_params.x_dpi = 300;
-  cfg.file_params.y_dpi = 300;
-  cfg.file_paper = "LETTER";
+  const Config cfg = DefaultConfig();
 
   const auto plan = PlanButtonScan(BuildFrame(short_form), "FILE", cfg);
   ASSERT_TRUE(plan.has_value());
 
   EXPECT_FALSE(plan->touch_panel_on);
   const auto want_area = AreaForPaper("LETTER", 300);
+  ASSERT_TRUE(want_area.has_value());
+  ExpectArea(plan->params.area, want_area->x0, want_area->y0, want_area->x1,
+             want_area->y1);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOffWithConfiguredPaperUsesAreaForPaper) {
+  // file.paper = A4 at a non-default dpi (200) -- proves the area comes
+  // from PaperForFunc(cfg, func) via AreaForPaper at the daemon's own
+  // configured dpi, not the OFF-branch's kDefaultAutoPaper fallback.
+  const std::string short_form = "F=FILE\nD=SIN\nE=LON\n";
+  Config cfg = DefaultConfig();
+  cfg.file_params.x_dpi = 200;
+  cfg.file_params.y_dpi = 200;
+  cfg.file_paper = "A4";
+
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->touch_panel_on);
+  const auto want_area = AreaForPaper("A4", 200);
   ASSERT_TRUE(want_area.has_value());
   ExpectArea(plan->params.area, want_area->x0, want_area->y0, want_area->x1,
              want_area->y1);

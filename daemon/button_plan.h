@@ -59,14 +59,22 @@ struct ButtonScanPlan {
 //
 // Touch-Panel-ON: params.mode/x_dpi/y_dpi/duplex/area/remove_background(_level)
 // come from the parsed config (area via daemon/paper_size.h's
-// AreaForPaper(parsed.paper, parsed.dpi), left at the zero Area if the
-// paper token is unknown -- RunButtonScan then falls back to the ESC I
-// offer's full area); output format comes from parsed.output_type.
+// AreaForPaper(parsed.paper, parsed.dpi)); output format comes from
+// parsed.output_type.
 //
 // Touch-Panel-OFF: params come from ParamsForFunc(cfg, func) as-is (mode,
 // dpi, duplex, brightness, contrast, source), with the area set from
-// PaperForFunc(cfg, func) via AreaForPaper when that paper is known; output
-// comes from OutputSettingsForFunc(cfg, func).
+// PaperForFunc(cfg, func) via AreaForPaper, defaulting to kDefaultAutoPaper
+// ("LETTER") when no `<dest>.paper` is configured -- Auto mode carries no
+// LCD paper size, and the ADF's ESC I offer can't report sheet length
+// either; output comes from OutputSettingsForFunc(cfg, func).
+//
+// Either branch: as a final safety net, a scan area that is still the zero
+// value once the branch above has run (an unconfigured/unknown paper
+// token, Touch-Panel-OFF or -ON alike) is replaced with
+// AreaForPaper(kDefaultAutoPaper, params.x_dpi) -- this is what prevents
+// RunButtonScan's ADF-offer fallback (whose ymax is always 0) from ever
+// producing a zero-height scan area.
 //
 // Either branch: params.button_flow is always true, and func == kFuncOcr
 // always yields output = OutputSettingsForFunc(cfg, kFuncOcr) with format

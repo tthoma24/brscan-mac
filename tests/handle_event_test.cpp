@@ -28,9 +28,24 @@
 #include "button_listener.h"
 #include "config.h"
 #include "fake_transport.h"
+#include "paper_size.h"
 
 namespace brscan::scand {
 namespace {
+
+// Since daemon/button_plan.cpp's PlanButtonScan now defaults a
+// Touch-Panel-OFF (Auto) FUNC's scan area to AreaForPaper("LETTER", dpi)
+// when no `<dest>.paper` is configured (see button_plan.cpp's
+// kDefaultAutoPaper), the gray/IMAGE/EMAIL fixtures below -- which don't
+// set image_paper/email_paper -- must supply a raw payload sized to that
+// default area's height at their configured dpi (100), not the tiny
+// offer-shaped height these fixtures used before that fix. This helper
+// keeps that byte count and PGM header tied to the real production
+// default instead of a duplicated magic literal.
+int DefaultAutoAreaHeightAt(int dpi) {
+  const std::optional<brscan::Area> area = AreaForPaper("LETTER", dpi);
+  return area->y1 - area->y0;
+}
 
 // --- Fixture-building helpers, mirroring tests/scanner_test.cpp's -------
 
@@ -260,11 +275,15 @@ TEST_F(HandleButtonEventTest, FileFuncUsesFileParamsAndSavesJpeg) {
 
 TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
   brscan::FakeTransport t;
-  // width_px=4, height_px=3.
+  // width_px=4, height_px=3 (the offer's own height_px is dead weight here
+  // -- no <dest>.paper is configured below, so PlanButtonScan's
+  // Touch-Panel-OFF default area, not this offer, decides how many rows
+  // RunButtonScan actually reads; see DefaultAutoAreaHeightAt above).
   QueueButtonPreamble(&t, "IMAGE", "300,300,2,292,4,427,3,");
 
+  const int height = DefaultAutoAreaHeightAt(100);
   auto payload = EncodeBlockHeader(4);
-  const std::vector<uint8_t> raw(4 * 3, 0x42);
+  const std::vector<uint8_t> raw(4 * static_cast<size_t>(height), 0x42);
   payload.insert(payload.end(), raw.begin(), raw.end());
   t.QueueRead(payload);
   t.QueueRead(EncodeJobFinalTerminator(1));
@@ -291,7 +310,7 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
 
   ASSERT_TRUE(std::filesystem::exists(saved_path));
   const std::vector<uint8_t> written_file = ReadWholeFile(saved_path);
-  const std::string want_header = "P5\n4 3\n255\n";
+  const std::string want_header = "P5\n4 " + std::to_string(height) + "\n255\n";
   ASSERT_GE(written_file.size(), want_header.size() + raw.size());
   const std::vector<uint8_t> header_bytes(written_file.begin(),
                                             written_file.begin() + want_header.size());
@@ -324,17 +343,21 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
 // recording CommandRunner shows exactly what PerformAction ran against.
 TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndActsOnPageOne) {
   brscan::FakeTransport t;
-  // width_px=4, height_px=3 (same offer as ImageFuncUsesImageParamsDistinctFromFile).
+  // width_px=4, height_px=3 (same offer as ImageFuncUsesImageParamsDistinctFromFile;
+  // see that test's comment on why the offer's own height_px is dead
+  // weight once no <dest>.paper leaves the Touch-Panel-OFF default area in
+  // charge -- DefaultAutoAreaHeightAt above).
   QueueButtonPreamble(&t, "IMAGE", "300,300,2,292,4,427,3,");
 
+  const int height = DefaultAutoAreaHeightAt(100);
   auto block1 = EncodeBlockHeader(4);
-  const std::vector<uint8_t> raw1(4 * 3, 0x11);
+  const std::vector<uint8_t> raw1(4 * static_cast<size_t>(height), 0x11);
   block1.insert(block1.end(), raw1.begin(), raw1.end());
   t.QueueRead(block1);
   t.QueueRead(EncodeEndOfPageMarker(1));
 
   auto block2 = EncodeBlockHeader(4);
-  const std::vector<uint8_t> raw2(4 * 3, 0x22);
+  const std::vector<uint8_t> raw2(4 * static_cast<size_t>(height), 0x22);
   block2.insert(block2.end(), raw2.begin(), raw2.end());
   t.QueueRead(block2);
   t.QueueRead(EncodeJobFinalTerminator(2));
@@ -371,7 +394,7 @@ TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndActsOnPageOne) {
 
   // Each numbered file must hold its own page's pixel data, not a copy of
   // the other page's.
-  const std::string want_header = "P5\n4 3\n255\n";
+  const std::string want_header = "P5\n4 " + std::to_string(height) + "\n255\n";
   const std::vector<uint8_t> page1_file = ReadWholeFile(saved_path);
   ASSERT_GE(page1_file.size(), want_header.size() + raw1.size());
   const std::vector<uint8_t> page1_payload(
@@ -470,17 +493,21 @@ TEST_F(HandleButtonEventTest, OcrFuncProducesSearchablePdfWithNoSeparateOcrActio
 // page; EMAIL must attach every one of them, not just the first.
 TEST_F(HandleButtonEventTest, EmailFuncWithSeparationAttachesAllProducedFiles) {
   brscan::FakeTransport t;
-  // width_px=4, height_px=3 (same offer as the IMAGE multi-page test above).
+  // width_px=4, height_px=3 (same offer as the IMAGE multi-page test above;
+  // see that test's comment on why the offer's own height_px is dead
+  // weight once no <dest>.paper leaves the Touch-Panel-OFF default area in
+  // charge -- DefaultAutoAreaHeightAt above).
   QueueButtonPreamble(&t, "EMAIL", "300,300,2,292,4,427,3,");
 
+  const int height = DefaultAutoAreaHeightAt(100);
   auto block1 = EncodeBlockHeader(4);
-  const std::vector<uint8_t> raw1(4 * 3, 0x11);
+  const std::vector<uint8_t> raw1(4 * static_cast<size_t>(height), 0x11);
   block1.insert(block1.end(), raw1.begin(), raw1.end());
   t.QueueRead(block1);
   t.QueueRead(EncodeEndOfPageMarker(1));
 
   auto block2 = EncodeBlockHeader(4);
-  const std::vector<uint8_t> raw2(4 * 3, 0x22);
+  const std::vector<uint8_t> raw2(4 * static_cast<size_t>(height), 0x22);
   block2.insert(block2.end(), raw2.begin(), raw2.end());
   t.QueueRead(block2);
   t.QueueRead(EncodeJobFinalTerminator(2));
