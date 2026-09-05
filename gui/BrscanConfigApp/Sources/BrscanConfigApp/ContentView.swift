@@ -2,7 +2,9 @@ import SwiftUI
 
 /// The config window's content: a five-tab `TabView` keyed by `Tabs`, plus
 /// (task 1e.9) a first-run banner and a Save bar, all driven by a single
-/// `ConfigStore`.
+/// `ConfigStore`. Task 1e.10 added a daemon-status line above the tabs and
+/// a "Save & Apply" action alongside plain Save, both backed by a
+/// `DaemonViewModel`.
 ///
 /// The **General** tab (task 1e.6) is wired to a real `GeneralViewModel`;
 /// **File** / **Image** / **Email** (task 1e.7) are each wired to their own
@@ -16,13 +18,19 @@ import SwiftUI
 /// keeps its existing binding.
 struct ContentView: View {
   @StateObject private var store: ConfigStore
+  @StateObject private var daemon: DaemonViewModel
 
-  init(store: ConfigStore = ConfigStore()) {
+  init(store: ConfigStore = ConfigStore(), daemon: DaemonViewModel = DaemonViewModel()) {
     _store = StateObject(wrappedValue: store)
+    _daemon = StateObject(wrappedValue: daemon)
   }
 
   var body: some View {
     VStack(spacing: 0) {
+      DaemonStatusBar(state: daemon.state) {
+        daemon.refreshState()
+      }
+
       if store.loadState == .missing {
         MissingConfigBanner {
           _ = try? store.createStarterConfigIfNeeded()
@@ -62,14 +70,44 @@ struct ContentView: View {
       }
       .padding()
 
-      SaveBar(isDirty: store.isDirty) {
-        try? store.save()
-      }
+      SaveBar(
+        isDirty: store.isDirty,
+        applyOutcome: daemon.lastApplyOutcome,
+        onSave: {
+          try? store.save()
+        },
+        onSaveAndApply: {
+          daemon.saveAndApply {
+            try store.save()
+          }
+        }
+      )
     }
     .frame(minWidth: 480, minHeight: 360)
     .onAppear {
       try? store.load()
+      daemon.refreshState()
     }
+  }
+}
+
+/// The daemon-status line shown above the tabs: `DaemonViewModel.State`'s
+/// display text plus a Refresh button, so the user isn't stuck with a
+/// stale reading from when the window opened.
+private struct DaemonStatusBar: View {
+  let state: DaemonViewModel.State
+  let onRefresh: () -> Void
+
+  var body: some View {
+    HStack {
+      Text("Daemon status: \(state.statusText)")
+        .foregroundStyle(.secondary)
+      Spacer()
+      Button("Refresh") {
+        onRefresh()
+      }
+    }
+    .padding(8)
   }
 }
 
@@ -95,24 +133,40 @@ private struct MissingConfigBanner: View {
   }
 }
 
-/// The Save bar shown under the tabs: an unsaved-changes note plus a Save
-/// button, enabled only when `ConfigStore.isDirty`.
+/// The Save bar shown under the tabs: an unsaved-changes note, the last
+/// `DaemonViewModel.ApplyOutcome`'s guidance (task 1e.10), and both a plain
+/// Save button and a "Save & Apply" button that also reloads the running
+/// daemon. Both buttons are enabled only when `ConfigStore.isDirty`.
 private struct SaveBar: View {
   let isDirty: Bool
+  let applyOutcome: DaemonViewModel.ApplyOutcome?
   let onSave: () -> Void
+  let onSaveAndApply: () -> Void
 
   var body: some View {
-    HStack {
-      if isDirty {
-        Text("Unsaved changes")
+    VStack(alignment: .leading, spacing: 4) {
+      if let applyOutcome {
+        Text(applyOutcome.message)
           .font(.caption)
           .foregroundStyle(.secondary)
       }
-      Spacer()
-      Button("Save") {
-        onSave()
+      HStack {
+        if isDirty {
+          Text("Unsaved changes")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        Button("Save") {
+          onSave()
+        }
+        .disabled(!isDirty)
+
+        Button("Save & Apply") {
+          onSaveAndApply()
+        }
+        .disabled(!isDirty)
       }
-      .disabled(!isDirty)
     }
     .padding([.horizontal, .bottom], 8)
   }
