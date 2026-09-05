@@ -1,0 +1,40 @@
+{
+  "_comment": "Single source of truth for the valid `<dest>.<key>` config tokens the daemon (daemon/config.cpp's ApplyKey/Parse*String helpers) accepts, and the paper tokens daemon/paper_size.h's IsKnownPaper recognizes. Do not add a token here that the daemon doesn't actually parse -- scripts/gen-option-sets.py regenerates gui/BrscanConfigCore's Swift constants from this file, and tests/option_sets_test.cpp asserts the daemon itself accepts every token below (anti-drift guard in both directions). No real device identity belongs in this file.",
+
+  "mode": {
+    "_comment": "<dest>.mode -- daemon/config.cpp's ParseModeString().",
+    "tokens": ["color", "gray", "bw", "errdiff", "truegray"]
+  },
+
+  "source": {
+    "_comment": "<dest>.source -- daemon/config.cpp's ParseSourceString(). adf-duplex sets Source::kAdf with duplex=true.",
+    "tokens": ["flatbed", "adf", "adf-duplex"]
+  },
+
+  "format": {
+    "_comment": "<dest>.format -- daemon/config.cpp's ParseFormatString(), daemon/output_writer.h's OutputFormat. Default when unset is native.",
+    "tokens": ["native", "pdf", "tiff", "jpeg", "png"]
+  },
+
+  "tiff_compression": {
+    "_comment": "<dest>.tiff_compression -- daemon/config.cpp's ParseTiffCompressionString(), daemon/output_writer.h's TiffCompression. Only affects tiff format; default is lzw.",
+    "tokens": ["lzw", "g3", "g4"]
+  },
+
+  "separation_mode": {
+    "_comment": "<dest>.separation -- daemon/config.cpp's ParseSeparationString(). These are the *modes*, not full tokens: combine/off take no suffix; image and page each take a ':N' positive-int suffix (e.g. 'image:3', 'page:2'). 'every:N' is also accepted as a backward-compat alias for 'image:N' (same mode, different spelling) -- not a separate mode. Default is combine.",
+    "tokens": ["combine", "off", "image", "page"],
+    "n_rule": "For 'image' and 'page', the full config value is '<mode>:N' where N is a positive integer (N >= 1). 'every:N' is a pre-existing alias for 'image:N'."
+  },
+
+  "paper": {
+    "_comment": "<dest>.paper -- daemon/paper_size.h's IsKnownPaper()/kPaperTable (daemon/paper_size.cpp). Exact, case-sensitive match; the daemon stores an unrecognized token as-is without validation, so this list is the GUI's own gate, not something the daemon itself enforces at config-parse time.",
+    "tokens": ["LETTER", "LEGAL", "A4", "LEDGER", "A3", "A5", "EXECUTIVE", "PHOTO", "BCARD"]
+  },
+
+  "dpi": {
+    "_comment": "<dest>.dpi -- daemon/config.cpp's ParsePositiveInt() applied to both x_dpi and y_dpi. Not an enumerated set: any positive integer is accepted by the parser. Default is 300 (brscan::Params's own default constructor).",
+    "rule": "positive_integer",
+    "default": 300
+  }
+}
