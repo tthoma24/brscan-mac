@@ -70,6 +70,57 @@ which this project reverse-engineered clean-room from packet captures (see
 4. **Pull and act.** The daemon opens the scan connection (TCP 54921), pulls
    the image, saves it, and runs the destination's action.
 
+## Config command
+
+Right after the host sends `ESC K` (`1b 4b`) on the scan connection (TCP
+54921), the printer pushes one more frame before the scan data itself: a
+snapshot of whatever the LCD panel currently has configured for the button
+press about to happen (destination, mode, resolution, paper size, output
+format, and the panel's toggle settings). This is separate from the UDP
+button-press notification above -- it rides the TCP scan connection, not
+UDP 54925 -- and separate from the `ESC I`/`ESC X` negotiation described in
+[PROTOCOL.md](PROTOCOL.md).
+
+The frame is:
+
+```
+byte 0    : 0x30
+byte 1    : payload length (single unsigned byte; observed 59-78)
+byte 2    : 0x00
+bytes 3.. : payload -- 0x0a-separated KEY=VALUE lines, trailing 0x0a included
+```
+
+`byte[1]` equals the payload's byte count (everything after byte 2); a frame
+where it doesn't match, or that doesn't start with `0x30`/have `0x00` at
+byte 2, is rejected as malformed. There is no `0x80` terminator here --
+unlike the scan-command frames in PROTOCOL.md, this is its own self-
+contained frame, not part of the `ESC`-command stream.
+
+`daemon/button_config.h`'s `ParseButtonConfig` decodes this frame into a
+`ButtonConfig` struct. It's a faithful decode only: paper and output-type
+tokens are kept as raw strings rather than mapped to a scan area or this
+project's own output-format enum -- later tasks own those mappings, so this
+parser stays decoupled and independently testable.
+
+| Key | Field | Values | Notes |
+|---|---|---|---|
+| `F` | `func` | `FILE`, `IMAGE`, `OCR`, `EMAIL` | The button pressed. Always present; an empty or missing `F` makes the whole frame malformed. |
+| `D` | `duplex` | `SIN` -> `false`, `DUP` -> `true` | |
+| `E` | `duplex_edge` | `LON`, `SHO` | Raw token; only meaningful when `duplex` is true. |
+| `R` | `dpi` | e.g. `200`, `300` | A single value here (`ESC I`/`ESC X` carry an `x,y` pair instead; see PROTOCOL.md). |
+| `M` | `mode` | `CGRAY` (color), `TEXT` (black & white) | Raw token. |
+| `P` | `paper` | `LETTER`, `LEGAL`, `A4`, `LEDGER`, `A3`, `A5`, `EXECUTIVE`, `PHOTO`, `BCARD` | Raw token; not mapped to a scan area by this parser. |
+| `A` | `area_flag` | `0` | Observed always 0 (auto-area); the real scan area is computed downstream. |
+| `T` | `output_type` | `PDF(Image)`, `MULTI-TIFF`, `JPEG`, `TXT`, `HTML`, `RTF` | Raw token (parens and hyphen kept verbatim); not mapped to this project's `OutputFormat` by this parser. |
+| `W` | `skip_blank` | `0`/`1` | |
+| `G` | `remove_background` | `0`/`1` | OCR config commands omit this key entirely; its absence leaves `remove_background` at its `false` default. |
+| `L` | `remove_background_level` | `64` (Low), `128` (Med), `192` (High) | Present only when `G=1`; defaults to `0`. |
+| `X` | `high_speed` | `0`/`1` | |
+
+Unknown keys are ignored (forward compatibility with panel settings not yet
+documented here); a missing key leaves its field at the default above; an
+unrecognized value for a string field is stored as-is rather than rejected.
+
 ## Setup
 
 ### 1. Build the daemon
