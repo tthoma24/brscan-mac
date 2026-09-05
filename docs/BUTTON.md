@@ -63,8 +63,10 @@ depending on how you triggered the scan on the printer's own LCD panel:
   without opening that destination's settings screen first): this
   daemon's own `<dest>.*` config settings drive the whole scan --
   mode/resolution/source/duplex from `<dest>.mode`/`<dest>.dpi`/
-  `<dest>.source` etc., the scan area from `<dest>.paper` (if set), and the
-  output file format from `<dest>.format`.
+  `<dest>.source` etc., the scan area from `<dest>.paper` if set, otherwise
+  **Letter** by default (Auto mode's config command carries no paper size,
+  and the ADF's own offer can't report sheet length ahead of the feed), and
+  the output file format from `<dest>.format`.
 - **Touch-Panel-ON** (you opened the destination's settings screen on the
   LCD and it shows a resolution, mode, paper size, etc.): the printer's own
   settings, as dialed in right there on the panel, drive the whole scan

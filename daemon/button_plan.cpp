@@ -7,6 +7,15 @@
 
 namespace brscan::scand {
 
+// Touch-Panel-OFF ("Auto") config commands carry no LCD paper size, and the
+// ADF's ESC I offer can't report sheet length ahead of the feed (its ymax
+// is always 0) -- so a still-zero scan area at the end of PlanButtonScan
+// would otherwise reach RunButtonScan's offer fallback and produce a
+// zero-height scan area (protocol error on every Auto-mode press). This is
+// the sensible default the daemon falls back to instead; a user can
+// override it per FUNC with `<dest>.paper`.
+constexpr char kDefaultAutoPaper[] = "LETTER";
+
 namespace {
 
 // Maps a parsed M= token to a ScanMode. Any other token (not expected from
@@ -86,14 +95,31 @@ std::optional<ButtonScanPlan> PlanButtonScan(
   } else {
     // Touch-Panel-OFF: keep ParamsForFunc's mode/dpi/duplex/brightness/
     // contrast as-is; only the area is derived here, from the daemon's
-    // configured paper (if any) for this FUNC.
-    const std::string& paper = PaperForFunc(cfg, func);
-    if (!paper.empty()) {
-      const std::optional<brscan::Area> area =
-          AreaForPaper(paper, plan.params.x_dpi);
-      if (area) plan.params.area = *area;
+    // configured paper for this FUNC, defaulting to kDefaultAutoPaper when
+    // none is configured (see its comment above -- Auto mode has no LCD
+    // paper size to fall back on).
+    std::string paper = PaperForFunc(cfg, func);
+    if (paper.empty()) paper = kDefaultAutoPaper;
+    if (const std::optional<brscan::Area> area =
+            AreaForPaper(paper, plan.params.x_dpi)) {
+      plan.params.area = *area;
       // else: leave plan.params.area as ParamsForFunc's own area -- a
       // configured-but-unknown paper token has no captured area to use.
+    }
+  }
+
+  // Final safety net, both branches: if the area is still the zero value
+  // here, either Touch-Panel-OFF's configured (but unknown) paper token or
+  // Touch-Panel-ON's LCD-supplied (but unknown) P= token left it that way.
+  // Never let a zero area reach RunButtonScan, which would otherwise fall
+  // back to the ADF ESC I offer's ymax=0 and produce a zero-height scan
+  // area -- fall back to kDefaultAutoPaper's concrete area instead.
+  const brscan::Area& final_area = plan.params.area;
+  if (final_area.x0 == 0 && final_area.y0 == 0 && final_area.x1 == 0 &&
+      final_area.y1 == 0) {
+    if (const std::optional<brscan::Area> default_area =
+            AreaForPaper(kDefaultAutoPaper, plan.params.x_dpi)) {
+      plan.params.area = *default_area;
     }
   }
 
