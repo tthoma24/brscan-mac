@@ -108,6 +108,7 @@ add_executable(brscan-scand
   daemon/actions.cpp
   daemon/action_ocr.mm
   daemon/output_writer.mm
+  daemon/button_plan.cpp
   daemon/handle_event.cpp
   daemon/sender_check.cpp
   daemon/notification_deduper.cpp
@@ -155,6 +156,8 @@ if(BUILD_TESTING)
     tests/action_ocr_test.mm
     daemon/output_writer.mm
     tests/output_writer_test.mm
+    daemon/button_plan.cpp
+    tests/button_plan_test.cpp
     daemon/handle_event.cpp
     tests/handle_event_test.cpp
     daemon/sender_check.cpp

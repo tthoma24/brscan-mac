@@ -11,11 +11,12 @@
 // printer actually scans for that paper size, at a given dpi.
 //
 // This is a self-contained data/lookup unit only: it does not decide when
-// to apply a paper size, and nothing in this project yet calls
-// AreaForPaper() with a config-file or button-config token (that mapping,
-// and any precedence between an explicit `<dest>.paper` config key and the
-// button config's own P=, are later Plan 1d tasks -- see
-// daemon/config.h's `<dest>.paper` key for the config side of this).
+// to apply a paper size. daemon/button_plan.h's PlanButtonScan calls this
+// with either the button config's own P= token (Touch-Panel-ON) or the
+// explicit `<dest>.paper` config key (Touch-Panel-OFF) -- see
+// docs/BUTTON.md's "Touch-Panel precedence" section for that precedence
+// rule, and daemon/config.h's `<dest>.paper` key for the config side of
+// this.
 namespace brscan::scand {
 
 // Returns the scan area for `paper_token` (an exact, case-sensitive match
