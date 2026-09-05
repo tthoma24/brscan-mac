@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DeviceMatchingInfo.plist — what the Image Capture discovery daemon (icdd)
+  reads out of a module's Contents/Resources/ to decide which devices this
+  module drives. icdd warns "Missing DeviceMatchingInfo.plist in '<bundle>'!"
+  when a module in the Devices directory lacks this file, and its matching path
+  is named after these keys: -[... addMatchingBonjourDevices:...],
+  -[... baseDictionaryForBonjourServiceType:andTXTRecords:devices:], and the
+  key ICABonjourServiceTypeKey (all recovered from the icdd binary's symbols).
+
+  IMPORTANT — this exact schema is UNCONFIRMED. No Bonjour-matching module ships
+  on this macOS to copy from (only Apple's AirScanScanner, which uses its own
+  eSCL discovery and a different DeviceInfo.plist). The key names below are the
+  best reconstruction from icdd's strings; the load spike (see the runbook) is
+  what tells us whether icdd accepts this shape. If icdd rejects or ignores it,
+  that is a finding, not a failure — record what it logged.
+
+  Device identity is the synthetic Bonjour name BRW00AABBCCDDEE only.
+-->
+<plist version="1.0">
+<dict>
+  <key>device info version</key>
+  <string>3.0</string>
+  <key>ICABonjourServiceTypeKey</key>
+  <string>_scanner._tcp.</string>
+  <key>bonjour</key>
+  <array>
+    <dict>
+      <key>serviceType</key>
+      <string>_scanner._tcp.</string>
+      <key>devices</key>
+      <array>
+        <dict>
+          <key>name</key>
+          <string>BRW00AABBCCDDEE</string>
+          <key>deviceType</key>
+          <string>scanner</string>
+        </dict>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>
