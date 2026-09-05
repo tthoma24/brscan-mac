@@ -75,4 +75,16 @@ public final class GeneralViewModel: ObservableObject {
     guard let path = folderPicker.pickFolder() else { return }
     saveDir = path
   }
+
+  /// Resets every bound field to `general`'s values, in place -- unlike
+  /// `init(general:)`, this doesn't replace the view model instance, so
+  /// `ConfigStore` (task 1e.9) can reseed an already-created, already-bound
+  /// `GeneralViewModel` after loading a config file from disk.
+  public func load(_ general: DaemonConfig.General) {
+    printerHost = general.printerHost
+    displayName = general.displayName
+    saveDir = general.saveDir
+    imageApp = general.imageApp
+    emailTo = general.emailTo
+  }
 }
