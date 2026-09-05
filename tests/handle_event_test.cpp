@@ -521,7 +521,7 @@ TEST_F(HandleButtonEventTest, EmailFuncWithSeparationAttachesAllProducedFiles) {
   cfg.email_params.x_dpi = 100;
   cfg.email_params.y_dpi = 100;
   cfg.email_output.format = OutputFormat::kPdf;
-  cfg.email_output.separation = OutputSeparation::kEveryN;
+  cfg.email_output.separation = OutputSeparation::kEveryImage;
   cfg.email_output.separate_n = 1;
   cfg.save_dir = save_dir_;
 

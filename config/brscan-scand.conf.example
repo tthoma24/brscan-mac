@@ -66,13 +66,21 @@
 #                             codecs and only apply to a bilevel (bw/errdiff)
 #                             page -- a color/gray page requested with g3/g4
 #                             falls back to lzw instead of thresholding)
-#   <dest>.separation         combine | every:N (N a positive integer;
-#                             default combine -- one PDF/TIFF file for every
-#                             page. every:N starts a new file every N pages
-#                             instead, named "..-doc001.pdf", "..-doc002.pdf",
-#                             etc. Only applies to pdf/tiff -- the per-page
-#                             formats (jpeg/png/native) always write one file
-#                             per page regardless.)
+#   <dest>.separation         combine | off | image:N | page:N (N a positive
+#                             integer; default combine -- one PDF/TIFF file
+#                             for every page. image:N starts a new file every
+#                             N single-sided images; page:N starts a new file
+#                             every N pages -- named "..-doc001.pdf",
+#                             "..-doc002.pdf", etc. either way. `every:N` is
+#                             also accepted, as a backward-compat alias for
+#                             `image:N`. Only applies to pdf/tiff -- the
+#                             per-page formats (jpeg/png/native) always write
+#                             one file per page regardless. Note: image:N and
+#                             page:N currently behave identically -- for a
+#                             duplex scan, whether the vendor's "page count"
+#                             groups two sides of one sheet into one document
+#                             is not yet confirmed; see daemon/config.cpp's
+#                             ParseSeparationString comment.)
 #
 # OCR is special: its deliverable is always a searchable PDF, so
 # ocr.format=native (the default) is automatically treated as pdf for OCR

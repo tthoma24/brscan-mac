@@ -198,7 +198,7 @@ bool ParseArgs(int argc, char** argv, Args* out) {
         std::cerr << "--separate must be a positive integer, got '" << *v << "'\n";
         return false;
       }
-      out->output_settings.separation = brscan::scand::OutputSeparation::kEveryN;
+      out->output_settings.separation = brscan::scand::OutputSeparation::kEveryImage;
       out->output_settings.separate_n = n;
     } else if (flag == "--help" || flag == "-h") {
       out->help = true;

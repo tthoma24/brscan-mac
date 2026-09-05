@@ -297,7 +297,7 @@ TEST(PlanButtonScanTest, TouchPanelOffOcrFuncStillForcesSearchablePdf) {
 TEST(PlanButtonScanTest, OcrFuncPreservesConfiguredSeparation) {
   const std::string short_form = "F=OCR\nD=SIN\nE=LON\n";
   Config cfg = DefaultConfig();
-  cfg.ocr_output.separation = OutputSeparation::kEveryN;
+  cfg.ocr_output.separation = OutputSeparation::kEveryImage;
   cfg.ocr_output.separate_n = 3;
 
   const auto plan = PlanButtonScan(BuildFrame(short_form), "OCR", cfg);
@@ -305,7 +305,7 @@ TEST(PlanButtonScanTest, OcrFuncPreservesConfiguredSeparation) {
 
   EXPECT_EQ(plan->output.format, OutputFormat::kPdf);
   EXPECT_TRUE(plan->output.searchable);
-  EXPECT_EQ(plan->output.separation, OutputSeparation::kEveryN);
+  EXPECT_EQ(plan->output.separation, OutputSeparation::kEveryImage);
   EXPECT_EQ(plan->output.separate_n, 3);
 }
 

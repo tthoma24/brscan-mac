@@ -34,9 +34,22 @@ enum class OutputFormat { kNative, kPdf, kTiff, kJpeg, kPng };
 enum class TiffCompression { kLzw, kG3, kG4 };
 
 // Document separation, as the vendor dialog's "Document" separation
-// offers. kCombine puts every page in one container; kEveryN starts a new
-// container every `separate_n` pages.
-enum class OutputSeparation { kCombine, kEveryN };
+// offers: combine into one document, separate by image count (a new
+// document every N single-sided images), or separate by page count (a new
+// document every N pages). kCombine puts every page in one container;
+// kEveryImage/kEveryPage each start a new container every `separate_n`
+// ScanResults.
+//
+// kEveryImage and kEveryPage currently behave identically: each
+// brscan::ScanResult this codebase produces is one scanned image = one
+// side, so for a simplex scan "image" and "page" already coincide. For a
+// duplex scan, whether the vendor's "page count" means a physical sheet
+// (2 ScanResults) or stays 1-per-side is NOT established by any capture we
+// have -- see daemon/config.cpp's ParseSeparationString comment for the
+// capture that would confirm it. Until that's known, kEveryPage is
+// implemented on ScanResults directly (documented page==image assumption),
+// the same as kEveryImage, rather than guessing at sheet-grouping.
+enum class OutputSeparation { kCombine, kEveryImage, kEveryPage };
 
 // One destination's output settings (see daemon/config.h, which parses the
 // per-FUNC keys into these). Defaults match the config parser's defaults:
@@ -45,7 +58,7 @@ struct OutputSettings {
   OutputFormat format = OutputFormat::kNative;
   TiffCompression tiff_compression = TiffCompression::kLzw;
   OutputSeparation separation = OutputSeparation::kCombine;
-  int separate_n = 1;       // Used when separation == kEveryN (>= 1).
+  int separate_n = 1;       // Used when separation != kCombine (>= 1).
   bool searchable = false;  // PDF only: lay a Vision OCR text layer.
 };
 
@@ -68,12 +81,15 @@ struct OutputSettings {
 //     lossless -- no thresholding).
 //   - kJpeg / kPng: one file per page, numbered `-NNN` when there is more
 //     than one page (via brscan::cli::PagePath). Separation does not apply
-//     to these per-page formats -- kEveryN behaves like kCombine.
+//     to these per-page formats -- kEveryImage/kEveryPage behave like
+//     kCombine.
 //
-// Separation (kEveryN) applies only to the container formats (PDF, TIFF):
-// it produces ceil(P / separate_n) files, each holding up to `separate_n`
-// pages, named with a `-docNNN` suffix (e.g. `-doc001.pdf`). Each
-// ScanResult counts as one page/image.
+// Separation (kEveryImage / kEveryPage) applies only to the container
+// formats (PDF, TIFF): it produces ceil(P / separate_n) files, each
+// holding up to `separate_n` pages, named with a `-docNNN` suffix (e.g.
+// `-doc001.pdf`). Each ScanResult counts as one page/image; kEveryImage and
+// kEveryPage split identically for now (see OutputSeparation's doc
+// comment on the duplex page-vs-sheet question this leaves open).
 //
 // Returns kIoError if a file cannot be written or a page cannot be
 // decoded, kProtocolError if a searchable PDF's Vision request fails.

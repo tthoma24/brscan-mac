@@ -274,13 +274,33 @@ TEST(ParseConfigTest, AppliesTiffCompression) {
             TiffCompression::kG4);
 }
 
-TEST(ParseConfigTest, AppliesSeparationCombineAndEveryN) {
+TEST(ParseConfigTest, AppliesSeparationCombineAndOff) {
   const Config combine = ParseConfig("file.separation=combine\n");
   EXPECT_EQ(combine.file_output.separation, OutputSeparation::kCombine);
 
-  const Config every = ParseConfig("file.separation=every:3\n");
-  EXPECT_EQ(every.file_output.separation, OutputSeparation::kEveryN);
-  EXPECT_EQ(every.file_output.separate_n, 3);
+  const Config off = ParseConfig("file.separation=off\n");
+  EXPECT_EQ(off.file_output.separation, OutputSeparation::kCombine);
+}
+
+TEST(ParseConfigTest, AppliesSeparationByImageCount) {
+  const Config cfg = ParseConfig("file.separation=image:3\n");
+  EXPECT_EQ(cfg.file_output.separation, OutputSeparation::kEveryImage);
+  EXPECT_EQ(cfg.file_output.separate_n, 3);
+}
+
+TEST(ParseConfigTest, AppliesSeparationByPageCount) {
+  const Config cfg = ParseConfig("file.separation=page:2\n");
+  EXPECT_EQ(cfg.file_output.separation, OutputSeparation::kEveryPage);
+  EXPECT_EQ(cfg.file_output.separate_n, 2);
+}
+
+TEST(ParseConfigTest, EveryNIsABackwardCompatAliasForImageCount) {
+  // "every:N" is the pre-existing single-mode spelling; it must keep
+  // parsing (existing example config / user configs use it) and alias to
+  // the image-count mode.
+  const Config cfg = ParseConfig("file.separation=every:4\n");
+  EXPECT_EQ(cfg.file_output.separation, OutputSeparation::kEveryImage);
+  EXPECT_EQ(cfg.file_output.separate_n, 4);
 }
 
 TEST(ParseConfigTest, IgnoresBadOutputValuesLeavingDefaults) {
@@ -290,6 +310,12 @@ TEST(ParseConfigTest, IgnoresBadOutputValuesLeavingDefaults) {
       "file.separation=every:0\n"
       "file.separation=every:-1\n"
       "file.separation=every:abc\n"
+      "file.separation=image:0\n"
+      "file.separation=image:-1\n"
+      "file.separation=image:abc\n"
+      "file.separation=page:0\n"
+      "file.separation=page:-1\n"
+      "file.separation=page:abc\n"
       "file.separation=weird\n");
   ExpectDefaultOutput(cfg.file_output);
 }
