@@ -166,6 +166,7 @@ if(BUILD_TESTING)
     daemon/notification_deduper.cpp
     tests/notification_deduper_test.cpp
     tools/scan_output.cpp
+    tests/option_sets_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests daemon tools)
@@ -174,8 +175,22 @@ if(BUILD_TESTING)
   target_link_directories(brscan_tests PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
   target_link_libraries(brscan_tests PRIVATE ${OCR_FRAMEWORKS})
   target_compile_definitions(brscan_tests PRIVATE
-    BRSCAN_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
+    BRSCAN_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
+    BRSCAN_OPTION_SETS_JSON="${CMAKE_SOURCE_DIR}/config/option-sets.json")
 
   include(GoogleTest)
   gtest_discover_tests(brscan_tests)
+
+  # Task 1e.1's up-to-date check: config/option-sets.json is the single
+  # source of truth for the GUI's Swift option-set constants (see
+  # scripts/gen-option-sets.py); this test regenerates them into a temp
+  # location and diffs against the committed
+  # gui/BrscanConfigCore/Sources/BrscanConfigCore/GeneratedOptionSets.swift,
+  # failing if a JSON edit landed without a matching regenerate-and-commit.
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(
+    NAME OptionSetsSwiftConstantsUpToDate
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-option-sets.py --check
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
 endif()
