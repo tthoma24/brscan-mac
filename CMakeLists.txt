@@ -119,6 +119,61 @@ target_link_libraries(brscan-scand PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan-scand PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 target_link_libraries(brscan-scand PRIVATE ${OCR_FRAMEWORKS})
 
+# Plan 2 Task 1 — ICA device-module load spike.
+#
+# A separate, self-contained target: a minimal background-only .app bundle that
+# the Image Capture discovery daemon (icdd) could load and match to the
+# synthetic device. It does NOT link libbrscan and adds no scan logic; its whole
+# job is the go/no-go finding "does a third-party ICA module still load, and
+# under what signing" (docs/RUNBOOK-plan-2-loadspike.md). Guarded by an option
+# so it never blocks the core build, but ON by default on Apple so the default
+# `cmake --build build` keeps it compiling.
+option(BRSCAN_BUILD_ICA_MODULE "Build the Plan 2 ICA load-spike module" ON)
+if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
+  set(MODULE_NAME "BrscanICALoadSpike")
+  set(MODULE_MIN_MACOS "13.0")
+
+  # Fill the bundle name / min-OS placeholders into a concrete Info.plist.
+  configure_file(
+    ${CMAKE_SOURCE_DIR}/ica-module/Info.plist.in
+    ${CMAKE_BINARY_DIR}/ica-module/Info.plist
+    @ONLY)
+
+  add_executable(brscan-ica-loadspike MACOSX_BUNDLE
+    ica-module/module_main.mm)
+  set_target_properties(brscan-ica-loadspike PROPERTIES
+    OUTPUT_NAME ${MODULE_NAME}
+    MACOSX_BUNDLE_INFO_PLIST ${CMAKE_BINARY_DIR}/ica-module/Info.plist)
+
+  # ICADevices supplies ICD_ScannerMain + gICDScannerCallbackFunctions;
+  # Foundation/CoreGraphics are pulled in by the umbrella header.
+  find_library(ICADEVICES_FRAMEWORK ICADevices REQUIRED)
+  find_library(ICA_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(ICA_COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+  target_link_libraries(brscan-ica-loadspike PRIVATE
+    ${ICADEVICES_FRAMEWORK}
+    ${ICA_FOUNDATION_FRAMEWORK}
+    ${ICA_COREGRAPHICS_FRAMEWORK})
+
+  # icdd reads Contents/Resources/DeviceMatchingInfo.plist for the Bonjour
+  # match; copy it into the bundle after link.
+  add_custom_command(TARGET brscan-ica-loadspike POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+      ${CMAKE_SOURCE_DIR}/ica-module/DeviceMatchingInfo.plist
+      $<TARGET_BUNDLE_CONTENT_DIR:brscan-ica-loadspike>/Resources/DeviceMatchingInfo.plist
+    COMMENT "Installing DeviceMatchingInfo.plist into the ICA module bundle")
+
+  # Ad-hoc code signature: the cheapest signing to try in the load spike. A
+  # module in /Library/Image Capture/Devices/ is loaded into an Apple host, so
+  # whether ad-hoc is enough or Developer-ID + notarization is required is
+  # exactly the finding (see the runbook's Signing section). Ad-hoc costs
+  # nothing and lets every local iteration be a plain rebuild.
+  add_custom_command(TARGET brscan-ica-loadspike POST_BUILD
+    COMMAND codesign --force --sign - --timestamp=none
+      $<TARGET_BUNDLE_DIR:brscan-ica-loadspike>
+    COMMENT "Ad-hoc signing the ICA module bundle")
+endif()
+
 # Tests.
 include(CTest)
 if(BUILD_TESTING)

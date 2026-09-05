@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the Plan 2 Task 1 ICA device-module load spike.
+
+  Keys that matter for loading, cross-checked against Apple's shipping module
+  /System/Library/Image Capture/Devices/AirScanScanner.app/Contents/Info.plist:
+    - CFBundlePackageType APPL + NSPrincipalClass NSApplication: an ICA module
+      is a (background) app, not a plug-in bundle.
+    - LSBackgroundOnly: the module has no UI; icdd runs it headless.
+    - LSMinimumSystemVersion: matched to the build target.
+  The Bonjour device match itself lives in Resources/DeviceMatchingInfo.plist,
+  which is what icdd reads (see that file).
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>${MODULE_NAME}</string>
+  <key>CFBundleIdentifier</key>
+  <string>ai.jiffylabs.brscan.ica-loadspike</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>${MODULE_NAME}</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleSignature</key>
+  <string>????</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>LSMinimumSystemVersion</key>
+  <string>${MODULE_MIN_MACOS}</string>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Clean-room ICA load spike. Synthetic device only.</string>
+</dict>
+</plist>
