@@ -1,18 +1,17 @@
 import BrscanConfigCore
 import SwiftUI
 
-/// A reusable route editor `Form`, bound to a `RouteViewModel`. Wired into
-/// the **File**, **Image**, and **Email** tabs (task 1e.7), each holding
-/// its own `RouteViewModel` -- **OCR** gets its own editor in task 1e.8.
-///
-/// Every picker's option list comes straight from `OptionValueSets` (task
-/// 1e.3), so this view never offers a token the daemon would reject.
-/// `tiff_compression` and the separation controls are disabled per
-/// `RouteViewModel.isCompressionEditable`/`isSeparationEditable`, which
-/// mirror `OptionRules`'s format-gating; labels follow the Google
-/// Developer Style Guide's sentence-case guidance for UI text.
-struct RouteEditorView: View {
-  @ObservedObject var viewModel: RouteViewModel
+/// The **OCR** tab's editor `Form`, bound to an `OcrRouteViewModel` (task
+/// 1e.8) -- a specialization of `RouteEditorView` (task 1e.7) for how the
+/// daemon actually treats OCR output: always a searchable PDF, never a free
+/// format choice. So this view shows scan params (mode/source/dpi/paper)
+/// and separation exactly like `RouteEditorView`, but its "Output format"
+/// section has no format picker and no `tiff_compression` control -- just a
+/// non-editable "Output: Searchable PDF" row plus notes (Google Developer
+/// Style Guide sentence case) explaining why, and the same Touch-Panel
+/// banner every route tab shows.
+struct OcrTabView: View {
+  @ObservedObject var viewModel: OcrRouteViewModel
 
   var body: some View {
     Form {
@@ -51,18 +50,15 @@ struct RouteEditorView: View {
       }
 
       Section("Output format") {
-        Picker("Format", selection: $viewModel.format) {
-          ForEach(OptionValueSets.format.options, id: \.self) { option in
-            Text(option).tag(option)
-          }
-        }
+        LabeledContent("Output", value: "Searchable PDF")
 
-        Picker("TIFF compression", selection: $viewModel.tiffCompression) {
-          ForEach(OptionValueSets.tiffCompression.options, id: \.self) { option in
-            Text(option).tag(option)
-          }
-        }
-        .disabled(!viewModel.isCompressionEditable)
+        Text(OcrRouteViewModel.Notes.searchablePdf)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
+        Text(OcrRouteViewModel.Notes.subFormatsNotProduced)
+          .font(.caption)
+          .foregroundStyle(.secondary)
       }
 
       Section("Multi-page output") {
@@ -87,17 +83,11 @@ struct RouteEditorView: View {
             }
           }
         }
-
-        if !viewModel.isSeparationEditable {
-          Text("Not applicable for this format -- each page is already written to its own file.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
       }
     }
   }
 }
 
 #Preview {
-  RouteEditorView(viewModel: RouteViewModel())
+  OcrTabView(viewModel: OcrRouteViewModel())
 }

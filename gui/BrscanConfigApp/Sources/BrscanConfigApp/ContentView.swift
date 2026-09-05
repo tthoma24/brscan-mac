@@ -4,13 +4,15 @@ import SwiftUI
 ///
 /// The **General** tab (task 1e.6) is wired to a real `GeneralViewModel`;
 /// **File** / **Image** / **Email** (task 1e.7) are each wired to their own
-/// `RouteViewModel` via the shared `RouteEditorView`. **OCR** still hosts a
-/// placeholder `Form` -- that wiring, plus the Vision OCR-only `searchable`
-/// field, is task 1e.8.
+/// `RouteViewModel` via the shared `RouteEditorView`. **OCR** (task 1e.8) is
+/// wired to its own `OcrRouteViewModel` via `OcrTabView`, since the daemon
+/// always forces OCR's output to a searchable PDF rather than offering a
+/// free format choice.
 struct ContentView: View {
   @StateObject private var generalViewModel = GeneralViewModel()
   @StateObject private var fileViewModel = RouteViewModel()
   @StateObject private var imageViewModel = RouteViewModel()
+  @StateObject private var ocrViewModel = OcrRouteViewModel()
   @StateObject private var emailViewModel = RouteViewModel()
 
   var body: some View {
@@ -33,7 +35,7 @@ struct ContentView: View {
         }
         .tag(Tabs.image)
 
-      PlaceholderForm(tab: .ocr)
+      OcrTabView(viewModel: ocrViewModel)
         .tabItem {
           Text(Tabs.ocr.title)
         }
@@ -47,23 +49,6 @@ struct ContentView: View {
     }
     .padding()
     .frame(minWidth: 480, minHeight: 360)
-  }
-}
-
-/// A static placeholder body for one tab. No real fields yet -- just enough
-/// structure to show where each tab's controls will eventually live.
-private struct PlaceholderForm: View {
-  let tab: Tabs
-
-  var body: some View {
-    Form {
-      Section(tab.title) {
-        Text("\(tab.title) settings placeholder.")
-          .foregroundStyle(.secondary)
-        Toggle("Placeholder option", isOn: .constant(false))
-          .disabled(true)
-      }
-    }
   }
 }
 
