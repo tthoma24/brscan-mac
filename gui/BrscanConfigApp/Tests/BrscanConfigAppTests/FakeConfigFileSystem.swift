@@ -16,6 +16,7 @@ final class FakeConfigFileSystem: ConfigFileSystem {
 
   private(set) var files: [String: String] = [:]
   private(set) var operations: [Operation] = []
+  private var unreadablePaths: Set<String> = []
 
   /// Seeds a file at `path` (relative to nothing in particular -- callers
   /// pass whatever `URL.path` they'll later look up), as if it already
@@ -24,11 +25,23 @@ final class FakeConfigFileSystem: ConfigFileSystem {
     files[url.path] = contents
   }
 
+  /// Seeds a file at `url` that *exists* (`fileExists(at:)` returns `true`)
+  /// but whose `contents(of:)` always throws -- simulating a real-world
+  /// read failure like non-UTF-8 bytes or a permissions error, for
+  /// `ConfigStore`'s "silent load failure" handling (Review finding I2).
+  func seedUnreadableFile(at url: URL) {
+    files[url.path] = ""
+    unreadablePaths.insert(url.path)
+  }
+
   func fileExists(at url: URL) -> Bool {
     files[url.path] != nil
   }
 
   func contents(of url: URL) throws -> String {
+    if unreadablePaths.contains(url.path) {
+      throw CocoaError(.fileReadCorruptFile)
+    }
     guard let text = files[url.path] else {
       throw CocoaError(.fileReadNoSuchFile)
     }

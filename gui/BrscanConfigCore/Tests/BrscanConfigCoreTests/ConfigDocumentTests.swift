@@ -118,6 +118,81 @@ final class ConfigDocumentTests: XCTestCase {
     XCTAssertEqual(doc.value(for: "image_app"), "Preview")
   }
 
+  // MARK: Embedded line breaks are collapsed, not written raw (Review M1)
+
+  /// A value containing an embedded `"\n"` (e.g. pasted multi-line text
+  /// into a bound `TextField`) must not split the `key = value` line in
+  /// two on disk -- that would corrupt the file, since the continuation
+  /// would read back as an unrelated `.other` line. The line break is
+  /// collapsed to a space instead.
+  func testSetValueCollapsesEmbeddedNewlineInsteadOfSplittingTheLine() {
+    var doc = ConfigDocument()
+    doc.setValue("line one\nline two", for: "email_to")
+
+    XCTAssertEqual(doc.serialized(), "email_to = line one line two")
+    XCTAssertEqual(doc.value(for: "email_to"), "line one line two")
+  }
+
+  /// `"\r\n"` and a bare `"\r"` are collapsed the same way as `"\n"`.
+  func testSetValueCollapsesCarriageReturnsToo() {
+    var doc = ConfigDocument()
+    doc.setValue("a\r\nb\rc", for: "email_to")
+
+    XCTAssertEqual(doc.value(for: "email_to"), "a b c")
+    XCTAssertFalse(doc.serialized().contains("\r"))
+  }
+
+  // MARK: Removing a key
+
+  /// Removing a key with an active line deletes that line entirely --
+  /// leaving the key absent, not present-with-an-empty-value -- while every
+  /// other line stays byte-for-byte unchanged.
+  func testRemoveValueDeletesTheActiveLine() throws {
+    let original = try fixtureText()
+    var doc = ConfigDocument(text: original)
+
+    XCTAssertEqual(doc.value(for: "display_name"), "Test Mac")
+    doc.removeValue(for: "display_name")
+
+    XCTAssertNil(doc.value(for: "display_name"))
+    XCTAssertFalse(doc.serialized().contains("display_name"), "the key must be gone, not just blanked")
+
+    let originalLines = original.components(separatedBy: "\n")
+    let updatedLines = doc.serialized().components(separatedBy: "\n")
+    XCTAssertEqual(updatedLines.count, originalLines.count - 1, "exactly one line should be removed")
+  }
+
+  /// Removing a key that has no active line at all is a no-op -- the
+  /// document is left byte-for-byte identical.
+  func testRemoveValueOfAbsentKeyIsNoOp() throws {
+    let original = try fixtureText()
+    var doc = ConfigDocument(text: original)
+
+    XCTAssertNil(doc.value(for: "does_not_exist"))
+    doc.removeValue(for: "does_not_exist")
+
+    XCTAssertEqual(doc.serialized(), original)
+  }
+
+  /// Removing a key with more than one active line (an earlier line
+  /// shadowed by a later one) removes every line for that key, not just the
+  /// winning one -- so the key is fully absent, with no shadowed duplicate
+  /// left behind to resurface if a later `setValue` were ever applied.
+  func testRemoveValueWithDuplicateLinesRemovesAllOfThem() {
+    let text = [
+      "file.mode = color",
+      "file.mode = gray",
+    ].joined(separator: "\n") + "\n"
+    var doc = ConfigDocument(text: text)
+
+    doc.removeValue(for: "file.mode")
+
+    XCTAssertNil(doc.value(for: "file.mode"))
+    // Every line is gone, but the file's trailing-newline style survives
+    // independently of line content (see `hasTrailingNewline`).
+    XCTAssertEqual(doc.serialized(), "\n")
+  }
+
   // MARK: Whitespace and comment handling, mirroring daemon/config.cpp
 
   /// Values are trimmed the same way `daemon/config.cpp`'s `Trim()` trims

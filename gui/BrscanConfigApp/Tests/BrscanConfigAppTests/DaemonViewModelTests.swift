@@ -118,6 +118,51 @@ final class DaemonViewModelTests: XCTestCase {
     XCTAssertTrue(control.printAgentCalls.isEmpty, "must not even check daemon state when the save failed")
   }
 
+  // MARK: Plain Save -- surfaces a save failure, never touches the daemon (Review I3)
+
+  func testSaveOnlySucceedsAndDoesNotConsultTheDaemonAtAll() {
+    let control = FakeDaemonControl()
+    let viewModel = DaemonViewModel(control: control)
+    var saveCalled = false
+
+    let succeeded = viewModel.saveOnly { saveCalled = true }
+
+    XCTAssertTrue(saveCalled)
+    XCTAssertTrue(succeeded)
+    XCTAssertNil(viewModel.lastApplyOutcome)
+    XCTAssertTrue(control.printAgentCalls.isEmpty, "plain Save must never check daemon state")
+    XCTAssertTrue(control.sendHupCalls.isEmpty, "plain Save must never signal the daemon")
+  }
+
+  func testSaveOnlySurfacesAFailureAsSaveFailedInsteadOfSwallowingIt() {
+    let control = FakeDaemonControl()
+    let viewModel = DaemonViewModel(control: control)
+
+    enum TestError: Error { case boom }
+    let succeeded = viewModel.saveOnly { throw TestError.boom }
+
+    XCTAssertFalse(succeeded)
+    XCTAssertEqual(viewModel.lastApplyOutcome, .saveFailed)
+    XCTAssertTrue(control.sendHupCalls.isEmpty)
+  }
+
+  func testSaveOnlyClearsAStalePreviousOutcomeOnSuccess() {
+    let control = FakeDaemonControl()
+    control.printAgentResult = "\tstate = running\n"
+    control.sendHupResult = false
+    let viewModel = DaemonViewModel(control: control)
+
+    // First, an earlier Save & Apply leaves a stale failure message.
+    _ = viewModel.saveAndApply {}
+    XCTAssertEqual(viewModel.lastApplyOutcome, .signalFailed)
+
+    // A subsequent plain Save that succeeds must not leave that stale
+    // message showing.
+    let succeeded = viewModel.saveOnly {}
+    XCTAssertTrue(succeeded)
+    XCTAssertNil(viewModel.lastApplyOutcome)
+  }
+
   // MARK: Domain target composition
 
   func testDomainTargetIsComposedFromRuntimeUIDAndTheRealLabel() {

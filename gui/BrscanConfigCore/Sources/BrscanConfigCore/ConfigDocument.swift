@@ -159,12 +159,48 @@ public struct ConfigDocument: Equatable {
   ///
   /// Every other line -- comments, blank lines, other keys -- is left
   /// byte-for-byte unchanged.
+  ///
+  /// `value` is written as a single physical line: an embedded `"\n"` or
+  /// `"\r"` (e.g. from pasted multi-line text into a bound `TextField`)
+  /// would otherwise split one logical `key = value` entry into two lines
+  /// on disk, corrupting the file -- the continuation would parse back as
+  /// its own unrelated `.other` line, and `daemon/config.cpp`'s own
+  /// line-based parser would silently misread it the same way. So any line
+  /// break in `value` is collapsed to a space before writing (Review
+  /// finding M1).
   public mutating func setValue(_ value: String, for key: String) {
-    let newLine = Line(raw: "\(key) = \(value)", kind: .entry(key: key, value: value))
+    let singleLineValue = ConfigDocument.collapseLineBreaks(value)
+    let newLine = Line(raw: "\(key) = \(singleLineValue)", kind: .entry(key: key, value: singleLineValue))
     if let index = lastIndex(ofKey: key) {
       lines[index] = newLine
     } else {
       lines.append(newLine)
+    }
+  }
+
+  /// Replaces every `"\r\n"`, `"\n"`, and `"\r"` in `value` with a single
+  /// space, so it can never split a `key = value` line in two. See
+  /// `setValue`'s doc comment.
+  private static func collapseLineBreaks(_ value: String) -> String {
+    value.replacingOccurrences(of: "\r\n", with: " ")
+      .replacingOccurrences(of: "\n", with: " ")
+      .replacingOccurrences(of: "\r", with: " ")
+  }
+
+  /// Removes every active `key = value` line for `key`, leaving the key
+  /// entirely absent from the document -- unlike `setValue`, which always
+  /// leaves an active line behind (even for an empty string). Use this when
+  /// a field's "unset" state must let a downstream reader fall back to its
+  /// own default rather than being pinned to an explicit empty value (see
+  /// `DaemonConfig.General.apply`'s handling of an empty `display_name`). A
+  /// no-op if `key` has no active line. Every other line -- comments, blank
+  /// lines, other keys, and any already-shadowed duplicate line for `key`
+  /// that a hand-edited file might contain -- is left byte-for-byte
+  /// unchanged.
+  public mutating func removeValue(for key: String) {
+    lines.removeAll { line in
+      if case .entry(let lineKey, _) = line.kind { return lineKey == key }
+      return false
     }
   }
 
@@ -191,6 +227,16 @@ public struct ConfigDocument: Equatable {
   /// Writes `serialized()` to `url` atomically: the new contents are
   /// written to a temp file in the same directory, then renamed into
   /// place, so a crash or a concurrent reader never sees a truncated file.
+  ///
+  /// Two accepted side effects of standard temp-then-rename, worth calling
+  /// out rather than treating as bugs (Review finding M4): if `url` is a
+  /// symlink, the `rename()` replaces the link itself with a regular file
+  /// (the link doesn't survive); and the temp file is created with default
+  /// permissions (subject to the process's umask), so a config file that
+  /// was, say, `0600` comes back `0644` after a save. Neither matters for
+  /// this app's data (a config file with no secrets, always written to a
+  /// plain path under `~/.config`), so this is a deliberate choice, not an
+  /// oversight.
   public func write(to url: URL) throws {
     let text = serialized()
     let directory = url.deletingLastPathComponent()

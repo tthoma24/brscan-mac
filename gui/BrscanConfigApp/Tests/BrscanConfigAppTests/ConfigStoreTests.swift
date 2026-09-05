@@ -13,11 +13,18 @@ final class ConfigStoreTests: XCTestCase {
 
   /// A config text exercising every field this app models -- one comment
   /// block, a blank separator line, and one key `DaemonConfig` doesn't
-  /// know about (`custom_unknown_key`) -- with every `<dest>.*` value drawn
-  /// from `OptionSets` (so `DaemonConfig.from(_:)` reads it back verbatim
-  /// rather than substituting a default) and every separation value in its
-  /// canonical `serialize(_:)` spelling (`"combine"`, never `"off"`), so
-  /// re-applying unedited view models reproduces this text byte-for-byte.
+  /// know about (`custom_unknown_key`) -- with every `<dest>.*` value
+  /// other than `paper` drawn from `OptionSets` (so `DaemonConfig.from(_:)`
+  /// reads it back verbatim rather than substituting a default) and every
+  /// separation value in its canonical `serialize(_:)` spelling
+  /// (`"combine"`, never `"off"`), so re-applying unedited view models
+  /// reproduces this text byte-for-byte. `paper` is the one exception:
+  /// these lowercase tokens (`letter`, `a4`, `legal`, `a5`) are *not* in
+  /// `OptionSets.paper` (uppercase) -- `<dest>.paper` is the one `<dest>.*`
+  /// field `daemon/config.cpp`'s `ApplyKey` never validates (see
+  /// `DaemonConfig.Route.paper`'s doc comment), so `DaemonConfig` stores
+  /// them verbatim regardless, and the byte-stable round trip below still
+  /// holds (Review finding M7).
   private var sampleConfigText: String {
     [
       "# Sample config for tests.",
@@ -115,6 +122,63 @@ final class ConfigStoreTests: XCTestCase {
     XCTAssertFalse(created)
     XCTAssertEqual(try fileSystem.contents(of: configURL), existing, "an existing file must never be overwritten")
     XCTAssertTrue(fileSystem.operations.isEmpty, "create must not touch disk at all when the file already exists")
+  }
+
+  // MARK: Load failure -- must not enable a destructive save (Review I2)
+
+  func testLoadFailureSetsLoadFailedStateAndRethrowsRatherThanSwallowingTheError() {
+    let fileSystem = FakeConfigFileSystem()
+    fileSystem.seedUnreadableFile(at: configURL)
+    let store = ConfigStore(fileSystem: fileSystem, configURL: configURL)
+
+    XCTAssertTrue(store.configFileExists, "the file is present on disk, just unreadable")
+    XCTAssertThrowsError(try store.load())
+
+    XCTAssertEqual(store.loadState, .loadFailed)
+  }
+
+  func testSaveIsRefusedAfterALoadFailureSoTheRealFileIsNeverOverwritten() throws {
+    let fileSystem = FakeConfigFileSystem()
+    fileSystem.seedUnreadableFile(at: configURL)
+    let store = ConfigStore(fileSystem: fileSystem, configURL: configURL)
+
+    XCTAssertThrowsError(try store.load())
+    XCTAssertEqual(store.loadState, .loadFailed)
+
+    XCTAssertThrowsError(try store.save()) { error in
+      XCTAssertEqual(error as? ConfigStore.SaveError, .refusedUnloadedExistingFile)
+    }
+    XCTAssertTrue(fileSystem.operations.isEmpty, "a refused save must not touch disk at all")
+  }
+
+  func testSaveIsRefusedWhenAnExistingFileWasNeverLoadedAtAll() throws {
+    let fileSystem = FakeConfigFileSystem()
+    fileSystem.seedFile(at: configURL, contents: sampleConfigText)
+    // Deliberately never calling store.load() -- loadState stays .notLoaded
+    // even though a real file is sitting at configURL.
+    let store = ConfigStore(fileSystem: fileSystem, configURL: configURL)
+
+    XCTAssertEqual(store.loadState, .notLoaded)
+    XCTAssertThrowsError(try store.save()) { error in
+      XCTAssertEqual(error as? ConfigStore.SaveError, .refusedUnloadedExistingFile)
+    }
+    XCTAssertEqual(try fileSystem.contents(of: configURL), sampleConfigText, "the on-disk file must be untouched")
+    XCTAssertTrue(fileSystem.operations.isEmpty)
+  }
+
+  func testSaveStillWorksOnABrandNewStoreWhenNoFileExistsYet() throws {
+    // The guard above must not regress the ordinary first-run path: no file
+    // on disk, load() never called, save() still produces a well-formed
+    // file from the view models' defaults.
+    let fileSystem = FakeConfigFileSystem()
+    let store = ConfigStore(fileSystem: fileSystem, configURL: configURL)
+
+    XCTAssertEqual(store.loadState, .notLoaded)
+    XCTAssertFalse(store.configFileExists)
+
+    try store.save()
+
+    XCTAssertTrue(fileSystem.fileExists(at: configURL))
   }
 
   // MARK: Load -> edit -> atomic save

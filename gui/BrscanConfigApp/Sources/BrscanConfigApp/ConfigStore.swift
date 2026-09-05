@@ -22,6 +22,27 @@ public final class ConfigStore: ObservableObject {
     case missing
     /// `load()` ran and successfully seeded every tab's view model.
     case loaded
+    /// `load()` ran, the file exists, but reading/parsing it threw (e.g.
+    /// non-UTF-8 bytes, or an I/O or permissions error) -- `document` and
+    /// every view model were left untouched (still whatever they held
+    /// before), not reset to empty. `save()` refuses to run while in this
+    /// state (see its doc comment) so an ordinary read error can't turn
+    /// into a save that silently discards the on-disk file's comments and
+    /// unknown keys (Review finding I2).
+    case loadFailed
+  }
+
+  /// Thrown by `save()` when it refuses to run because `document` was never
+  /// safely loaded from an existing on-disk file -- see `save()`'s doc
+  /// comment.
+  public enum SaveError: Error, Equatable {
+    /// `configURL` exists but `load()` either failed (`loadState ==
+    /// .loadFailed`) or was never successfully called (`loadState` is still
+    /// `.notLoaded`) since this `ConfigStore` was created. Saving now would
+    /// write the five view models' in-memory values -- defaults, for any
+    /// tab that was never seeded -- over a file whose actual contents were
+    /// never read, discarding its comments, blank lines, and unknown keys.
+    case refusedUnloadedExistingFile
   }
 
   /// The five tabs' view models, seeded by `load()`/`createStarterConfigIfNeeded()`
@@ -142,14 +163,29 @@ public final class ConfigStore: ObservableObject {
   /// view models untouched (at whatever they already held) rather than
   /// throwing -- "no config file yet" is an expected first-run state, not
   /// an error; see `createStarterConfigIfNeeded()`.
+  ///
+  /// If the file exists but reading/parsing it throws, `loadState` is set
+  /// to `.loadFailed` (rather than being left at whatever it was before,
+  /// which could misleadingly still be `.notLoaded`) and the error is
+  /// rethrown to the caller -- callers must not swallow it with `try?`
+  /// (Review finding I2): doing so would leave `document` at its prior,
+  /// unseeded contents while `configFileExists` still reads `true`, and a
+  /// later `save()` would then write over the real file's contents, which
+  /// were never actually read. `save()` also checks `loadState` itself as a
+  /// second line of defense against exactly that.
   public func load() throws {
     guard fileSystem.fileExists(at: configURL) else {
       loadState = .missing
       return
     }
-    let text = try fileSystem.contents(of: configURL)
-    applyLoadedDocument(ConfigDocument(text: text))
-    loadState = .loaded
+    do {
+      let text = try fileSystem.contents(of: configURL)
+      applyLoadedDocument(ConfigDocument(text: text))
+      loadState = .loaded
+    } catch {
+      loadState = .loadFailed
+      throw error
+    }
   }
 
   private func applyLoadedDocument(_ doc: ConfigDocument) {
@@ -179,7 +215,23 @@ public final class ConfigStore: ObservableObject {
   /// result to `configURL` atomically (a temp file in the same directory,
   /// written first, then renamed into place; see `ConfigFileSystem`).
   /// Clears `isDirty` on success.
+  ///
+  /// Refuses to run at all -- throwing `SaveError.refusedUnloadedExistingFile`
+  /// before touching disk -- when `configURL` exists but `document` was
+  /// never safely seeded from it (`loadState` is `.loadFailed`, or still
+  /// `.notLoaded` despite a file being present). Without this guard, saving
+  /// in that state would apply the five view models' current values -- for
+  /// any tab whose `load()` never ran, still their in-memory defaults --
+  /// onto the empty starting `document`, silently discarding every comment,
+  /// blank line, and unknown key the real on-disk file had (Review finding
+  /// I2). `.missing` is exempt: no file exists yet, so there is nothing to
+  /// discard, and a save there is exactly how a config file gets created
+  /// from scratch.
   public func save() throws {
+    if loadState != .loaded && configFileExists {
+      throw SaveError.refusedUnloadedExistingFile
+    }
+
     let config = currentConfig
     var doc = document
     config.apply(to: &doc)

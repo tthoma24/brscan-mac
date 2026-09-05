@@ -135,6 +135,30 @@ public final class DaemonViewModel: ObservableObject {
     return recordOutcome(control.sendHup(domainTarget: domainTarget) ? .appliedAndReloaded : .signalFailed)
   }
 
+  /// Runs `save` (typically `ConfigStore.save`) directly, without touching
+  /// the daemon -- the plain **Save** button's action, as opposed to
+  /// `saveAndApply(save:)`, which also signals a running daemon to reload.
+  /// A failure is recorded as `.saveFailed` through `lastApplyOutcome`, the
+  /// same outcome (and the same user-facing message) `saveAndApply` reports
+  /// for a failed save, so the two adjacent buttons behave consistently on
+  /// an atomic-write failure (Review finding I3) -- previously the plain
+  /// Save button discarded the error with `try?` and showed nothing. A
+  /// successful save clears `lastApplyOutcome` (rather than setting any
+  /// reload-specific guidance, since no reload was attempted), so a stale
+  /// message from an earlier failed attempt doesn't linger after a
+  /// subsequent save succeeds.
+  @discardableResult
+  public func saveOnly(save: () throws -> Void) -> Bool {
+    do {
+      try save()
+    } catch {
+      _ = recordOutcome(.saveFailed)
+      return false
+    }
+    lastApplyOutcome = nil
+    return true
+  }
+
   private func recordOutcome(_ outcome: ApplyOutcome) -> ApplyOutcome {
     lastApplyOutcome = outcome
     return outcome
