@@ -268,6 +268,11 @@ setting has a default; see the comments in the example file for the full list,
 including per-destination mode, resolution, and source, and the Image and
 E-mail action settings.
 
+Prefer a graphical editor over hand-editing this file? [gui/README.md](../gui/README.md)
+covers Brscan Config, a Plan 1e app with a tabbed window for these same
+settings, including a "Save & apply" action that reloads the running daemon
+for you.
+
 You can check your config before installing the agent by running the daemon in
 the foreground:
 
