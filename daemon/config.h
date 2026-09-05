@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "brscan/types.h"
@@ -167,6 +168,21 @@ Config LoadConfig(const std::string& path);
 
 // The daemon's default config file path: ~/.config/brscan-scand.conf.
 std::string DefaultConfigPath();
+
+// Attempts a SIGHUP-triggered config reload (see tools/brscan-scand.cpp's
+// main loop): re-reads `path` via the same LoadConfig() startup uses, and
+// returns the freshly parsed Config -- unless it would be unusable (an
+// empty printer_host: see kDefaultPrinterHost above), in which case this
+// returns std::nullopt so the caller keeps its previous Config in place
+// rather than swapping to a broken one. A `path` that doesn't exist at
+// reload time (e.g. deleted, or briefly absent mid-rewrite) is treated the
+// same way: LoadConfig() would return DefaultConfig() (empty
+// printer_host), which this function also rejects.
+//
+// Factored out of tools/brscan-scand.cpp's signal plumbing so the reload
+// decision itself -- fresh Config vs. keep-previous -- is unit-testable
+// without a real SIGHUP or process (see tests/config_reload_test.cpp).
+std::optional<Config> TryReloadConfig(const std::string& path);
 
 // The Params to use for a button event's FUNC (FILE/IMAGE/OCR/EMAIL,
 // matched case-sensitively per the wire protocol -- see

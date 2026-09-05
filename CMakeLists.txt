@@ -150,6 +150,7 @@ if(BUILD_TESTING)
     tests/paper_size_test.cpp
     daemon/config.cpp
     tests/config_test.cpp
+    tests/config_reload_test.cpp
     daemon/actions.cpp
     tests/actions_test.cpp
     daemon/action_ocr.mm

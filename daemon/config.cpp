@@ -295,6 +295,15 @@ std::string DefaultConfigPath() {
   return ExpandHome("~/.config/brscan-scand.conf");
 }
 
+std::optional<Config> TryReloadConfig(const std::string& path) {
+  Config cfg = LoadConfig(path);
+  // Mirrors main()'s own startup check in tools/brscan-scand.cpp: an empty
+  // printer_host (from a missing file, an emptied key, or a parse that
+  // never set one) is never a usable Config to swap in.
+  if (cfg.printer_host.empty()) return std::nullopt;
+  return cfg;
+}
+
 const brscan::Params& ParamsForFunc(const Config& cfg, const std::string& func) {
   if (func == kFuncImage) return cfg.image_params;
   if (func == kFuncOcr) return cfg.ocr_params;
