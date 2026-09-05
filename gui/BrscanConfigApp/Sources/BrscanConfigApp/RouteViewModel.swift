@@ -133,4 +133,31 @@ public final class RouteViewModel: ObservableObject {
       separation: separation,
       paper: paper)
   }
+
+  // MARK: Reseeding
+
+  /// Resets every bound field to `route`'s values, in place -- unlike
+  /// `init(route:)`, this doesn't replace the view model instance, so
+  /// `ConfigStore` (task 1e.9) can reseed an already-created, already-bound
+  /// `RouteViewModel` after loading a config file from disk.
+  public func load(_ route: DaemonConfig.Route) {
+    mode = route.mode
+    source = route.source
+    dpi = route.dpi
+    format = route.format
+    tiffCompression = route.tiffCompression
+    paper = route.paper
+
+    switch route.separation {
+    case .combine:
+      separationMode = .combine
+      separationCount = 1
+    case .image(let n):
+      separationMode = .image
+      separationCount = n
+    case .page(let n):
+      separationMode = .page
+      separationCount = n
+    }
+  }
 }

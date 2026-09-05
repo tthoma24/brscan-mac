@@ -115,6 +115,32 @@ public final class OcrRouteViewModel: ObservableObject {
       paper: paper)
   }
 
+  // MARK: Reseeding
+
+  /// Resets every bound field to `route`'s values, in place (`format` is
+  /// always fixed, so it's never touched) -- unlike `init(route:)`, this
+  /// doesn't replace the view model instance, so `ConfigStore` (task 1e.9)
+  /// can reseed an already-created, already-bound `OcrRouteViewModel` after
+  /// loading a config file from disk.
+  public func load(_ route: DaemonConfig.Route) {
+    mode = route.mode
+    source = route.source
+    dpi = route.dpi
+    paper = route.paper
+
+    switch route.separation {
+    case .combine:
+      separationMode = .combine
+      separationCount = 1
+    case .image(let n):
+      separationMode = .image
+      separationCount = n
+    case .page(let n):
+      separationMode = .page
+      separationCount = n
+    }
+  }
+
   /// The OCR tab's info notes, named out as constants rather than string
   /// literals inline in `OcrTabView` so `OcrRouteViewModelTests` can pin
   /// their key claims (Google Developer Style Guide sentence case; accurate
