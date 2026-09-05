@@ -169,6 +169,18 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
       $<TARGET_BUNDLE_CONTENT_DIR:brscan-ica-loadspike>/Resources/DeviceInfo.plist
     COMMENT "Installing DeviceMatchingInfo.plist + DeviceInfo.plist into the ICA module bundle")
 
+  # Write Contents/PkgInfo (APPL????). Apple's AirScanScanner.app ships one and
+  # CMake's MACOSX_BUNDLE does not emit it; LaunchServices (icdd launches modules
+  # via openApplicationAtURL:) reads it, so we add it for bundle parity. The file
+  # is generated at configure time (no trailing newline) and copied in before
+  # signing so PkgInfo is covered by the signature. (Task 1c.)
+  file(WRITE ${CMAKE_BINARY_DIR}/ica-module/PkgInfo "APPL????")
+  add_custom_command(TARGET brscan-ica-loadspike POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+      ${CMAKE_BINARY_DIR}/ica-module/PkgInfo
+      $<TARGET_BUNDLE_CONTENT_DIR:brscan-ica-loadspike>/PkgInfo
+    COMMENT "Writing Contents/PkgInfo (APPL????) into the ICA module bundle")
+
   # Ad-hoc code signature: the cheapest signing to try in the load spike. A
   # module in /Library/Image Capture/Devices/ is loaded into an Apple host, so
   # whether ad-hoc is enough or Developer-ID + notarization is required is
