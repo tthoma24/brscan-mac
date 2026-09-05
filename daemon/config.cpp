@@ -108,6 +108,17 @@ OutputSettings* OutputForDestPrefix(Config* cfg, const std::string& dest) {
   return nullptr;
 }
 
+// Returns the raw paper-token field this key's <dest> prefix names, or
+// nullptr for anything else -- the counterpart to ParamsForDestPrefix/
+// OutputForDestPrefix for the `<dest>.paper` key.
+std::string* PaperForDestPrefix(Config* cfg, const std::string& dest) {
+  if (dest == "file") return &cfg->file_paper;
+  if (dest == "image") return &cfg->image_paper;
+  if (dest == "ocr") return &cfg->ocr_paper;
+  if (dest == "email") return &cfg->email_paper;
+  return nullptr;
+}
+
 // Applies one already-trimmed, non-empty `key`/`value` pair to `cfg`.
 // Unrecognized keys and values that fail to parse are silently ignored --
 // see ParseConfig()'s doc comment for why.
@@ -175,6 +186,16 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
         output->separate_n = separate_n;
       }
     }
+  }
+
+  if (field == "paper") {
+    std::string* const paper = PaperForDestPrefix(cfg, dest);
+    // Stored as-is, with no validation against daemon/paper_size.h's
+    // table -- mapping/validating the token happens where it's
+    // consumed (a later task), keeping this parser decoupled. An
+    // explicit empty value (`file.paper=`) leaves the field empty,
+    // same as its default.
+    if (paper != nullptr) *paper = value;
   }
 }
 
@@ -259,6 +280,13 @@ const OutputSettings& OutputSettingsForFunc(const Config& cfg,
   if (func == kFuncOcr) return cfg.ocr_output;
   if (func == kFuncEmail) return cfg.email_output;
   return cfg.file_output;  // kFuncFile, and the safe fallback otherwise.
+}
+
+const std::string& PaperForFunc(const Config& cfg, const std::string& func) {
+  if (func == kFuncImage) return cfg.image_paper;
+  if (func == kFuncOcr) return cfg.ocr_paper;
+  if (func == kFuncEmail) return cfg.email_paper;
+  return cfg.file_paper;  // kFuncFile, and the safe fallback otherwise.
 }
 
 bool IsKnownFunc(const std::string& func) {

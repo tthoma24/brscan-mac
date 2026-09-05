@@ -89,6 +89,19 @@
 # email.format = pdf
 # email.tiff_compression = g4
 
+# --- Per-destination paper size ----------------------------------------------
+#
+# Sets an explicit paper size per destination, for use when the printer's LCD
+# panel Touch Panel setting is OFF (in which case the panel doesn't send its
+# own paper choice with the button press). Not yet consulted by the daemon --
+# only stored and parsed as of this writing -- so setting it has no effect
+# yet. Accepted tokens (Brother's own paper names, case-sensitive):
+#
+#   <dest>.paper   LETTER | LEGAL | A4 | LEDGER | A3 | A5 | EXECUTIVE |
+#                  PHOTO | BCARD (default empty -- no explicit paper)
+
+# file.paper = LETTER
+
 # --- Destination action settings --------------------------------------------
 
 # IMAGE destination: the app that opens the saved scan, as `open -a <app>`.

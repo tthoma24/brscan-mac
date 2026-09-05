@@ -323,6 +323,77 @@ TEST(OutputSettingsForFuncTest, FallsBackToFileOutputForUnknownFunc) {
   EXPECT_EQ(OutputSettingsForFunc(cfg, "BOGUS").format, OutputFormat::kPdf);
 }
 
+// ---------------------------------------------------------------------
+// Paper (`<dest>.paper`).
+// ---------------------------------------------------------------------
+
+TEST(DefaultConfigTest, PaperDefaultsToEmpty) {
+  const Config cfg = DefaultConfig();
+  EXPECT_TRUE(cfg.file_paper.empty());
+  EXPECT_TRUE(cfg.image_paper.empty());
+  EXPECT_TRUE(cfg.ocr_paper.empty());
+  EXPECT_TRUE(cfg.email_paper.empty());
+}
+
+TEST(ParseConfigTest, AppliesPaperForEachDest) {
+  const Config cfg = ParseConfig(
+      "file.paper=LETTER\n"
+      "image.paper=A4\n"
+      "ocr.paper=LEGAL\n"
+      "email.paper=PHOTO\n");
+  EXPECT_EQ(cfg.file_paper, "LETTER");
+  EXPECT_EQ(cfg.image_paper, "A4");
+  EXPECT_EQ(cfg.ocr_paper, "LEGAL");
+  EXPECT_EQ(cfg.email_paper, "PHOTO");
+}
+
+TEST(ParseConfigTest, MissingPaperKeyLeavesEmptyDefault) {
+  const Config cfg = ParseConfig("file.mode=gray\n");
+  EXPECT_TRUE(cfg.file_paper.empty());
+}
+
+TEST(ParseConfigTest, ExplicitEmptyPaperStaysEmpty) {
+  const Config cfg = ParseConfig("file.paper=\n");
+  EXPECT_TRUE(cfg.file_paper.empty());
+}
+
+TEST(ParseConfigTest, PaperIsStoredRawWithoutValidation) {
+  // This task deliberately does not validate `<dest>.paper` against
+  // daemon/paper_size.h's table (see config.h's doc comment) -- an
+  // unrecognized token is stored as-is, not rejected.
+  const Config cfg = ParseConfig("file.paper=NOT-A-REAL-PAPER\n");
+  EXPECT_EQ(cfg.file_paper, "NOT-A-REAL-PAPER");
+}
+
+TEST(ParseConfigTest, PaperAndOtherPerDestKeysCoexist) {
+  const Config cfg = ParseConfig(
+      "file.mode=gray\n"
+      "file.format=pdf\n"
+      "file.paper=LEGAL\n");
+  EXPECT_EQ(cfg.file_params.mode, brscan::ScanMode::kGray);
+  EXPECT_EQ(cfg.file_output.format, OutputFormat::kPdf);
+  EXPECT_EQ(cfg.file_paper, "LEGAL");
+}
+
+TEST(PaperForFuncTest, MapsEachKnownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_paper = "LETTER";
+  cfg.image_paper = "A4";
+  cfg.ocr_paper = "LEGAL";
+  cfg.email_paper = "PHOTO";
+
+  EXPECT_EQ(PaperForFunc(cfg, "FILE"), "LETTER");
+  EXPECT_EQ(PaperForFunc(cfg, "IMAGE"), "A4");
+  EXPECT_EQ(PaperForFunc(cfg, "OCR"), "LEGAL");
+  EXPECT_EQ(PaperForFunc(cfg, "EMAIL"), "PHOTO");
+}
+
+TEST(PaperForFuncTest, FallsBackToFilePaperForUnknownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_paper = "LETTER";
+  EXPECT_EQ(PaperForFunc(cfg, "BOGUS"), "LETTER");
+}
+
 TEST(DefaultConfigPathTest, EndsWithExpectedFilename) {
   const std::string path = DefaultConfigPath();
   const std::string suffix = ".config/brscan-scand.conf";
