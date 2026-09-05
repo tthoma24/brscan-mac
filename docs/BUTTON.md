@@ -102,6 +102,51 @@ tokens are kept as raw strings rather than mapped to a scan area or this
 project's own output-format enum -- later tasks own those mappings, so this
 parser stays decoupled and independently testable.
 
+## Scan-button wire flow
+
+The scan-button session on TCP 54921 is a variant of the normal scan flow in
+[PROTOCOL.md](PROTOCOL.md), driven by `RunButtonScan` (`libbrscan/scanner.h`)
+rather than `RunScan`. Each button scan is its own connection:
+
+```
+P->H  +OK 200\n                          greeting (-NG 401 = busy)
+H->P  ESC K  (1b 4b 0a 80)               button opener -- NOT ESC Q
+P->H  30 <len> 00 <payload>              config command (the LCD settings)
+H->P  ESC I  R=x,y  M=..  D=..  S=NORMAL_SCAN     (S present for color too)
+P->H  <offer CSV>                        same offer reply RunScan reads
+H->P  ESC X  <button variant, below>
+P->H  <block header + image payload, looped over pages>   (same readout)
+```
+
+It differs from the normal flow (`RunScan`) in exactly three places:
+
+- **Opener.** `ESC K` replaces `ESC Q`, and there is **no source-select
+  command** -- neither `ESC S FB` nor `ESC D ADF` is sent.
+- **`ESC I`.** Carries `S=NORMAL_SCAN` even for a color scan (the normal flow
+  only appends it for the RLENGTH modes).
+- **`ESC X`.** Uses the RLENGTH-style field order
+  (`R,M,C,J,B,N,A,D,S=NORMAL_SCAN,P=0,E=0,G,L`) for color too, with
+  `C=JPEG` for a color scan (`C=RLENGTH` for black & white, as in the normal
+  RLENGTH flow), and `G`/`L` carrying the remove-background enable/level.
+
+Everything from `ESC X` onward -- the block-header/image readout, including
+multi-page ADF de-interleaving -- is identical to `RunScan` and shares the
+same implementation.
+
+`RunButtonScan` keeps `libbrscan` free of config parsing and the paper table:
+it reads the pushed config frame off the wire and hands the raw bytes to a
+caller-supplied callback (`ButtonParamsFn`), which returns the concrete
+`Params` to scan with (mode, scan area from the paper table, duplex,
+remove-background) or `std::nullopt` to abort. The daemon fills that callback
+in a later task; `libbrscan` itself never interprets the config.
+
+**Provenance.** The `ESC K` opener, the `S=NORMAL_SCAN`-for-color `ESC I`, and
+the button `ESC X` variant were decoded black-box from our own hardware
+capture `reference/brscan-button-options.pcap` (see
+`reference/protocol-notes-button-options.md` and `PROVENANCE.md`); no Brother
+software was consulted. The captured command byte strings carry no device
+identity or scan-image content.
+
 | Key | Field | Values | Notes |
 |---|---|---|---|
 | `F` | `func` | `FILE`, `IMAGE`, `OCR`, `EMAIL` | The button pressed. Always present; an empty or missing `F` makes the whole frame malformed. |

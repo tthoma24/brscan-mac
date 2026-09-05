@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <vector>
 
 #include "brscan/transport.h"
@@ -81,5 +83,42 @@ struct ScanResult {
 // protocol lets this code rule out structurally.
 Status RunScan(Transport& transport, const Params& params,
                 std::vector<ScanResult>* out);
+
+// Given the printer's pushed config-command bytes (the full 0x30 <len> 0x00
+// frame, header included), returns the Params to scan with, or std::nullopt
+// to abort the session. This is the seam that keeps libbrscan free of config
+// parsing and the paper table: the daemon turns the pushed LCD settings into
+// concrete Params (mode, area, duplex, remove-background) and hands them back
+// (see Task 1d.4). The callback is invoked exactly once per session, with the
+// full config frame it must not assume any particular contents of.
+using ButtonParamsFn =
+    std::function<std::optional<Params>(const std::vector<uint8_t>& config)>;
+
+// Runs a scan-button session over `transport` (already connected), the flow
+// the printer's physical Scan button drives (see docs/BUTTON.md's
+// "Scan-button wire flow"). It differs from RunScan only in its opener and
+// its ESC I/ESC X shape:
+//   1. greeting (same as RunScan; -NG 401 -> kBusy);
+//   2. ESC K (the button opener, in place of ESC Q) -- NO source select;
+//   3. read the pushed config-command frame (0x30 <len> 0x00 <payload>) and
+//      hand it to `params_from_config`; std::nullopt -> kProtocolError;
+//   4. ESC I with S=NORMAL_SCAN (button_flow), then drain the offer reply;
+//   5. ESC X in the button variant (C=JPEG for color, S=NORMAL_SCAN, G/L
+//      from the returned Params);
+//   6. the SAME multi-page block/payload readout RunScan uses (simplex and
+//      duplex de-interleave), one ScanResult per page.
+//
+// The scan-button flow supplies a concrete scan area in the returned
+// Params::area (from the paper table). As a fallback, an all-zero area
+// requests the full area the ESC I offer granted, exactly as RunScan does.
+//
+// `out->clear()` runs first; the ScanResult contract and page semantics are
+// identical to RunScan, including that `out` is left empty on any non-kOk
+// Status. `kBusy`/`kTimeout`/`kProtocolError`/`kIoError` carry the same
+// meanings as in RunScan; a std::nullopt callback or a malformed config
+// frame maps to `kProtocolError`.
+Status RunButtonScan(Transport& transport,
+                     const ButtonParamsFn& params_from_config,
+                     std::vector<ScanResult>* out);
 
 }  // namespace brscan
