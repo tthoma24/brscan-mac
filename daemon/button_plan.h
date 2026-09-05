@@ -57,17 +57,22 @@ struct ButtonScanPlan {
 // config command never legitimately carries `R=0`. This is the one signal
 // this project distinguishes the two forms by.
 //
-// Touch-Panel-ON: params.mode/x_dpi/y_dpi/duplex/area/remove_background(_level)
+// Either branch: params.duplex always comes from the parsed config's D=
+// (the printer's touch panel exposes the 2-sided setting in both Touch-
+// Panel modes, so it is authoritative regardless of which branch is taken
+// below -- unlike E=/edge, which is not plumbed into Params at all).
+//
+// Touch-Panel-ON: params.mode/x_dpi/y_dpi/area/remove_background(_level)
 // come from the parsed config (area via daemon/paper_size.h's
 // AreaForPaper(parsed.paper, parsed.dpi)); output format comes from
 // parsed.output_type.
 //
 // Touch-Panel-OFF: params come from ParamsForFunc(cfg, func) as-is (mode,
-// dpi, duplex, brightness, contrast, source), with the area set from
-// PaperForFunc(cfg, func) via AreaForPaper, defaulting to kDefaultAutoPaper
-// ("LETTER") when no `<dest>.paper` is configured -- Auto mode carries no
-// LCD paper size, and the ADF's ESC I offer can't report sheet length
-// either; output comes from OutputSettingsForFunc(cfg, func).
+// dpi, brightness, contrast, source -- duplex excepted, see above), with
+// the area set from PaperForFunc(cfg, func) via AreaForPaper, defaulting to
+// kDefaultAutoPaper ("LETTER") when no `<dest>.paper` is configured -- Auto
+// mode carries no LCD paper size, and the ADF's ESC I offer can't report
+// sheet length either; output comes from OutputSettingsForFunc(cfg, func).
 //
 // Either branch: as a final safety net, a scan area that is still the zero
 // value once the branch above has run (an unconfigured/unknown paper

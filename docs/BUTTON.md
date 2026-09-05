@@ -62,18 +62,24 @@ depending on how you triggered the scan on the printer's own LCD panel:
 - **Touch-Panel-OFF** (you just picked a destination and pressed Scan,
   without opening that destination's settings screen first): this
   daemon's own `<dest>.*` config settings drive the whole scan --
-  mode/resolution/source/duplex from `<dest>.mode`/`<dest>.dpi`/
-  `<dest>.source` etc., the scan area from `<dest>.paper` if set, otherwise
-  **Letter** by default (Auto mode's config command carries no paper size,
-  and the ADF's own offer can't report sheet length ahead of the feed), and
-  the output file format from `<dest>.format`.
+  mode/resolution/source from `<dest>.mode`/`<dest>.dpi`/`<dest>.source`
+  etc., the scan area from `<dest>.paper` if set, otherwise **Letter** by
+  default (Auto mode's config command carries no paper size, and the ADF's
+  own offer can't report sheet length ahead of the feed), and the output
+  file format from `<dest>.format`.
 - **Touch-Panel-ON** (you opened the destination's settings screen on the
   LCD and it shows a resolution, mode, paper size, etc.): the printer's own
   settings, as dialed in right there on the panel, drive the whole scan
-  instead -- resolution, color mode, duplex, remove-background, and the
-  output file format all come from what the LCD currently shows, not from
-  this daemon's config file. The **route** (File/Image/OCR/E-mail) always
-  comes from the destination you pressed either way.
+  instead -- resolution, color mode, remove-background, and the output
+  file format all come from what the LCD currently shows, not from this
+  daemon's config file.
+
+The **route** (File/Image/OCR/E-mail) and **2-sided** setting always come
+from the printer's own touch panel either way, regardless of Touch-Panel
+ON/OFF: the panel exposes both in its config command even in "set from
+computer" (Touch-Panel-OFF) mode, so they're never read from this daemon's
+config. Only the remaining settings above (resolution/mode/source/paper/
+remove-background/output format) actually switch on Touch-Panel ON vs. OFF.
 
 Concretely: the printer pushes a config-command frame (below) right after
 `ESC K`, carrying a snapshot of whatever the LCD has open. The short "Auto"
