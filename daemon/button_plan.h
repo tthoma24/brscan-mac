@@ -72,7 +72,11 @@ struct ButtonScanPlan {
 // the area set from PaperForFunc(cfg, func) via AreaForPaper, defaulting to
 // kDefaultAutoPaper ("LETTER") when no `<dest>.paper` is configured -- Auto
 // mode carries no LCD paper size, and the ADF's ESC I offer can't report
-// sheet length either; output comes from OutputSettingsForFunc(cfg, func).
+// sheet length either; remove_background/remove_background_level come from
+// RemoveBackgroundLevelForFunc(cfg, func) (0 -- the default absent a
+// configured `<dest>.remove_background` -- means off), the OFF-path
+// counterpart of the LCD's own G=/L=; output comes from
+// OutputSettingsForFunc(cfg, func).
 //
 // Either branch: as a final safety net, a scan area that is still the zero
 // value once the branch above has run (an unconfigured/unknown paper

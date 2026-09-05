@@ -110,6 +110,17 @@
 
 # file.paper = LETTER
 
+# --- Per-destination remove-background ---------------------------------------
+#
+# Sets the "from computer" (Touch Panel OFF / Auto) scan's remove-background
+# level per destination -- the OFF-path counterpart of the LCD panel's own
+# remove-background setting, which stays authoritative whenever Touch Panel
+# is ON (this key has no effect on that path).
+#
+#   <dest>.remove_background   off | low | medium | high (default off)
+
+# image.remove_background = medium
+
 # --- Destination action settings --------------------------------------------
 
 # IMAGE destination: the app that opens the saved scan, as `open -a <app>`.

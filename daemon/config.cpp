@@ -66,6 +66,21 @@ std::optional<TiffCompression> ParseTiffCompressionString(const std::string& s) 
   return std::nullopt;
 }
 
+// Parses a `<dest>.remove_background` value into the level int that maps
+// directly onto brscan::Params::remove_background_level (and onto
+// remove_background(bool) as `level != 0`) -- see reference/protocol-notes-
+// button-options.md's decode of the button config command's G=/L=: off has
+// no L= at all (level 0), low/medium/high are L=64/128/192. Returns
+// nullopt for anything else, so the caller leaves the default (0, off) in
+// place, per ParseConfig()'s tolerant-parse contract.
+std::optional<int> ParseRemoveBackgroundString(const std::string& s) {
+  if (s == "off") return 0;
+  if (s == "low") return 64;
+  if (s == "medium") return 128;
+  if (s == "high") return 192;
+  return std::nullopt;
+}
+
 // Parses a `<dest>.separation` value into the vendor dialog's three-way
 // Document Separation shape: "combine" or "off" (all pages in one
 // container), "image:N" (a new document every N single-sided images), or
@@ -147,6 +162,17 @@ std::string* PaperForDestPrefix(Config* cfg, const std::string& dest) {
   return nullptr;
 }
 
+// Returns the raw remove-background-level field this key's <dest> prefix
+// names, or nullptr for anything else -- the counterpart to
+// PaperForDestPrefix for the `<dest>.remove_background` key.
+int* RemoveBackgroundForDestPrefix(Config* cfg, const std::string& dest) {
+  if (dest == "file") return &cfg->file_remove_background_level;
+  if (dest == "image") return &cfg->image_remove_background_level;
+  if (dest == "ocr") return &cfg->ocr_remove_background_level;
+  if (dest == "email") return &cfg->email_remove_background_level;
+  return nullptr;
+}
+
 // Applies one already-trimmed, non-empty `key`/`value` pair to `cfg`.
 // Unrecognized keys and values that fail to parse are silently ignored --
 // see ParseConfig()'s doc comment for why.
@@ -224,6 +250,16 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
     // explicit empty value (`file.paper=`) leaves the field empty,
     // same as its default.
     if (paper != nullptr) *paper = value;
+    return;
+  }
+
+  if (field == "remove_background") {
+    int* const level = RemoveBackgroundForDestPrefix(cfg, dest);
+    if (level != nullptr) {
+      if (const auto parsed_level = ParseRemoveBackgroundString(value)) {
+        *level = *parsed_level;
+      }
+    }
   }
 }
 
@@ -324,6 +360,14 @@ const std::string& PaperForFunc(const Config& cfg, const std::string& func) {
   if (func == kFuncOcr) return cfg.ocr_paper;
   if (func == kFuncEmail) return cfg.email_paper;
   return cfg.file_paper;  // kFuncFile, and the safe fallback otherwise.
+}
+
+int RemoveBackgroundLevelForFunc(const Config& cfg, const std::string& func) {
+  if (func == kFuncImage) return cfg.image_remove_background_level;
+  if (func == kFuncOcr) return cfg.ocr_remove_background_level;
+  if (func == kFuncEmail) return cfg.email_remove_background_level;
+  return cfg.file_remove_background_level;  // kFuncFile, and the safe
+                                             // fallback otherwise.
 }
 
 bool IsKnownFunc(const std::string& func) {

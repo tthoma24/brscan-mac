@@ -420,6 +420,71 @@ TEST(PaperForFuncTest, FallsBackToFilePaperForUnknownFunc) {
   EXPECT_EQ(PaperForFunc(cfg, "BOGUS"), "LETTER");
 }
 
+// ---------------------------------------------------------------------
+// Remove-background (`<dest>.remove_background`).
+// ---------------------------------------------------------------------
+
+TEST(DefaultConfigTest, RemoveBackgroundDefaultsToOff) {
+  const Config cfg = DefaultConfig();
+  EXPECT_EQ(cfg.file_remove_background_level, 0);
+  EXPECT_EQ(cfg.image_remove_background_level, 0);
+  EXPECT_EQ(cfg.ocr_remove_background_level, 0);
+  EXPECT_EQ(cfg.email_remove_background_level, 0);
+}
+
+TEST(ParseConfigTest, AppliesRemoveBackgroundLevelsForEachDest) {
+  const Config cfg = ParseConfig(
+      "file.remove_background=off\n"
+      "image.remove_background=low\n"
+      "ocr.remove_background=medium\n"
+      "email.remove_background=high\n");
+  EXPECT_EQ(cfg.file_remove_background_level, 0);
+  EXPECT_EQ(cfg.image_remove_background_level, 64);
+  EXPECT_EQ(cfg.ocr_remove_background_level, 128);
+  EXPECT_EQ(cfg.email_remove_background_level, 192);
+}
+
+TEST(ParseConfigTest, MissingRemoveBackgroundKeyLeavesOffDefault) {
+  const Config cfg = ParseConfig("file.mode=gray\n");
+  EXPECT_EQ(cfg.file_remove_background_level, 0);
+}
+
+TEST(ParseConfigTest, UnknownRemoveBackgroundValueLeavesOffDefault) {
+  const Config cfg = ParseConfig("file.remove_background=extreme\n");
+  EXPECT_EQ(cfg.file_remove_background_level, 0);
+}
+
+TEST(ParseConfigTest, RemoveBackgroundAndOtherPerDestKeysCoexist) {
+  const Config cfg = ParseConfig(
+      "file.mode=gray\n"
+      "file.format=pdf\n"
+      "file.paper=LEGAL\n"
+      "file.remove_background=high\n");
+  EXPECT_EQ(cfg.file_params.mode, brscan::ScanMode::kGray);
+  EXPECT_EQ(cfg.file_output.format, OutputFormat::kPdf);
+  EXPECT_EQ(cfg.file_paper, "LEGAL");
+  EXPECT_EQ(cfg.file_remove_background_level, 192);
+}
+
+TEST(RemoveBackgroundLevelForFuncTest, MapsEachKnownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_remove_background_level = 64;
+  cfg.image_remove_background_level = 128;
+  cfg.ocr_remove_background_level = 192;
+  cfg.email_remove_background_level = 64;
+
+  EXPECT_EQ(RemoveBackgroundLevelForFunc(cfg, "FILE"), 64);
+  EXPECT_EQ(RemoveBackgroundLevelForFunc(cfg, "IMAGE"), 128);
+  EXPECT_EQ(RemoveBackgroundLevelForFunc(cfg, "OCR"), 192);
+  EXPECT_EQ(RemoveBackgroundLevelForFunc(cfg, "EMAIL"), 64);
+}
+
+TEST(RemoveBackgroundLevelForFuncTest, FallsBackToFileLevelForUnknownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_remove_background_level = 128;
+  EXPECT_EQ(RemoveBackgroundLevelForFunc(cfg, "BOGUS"), 128);
+}
+
 TEST(DefaultConfigPathTest, EndsWithExpectedFilename) {
   const std::string path = DefaultConfigPath();
   const std::string suffix = ".config/brscan-scand.conf";
