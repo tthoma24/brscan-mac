@@ -3,11 +3,15 @@ import SwiftUI
 /// The config window's content: a five-tab `TabView` keyed by `Tabs`.
 ///
 /// The **General** tab (task 1e.6) is wired to a real `GeneralViewModel`;
-/// **File** / **Image** / **OCR** / **Email** still host a placeholder
-/// `Form` -- static labels and disabled controls only, no bindings to
-/// `BrscanConfigCore` yet. That wiring is Tasks 1e.7-1e.8.
+/// **File** / **Image** / **Email** (task 1e.7) are each wired to their own
+/// `RouteViewModel` via the shared `RouteEditorView`. **OCR** still hosts a
+/// placeholder `Form` -- that wiring, plus the Vision OCR-only `searchable`
+/// field, is task 1e.8.
 struct ContentView: View {
   @StateObject private var generalViewModel = GeneralViewModel()
+  @StateObject private var fileViewModel = RouteViewModel()
+  @StateObject private var imageViewModel = RouteViewModel()
+  @StateObject private var emailViewModel = RouteViewModel()
 
   var body: some View {
     TabView {
@@ -17,13 +21,29 @@ struct ContentView: View {
         }
         .tag(Tabs.general)
 
-      ForEach(Tabs.allCases.filter { $0 != .general }) { tab in
-        PlaceholderForm(tab: tab)
-          .tabItem {
-            Text(tab.title)
-          }
-          .tag(tab)
-      }
+      RouteEditorView(viewModel: fileViewModel)
+        .tabItem {
+          Text(Tabs.file.title)
+        }
+        .tag(Tabs.file)
+
+      RouteEditorView(viewModel: imageViewModel)
+        .tabItem {
+          Text(Tabs.image.title)
+        }
+        .tag(Tabs.image)
+
+      PlaceholderForm(tab: .ocr)
+        .tabItem {
+          Text(Tabs.ocr.title)
+        }
+        .tag(Tabs.ocr)
+
+      RouteEditorView(viewModel: emailViewModel)
+        .tabItem {
+          Text(Tabs.email.title)
+        }
+        .tag(Tabs.email)
     }
     .padding()
     .frame(minWidth: 480, minHeight: 360)
