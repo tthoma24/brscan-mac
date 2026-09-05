@@ -227,7 +227,20 @@ extension DaemonConfig.General {
 
   fileprivate func apply(to doc: inout ConfigDocument) {
     doc.setValue(printerHost, for: "printer_host")
-    doc.setValue(displayName, for: "display_name")
+    // An empty displayName is left absent, not written as a literal
+    // `display_name = ` line: daemon/config.cpp's DefaultConfig() only
+    // fills in the host's gethostname()-derived default when the key is
+    // missing -- ApplyKey overwrites that default with the empty value if
+    // the key is present at all (see this property's doc comment above).
+    // Writing the key unconditionally here would mean every fresh starter
+    // config, and every General tab left with a blank display name, saves
+    // a config that advertises a blank name in the printer's Scan menu
+    // instead of falling back to the Mac's hostname.
+    if displayName.isEmpty {
+      doc.removeValue(for: "display_name")
+    } else {
+      doc.setValue(displayName, for: "display_name")
+    }
     doc.setValue(saveDir, for: "save_dir")
     doc.setValue(imageApp, for: "image_app")
     doc.setValue(emailTo, for: "email_to")

@@ -116,6 +116,50 @@ final class DaemonConfigTests: XCTestCase {
     XCTAssertEqual(config.general, DaemonConfig.default.general)
   }
 
+  // MARK: Empty display_name is left absent, not written blank (Review I1)
+
+  /// Applying a `General` whose `displayName` is `""` -- `DaemonConfig
+  /// .default`'s value, and what a user leaves an untouched General tab's
+  /// field at -- must not emit a literal `display_name = ` line. The
+  /// daemon's own hostname-derived default (`DefaultDisplayName()`) only
+  /// applies when the key is missing entirely; a present-but-empty value
+  /// overrides it with a blank Scan-menu name (see `daemon/config.cpp`'s
+  /// `ApplyKey`/`DefaultConfig`).
+  func testApplyOfEmptyDisplayNameOmitsTheKeyEntirely() {
+    var doc = ConfigDocument()
+    DaemonConfig.default.apply(to: &doc)
+
+    XCTAssertNil(doc.value(for: "display_name"))
+    XCTAssertFalse(doc.serialized().contains("display_name"), "must not write display_name at all when empty")
+  }
+
+  /// The same "don't write it blank" rule applies when the key already had
+  /// a value on disk and the user clears the field back to empty: the key
+  /// must end up fully absent (falling back to the daemon's hostname
+  /// default), not present with an empty value.
+  func testApplyOfClearedDisplayNameRemovesAPreviouslyPresentKey() throws {
+    var doc = ConfigDocument(text: try fixtureText("daemon-config-sample"))
+    XCTAssertEqual(doc.value(for: "display_name"), "Test Mac")
+
+    var config = DaemonConfig.from(doc)
+    config.general.displayName = ""
+    config.apply(to: &doc)
+
+    XCTAssertNil(doc.value(for: "display_name"))
+    XCTAssertFalse(doc.serialized().contains("display_name"))
+  }
+
+  /// A non-empty `displayName` is still written normally -- this fix must
+  /// not turn `apply` into a no-op for the common, filled-in case.
+  func testApplyOfNonEmptyDisplayNameWritesItNormally() {
+    var doc = ConfigDocument()
+    var config = DaemonConfig.default
+    config.general.displayName = "Study Scanner"
+    config.apply(to: &doc)
+
+    XCTAssertEqual(doc.value(for: "display_name"), "Study Scanner")
+  }
+
   // MARK: Unknown-key passthrough
 
   /// A document with an extra, unrecognized key still has it, unchanged,

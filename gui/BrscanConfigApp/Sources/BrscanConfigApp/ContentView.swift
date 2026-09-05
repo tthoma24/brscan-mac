@@ -20,6 +20,14 @@ struct ContentView: View {
   @StateObject private var store: ConfigStore
   @StateObject private var daemon: DaemonViewModel
 
+  /// Set when `store.load()` throws (task 1e.9's follow-up, Review finding
+  /// I2): the read/parse error's description, shown by `LoadFailedBanner`
+  /// instead of being swallowed. `store.loadState` (`.loadFailed`) is the
+  /// source of truth for *whether* to show the banner and for blocking
+  /// `save()`; this only carries the message text, since `LoadState` itself
+  /// doesn't hold the error.
+  @State private var loadErrorMessage: String?
+
   init(store: ConfigStore = ConfigStore(), daemon: DaemonViewModel = DaemonViewModel()) {
     _store = StateObject(wrappedValue: store)
     _daemon = StateObject(wrappedValue: daemon)
@@ -34,6 +42,10 @@ struct ContentView: View {
       if store.loadState == .missing {
         MissingConfigBanner {
           _ = try? store.createStarterConfigIfNeeded()
+        }
+      } else if store.loadState == .loadFailed {
+        LoadFailedBanner(message: loadErrorMessage) {
+          loadConfig()
         }
       }
 
@@ -74,7 +86,14 @@ struct ContentView: View {
         isDirty: store.isDirty,
         applyOutcome: daemon.lastApplyOutcome,
         onSave: {
-          try? store.save()
+          // Routed through DaemonViewModel.saveOnly(save:), not a bare
+          // `try? store.save()`, so an atomic-write (or the load-guard)
+          // failure is surfaced through the same SaveBar message
+          // `saveAndApply` uses, instead of failing silently (Review
+          // finding I3).
+          daemon.saveOnly {
+            try store.save()
+          }
         },
         onSaveAndApply: {
           daemon.saveAndApply {
@@ -85,8 +104,23 @@ struct ContentView: View {
     }
     .frame(minWidth: 480, minHeight: 360)
     .onAppear {
-      try? store.load()
+      loadConfig()
       daemon.refreshState()
+    }
+  }
+
+  /// Calls `store.load()`, surfacing a thrown error into `loadErrorMessage`
+  /// instead of swallowing it with `try?` (Review finding I2) -- `store`'s
+  /// own `loadState` already blocks a destructive `save()` in this case;
+  /// this is what lets the user actually see why, via `LoadFailedBanner`,
+  /// rather than the window silently looking like an ordinary empty/first-
+  /// run config.
+  private func loadConfig() {
+    do {
+      try store.load()
+      loadErrorMessage = nil
+    } catch {
+      loadErrorMessage = error.localizedDescription
     }
   }
 }
@@ -130,6 +164,38 @@ private struct MissingConfigBanner: View {
     }
     .padding(8)
     .background(.yellow.opacity(0.2))
+  }
+}
+
+/// The banner shown atop the window when `ConfigStore.loadState` is
+/// `.loadFailed` (Review finding I2) -- the config file exists but couldn't
+/// be read/parsed (e.g. non-UTF-8 bytes, or a permissions/IO error).
+/// `ConfigStore.save()` refuses to run in this state, so this banner is
+/// what tells the user *why* the tabs still show stale/default values and
+/// why Save won't do anything useful yet, instead of the failure being
+/// invisible. `onRetry` re-runs the load (e.g. after the user fixes file
+/// permissions outside the app).
+private struct LoadFailedBanner: View {
+  let message: String?
+  let onRetry: () -> Void
+
+  var body: some View {
+    HStack {
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Couldn't read the configuration file.")
+        if let message {
+          Text(message)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+      Spacer()
+      Button("Retry") {
+        onRetry()
+      }
+    }
+    .padding(8)
+    .background(.red.opacity(0.2))
   }
 }
 
