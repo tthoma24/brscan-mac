@@ -65,6 +65,14 @@ volatile std::sig_atomic_t g_stop_requested = 0;
 
 void HandleStopSignal(int) { g_stop_requested = 1; }
 
+// Set by the SIGHUP handler, mirroring g_stop_requested above exactly: an
+// async-signal-safe handler only flips this flag, and the loop below does
+// the actual (non-async-signal-safe) config re-read at its own safe point.
+// See daemon/config.h's TryReloadConfig() for the reload itself.
+volatile std::sig_atomic_t g_reload_requested = 0;
+
+void HandleReloadSignal(int) { g_reload_requested = 1; }
+
 // One FUNC's registration constants (see daemon/snmp_register.h's
 // kAppNum* and reference/plan-master.md's APPNUM table).
 struct FuncSpec {
@@ -201,7 +209,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  const brscan::scand::Config cfg = brscan::scand::LoadConfig(config_path);
+  // Not const: a SIGHUP reload (see below) swaps this in place at a safe
+  // point in the loop.
+  brscan::scand::Config cfg = brscan::scand::LoadConfig(config_path);
   if (cfg.printer_host.empty()) {
     // No built-in default on purpose -- see config.h's kDefaultPrinterHost
     // comment: every printer's mDNS name is device-specific, so there is
@@ -236,6 +246,7 @@ int main(int argc, char** argv) {
 
   std::signal(SIGINT, HandleStopSignal);
   std::signal(SIGTERM, HandleStopSignal);
+  std::signal(SIGHUP, HandleReloadSignal);
 
   uint32_t request_id = 1;
   // A deadline already in the past forces the first loop iteration to
@@ -271,6 +282,34 @@ int main(int argc, char** argv) {
     // wait in listener.Receive() below is bounded by kMaxReceiveWaitMs
     // specifically to keep shutdown prompt outside of an active scan.
     try {
+      // Config reload (SIGHUP): checked here, at the very top of each loop
+      // iteration -- the same safe point g_stop_requested is checked at,
+      // and for the same reason (see the note above): a scan already in
+      // flight below (HandleButtonEvent -> RunScan) runs to completion
+      // before this is consulted again, so a reload never lands mid-scan.
+      if (g_reload_requested != 0) {
+        g_reload_requested = 0;
+        if (const auto reloaded = brscan::scand::TryReloadConfig(config_path)) {
+          cfg = *reloaded;
+          std::error_code reload_ec;
+          std::filesystem::create_directories(cfg.save_dir, reload_ec);
+          if (reload_ec) {
+            std::cerr << "warning: could not create save_dir '" << cfg.save_dir
+                       << "': " << reload_ec.message() << "\n";
+          }
+          std::cout << "[config] reloaded " << config_path << "\n";
+          // Force an immediate re-register rather than waiting up to
+          // kReregisterIntervalSec: a changed display_name or
+          // printer_host should take effect right away, and
+          // RegisterAllDestinations is idempotent/safe to call early.
+          next_register = std::chrono::steady_clock::now();
+        } else {
+          std::cerr << "[config] reload failed: " << config_path
+                     << " has no usable printer_host, keeping previous "
+                        "settings\n";
+        }
+      }
+
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_register) {
         RegisterAllDestinations(cfg, listener.port(), &request_id);
