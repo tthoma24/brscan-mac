@@ -72,9 +72,11 @@ struct Config {
   // Per-FUNC paper-size token (see daemon/paper_size.h's AreaForPaper),
   // e.g. "LETTER". Stored as the raw `P=`-style token, not validated
   // against daemon/paper_size.h's table and not turned into a
-  // brscan::Area here -- that mapping, and any precedence against the
-  // scan button's own config-command paper token, is a later task's job
-  // (Task 1d.4). Empty means "no explicit paper configured".
+  // brscan::Area here -- daemon/button_plan.h's PlanButtonScan does that,
+  // and only takes this field's paper into account at all when the scan
+  // button's own config-command didn't itself carry an explicit paper
+  // (Touch-Panel-OFF; see docs/BUTTON.md's "Touch-Panel precedence").
+  // Empty means "no explicit paper configured".
   std::string file_paper;
   std::string image_paper;
   std::string ocr_paper;

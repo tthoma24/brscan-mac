@@ -10,6 +10,7 @@
 
 #include "actions.h"
 #include "brscan/scanner.h"
+#include "button_plan.h"
 #include "scan_output.h"
 
 namespace brscan::scand {
@@ -128,15 +129,40 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     return Status::kProtocolError;
   }
 
-  const brscan::Params& params = ParamsForFunc(cfg, event.func);
   std::cout << "[handle_event] FUNC=" << event.func
-             << ": starting scan (dpi=" << params.x_dpi
-             << " source=" << (params.source == brscan::Source::kAdf ? "adf"
-                                                                       : "flatbed")
-             << ")\n";
+             << ": starting button scan\n";
+
+  // PlanButtonScan (daemon/button_plan.h) decides -- from the printer's
+  // pushed config-command frame, this FUNC, and cfg -- both the Params to
+  // scan with (the Touch-Panel precedence rule: the printer's own LCD-set
+  // settings when it explicitly carries them, this daemon's configured
+  // defaults otherwise) and the OutputSettings to write with. The plan's
+  // output is captured here for use once the scan completes, below;
+  // RunButtonScan invokes this callback exactly once per session, before
+  // any page is read.
+  OutputSettings settings;
+  bool touch_panel_on = false;
+  const brscan::ButtonParamsFn plan_callback =
+      [&](const std::vector<uint8_t>& config_frame)
+          -> std::optional<brscan::Params> {
+    const std::optional<ButtonScanPlan> plan =
+        PlanButtonScan(config_frame, event.func, cfg);
+    if (!plan) return std::nullopt;
+    settings = plan->output;
+    touch_panel_on = plan->touch_panel_on;
+    std::cout << "[handle_event] FUNC=" << event.func << ": "
+               << (plan->touch_panel_on ? "Touch-Panel-ON (printer settings)"
+                                         : "Touch-Panel-OFF (daemon config)")
+               << ", dpi=" << plan->params.x_dpi << " source="
+               << (plan->params.source == brscan::Source::kAdf ? "adf"
+                                                                 : "flatbed")
+               << "\n";
+    return plan->params;
+  };
 
   std::vector<brscan::ScanResult> pages;
-  const Status scan_status = brscan::RunScan(transport, params, &pages);
+  const Status scan_status =
+      brscan::RunButtonScan(transport, plan_callback, &pages);
   if (scan_status != Status::kOk) {
     std::cerr << "[handle_event] FUNC=" << event.func
                << ": scan failed: "
@@ -175,22 +201,8 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     return Status::kIoError;
   }
 
-  // Resolve this FUNC's configured output format/separation (see
-  // daemon/config.h's OutputSettingsForFunc and daemon/output_writer.h).
-  OutputSettings settings = OutputSettingsForFunc(cfg, event.func);
-  if (event.func == kFuncOcr) {
-    // OCR's deliverable is always a searchable PDF: "native" wouldn't be
-    // searchable, so a configured (or default) native format is promoted
-    // to PDF here; any other explicitly configured container format
-    // (tiff/jpeg/png) is left alone, but `searchable` only ever means
-    // anything for a PDF page (see output_writer.h), so it's only set
-    // when the format actually is PDF.
-    if (settings.format == OutputFormat::kNative) {
-      settings.format = OutputFormat::kPdf;
-    }
-    settings.searchable = (settings.format == OutputFormat::kPdf);
-  }
-
+  // `settings` was already decided by PlanButtonScan, above (including the
+  // OCR->searchable-PDF promotion -- see daemon/button_plan.cpp).
   std::vector<std::string> written;
   const Status write_status =
       WriteConfiguredOutput(pages, settings, path, &written);
@@ -225,13 +237,14 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   }
 
   *saved_path = written.front();
+  const char* const precedence = touch_panel_on ? "touch-panel" : "config";
   if (written.size() == 1) {
     std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
-               << written.front() << "\n";
+               << written.front() << " (" << precedence << " settings)\n";
   } else {
     std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
                << written.size() << " files, starting at " << written.front()
-               << "\n";
+               << " (" << precedence << " settings)\n";
   }
 
   return PerformAction(event.func, written, cfg, runner);

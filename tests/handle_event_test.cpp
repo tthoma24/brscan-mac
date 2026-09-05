@@ -1,8 +1,12 @@
 // Tests for the per-button-press pipeline (daemon/handle_event.h):
-// FUNC -> Params -> RunScan -> save -> PerformAction. Hermetic: drives
-// RunScan over a brscan::FakeTransport queued with a synthetic scan
-// reply, and writes to a real temp directory (removed at the end of each
-// test) rather than touching a real printer or the real 54925 UDP port.
+// FUNC -> RunButtonScan (PlanButtonScan decides Params/OutputSettings) ->
+// save -> PerformAction. Hermetic: drives RunButtonScan over a
+// brscan::FakeTransport queued with a synthetic button-flow session
+// (greeting -> config frame -> offer -> block/payload -> job-final
+// terminator; see tests/scanner_test.cpp's RunButtonScan tests for the
+// same shape), and writes to a real temp directory (removed at the end of
+// each test) rather than touching a real printer or the real 54925 UDP
+// port.
 
 #include "handle_event.h"
 
@@ -80,12 +84,44 @@ std::vector<uint8_t> MakeSyntheticJpeg(int width, int height) {
   return out;
 }
 
-void QueuePreamble(brscan::FakeTransport* t) {
+// The button-flow greeting only -- no ESC Q reply, no source-select ack
+// (the button flow sends neither ESC Q nor ESC S/ESC D; see
+// brscan/scanner.h's RunButtonScan and tests/scanner_test.cpp's
+// QueueButtonGreeting, which this mirrors).
+void QueueButtonGreeting(brscan::FakeTransport* t) {
   t->QueueRead(std::string("+OK 200\r\n"));
-  t->QueueRead(std::vector<uint8_t>{0xc1, 0x00, 0x35, 0x0a});  // ESC Q reply
-  t->QueueTimeout();
-  t->QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC S (flatbed) ack
-  t->QueueTimeout();
+}
+
+// The config-command frame the printer pushes right after ESC K: `0x30
+// <len> 0x00` then the KEY=VALUE payload (see daemon/button_config.h and
+// tests/scanner_test.cpp's EncodeButtonConfigFrame, which this mirrors).
+std::vector<uint8_t> EncodeButtonConfigFrame(const std::string& payload) {
+  std::vector<uint8_t> out;
+  out.push_back(0x30);
+  out.push_back(static_cast<uint8_t>(payload.size()));
+  out.push_back(0x00);
+  out.insert(out.end(), payload.begin(), payload.end());
+  return out;
+}
+
+// The short "Auto" form config payload (Touch-Panel-OFF): only F=/D=/E=,
+// no R= -- see daemon/button_plan.h's Touch-Panel-ON-detection comment.
+// This is what most tests below push, so this daemon's own per-FUNC
+// config (not any printer-supplied setting) drives the scan -- matching
+// what these tests assert about cfg.<dest>_params/cfg.<dest>_output.
+std::string ShortFormConfigPayload(const std::string& func) {
+  return "F=" + func + "\nD=SIN\nE=LON\n";
+}
+
+// Queues a full button-flow session up through the offer reply: greeting,
+// the short-form (Touch-Panel-OFF) config frame for `func`, then the
+// offer CSV. Callers queue the block header/payload and terminator after
+// this, same as the old QueuePreamble's callers did for the offer.
+void QueueButtonPreamble(brscan::FakeTransport* t, const std::string& func,
+                          const std::string& offer_csv) {
+  QueueButtonGreeting(t);
+  t->QueueRead(EncodeButtonConfigFrame(ShortFormConfigPayload(func)));
+  t->QueueRead(EncodeOfferFrame(offer_csv));
 }
 
 // Builds a well-formed FUNC=`func` button event with the given `regid`.
@@ -185,8 +221,7 @@ class HandleButtonEventTest : public ::testing::Test {
 
 TEST_F(HandleButtonEventTest, FileFuncUsesFileParamsAndSavesJpeg) {
   brscan::FakeTransport t;
-  QueuePreamble(&t);
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,16,427,8,"));
+  QueueButtonPreamble(&t, "FILE", "300,300,2,292,16,427,8,");
 
   const auto jpeg = MakeSyntheticJpeg(16, 8);
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
@@ -225,9 +260,8 @@ TEST_F(HandleButtonEventTest, FileFuncUsesFileParamsAndSavesJpeg) {
 
 TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
   brscan::FakeTransport t;
-  QueuePreamble(&t);
   // width_px=4, height_px=3.
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+  QueueButtonPreamble(&t, "IMAGE", "300,300,2,292,4,427,3,");
 
   auto payload = EncodeBlockHeader(4);
   const std::vector<uint8_t> raw(4 * 3, 0x42);
@@ -290,9 +324,8 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
 // recording CommandRunner shows exactly what PerformAction ran against.
 TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndActsOnPageOne) {
   brscan::FakeTransport t;
-  QueuePreamble(&t);
   // width_px=4, height_px=3 (same offer as ImageFuncUsesImageParamsDistinctFromFile).
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+  QueueButtonPreamble(&t, "IMAGE", "300,300,2,292,4,427,3,");
 
   auto block1 = EncodeBlockHeader(4);
   const std::vector<uint8_t> raw1(4 * 3, 0x11);
@@ -366,8 +399,7 @@ TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndActsOnPageOne) {
 // file the pre-1c.2b flow always wrote.
 TEST_F(HandleButtonEventTest, FileFuncWithPdfFormatProducesSinglePdf) {
   brscan::FakeTransport t;
-  QueuePreamble(&t);
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,16,427,8,"));
+  QueueButtonPreamble(&t, "FILE", "300,300,2,292,16,427,8,");
 
   const auto jpeg = MakeSyntheticJpeg(16, 8);
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
@@ -406,8 +438,7 @@ TEST_F(HandleButtonEventTest, FileFuncWithPdfFormatProducesSinglePdf) {
 // invocation) on top of it.
 TEST_F(HandleButtonEventTest, OcrFuncProducesSearchablePdfWithNoSeparateOcrAction) {
   brscan::FakeTransport t;
-  QueuePreamble(&t);
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,16,427,8,"));
+  QueueButtonPreamble(&t, "OCR", "300,300,2,292,16,427,8,");
 
   const auto jpeg = MakeSyntheticJpeg(16, 8);
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
@@ -439,9 +470,8 @@ TEST_F(HandleButtonEventTest, OcrFuncProducesSearchablePdfWithNoSeparateOcrActio
 // page; EMAIL must attach every one of them, not just the first.
 TEST_F(HandleButtonEventTest, EmailFuncWithSeparationAttachesAllProducedFiles) {
   brscan::FakeTransport t;
-  QueuePreamble(&t);
   // width_px=4, height_px=3 (same offer as the IMAGE multi-page test above).
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+  QueueButtonPreamble(&t, "EMAIL", "300,300,2,292,4,427,3,");
 
   auto block1 = EncodeBlockHeader(4);
   const std::vector<uint8_t> raw1(4 * 3, 0x11);
@@ -495,6 +525,60 @@ TEST_F(HandleButtonEventTest, EmailFuncWithSeparationAttachesAllProducedFiles) {
   EXPECT_EQ(script.find("send"), std::string::npos);
 }
 
+// Touch-Panel-ON precedence, end to end: when the printer's config frame
+// is the full LCD-set form (carries R=), its own settings drive the scan
+// and the output format, overriding this daemon's configured FILE
+// settings entirely -- see daemon/button_plan.h.
+TEST_F(HandleButtonEventTest,
+       TouchPanelOnConfigFrameOverridesConfiguredParamsAndFormat) {
+  brscan::FakeTransport t;
+  QueueButtonGreeting(&t);
+  const std::string full_lcd_set_form =
+      "F=FILE\nD=SIN\nE=LON\nR=300\nM=CGRAY\nP=LETTER\nA=0\n"
+      "T=JPEG\nW=0\nG=0\nX=0\n";
+  t.QueueRead(EncodeButtonConfigFrame(full_lcd_set_form));
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,16,427,8,"));
+
+  const auto jpeg = MakeSyntheticJpeg(16, 8);
+  auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
+  payload.insert(payload.end(), jpeg.begin(), jpeg.end());
+  t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  Config cfg = DefaultConfig();
+  // Configure FILE with settings the LCD-set config frame above must
+  // override: gray/100dpi Params, and a TIFF output format.
+  cfg.file_params.mode = brscan::ScanMode::kGray;
+  cfg.file_params.x_dpi = 100;
+  cfg.file_params.y_dpi = 100;
+  cfg.file_output.format = OutputFormat::kTiff;
+  cfg.save_dir = save_dir_;
+
+  const ButtonEvent event = MakeEvent("FILE", "9001");
+  std::string saved_path;
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_FALSE(saved_path.empty());
+  // T=JPEG in the LCD-set config frame must have driven the output
+  // format, overriding cfg.file_output.format == kTiff.
+  EXPECT_TRUE(saved_path.size() >= 4 &&
+              saved_path.substr(saved_path.size() - 4) == ".jpg")
+      << saved_path;
+  ASSERT_TRUE(std::filesystem::exists(saved_path));
+  EXPECT_EQ(CountFilesIn(save_dir_), 1u);
+
+  // R=300 (the LCD's own resolution), not cfg.file_params' 100dpi, must
+  // have driven the ESC I/ESC X commands -- confirming the printer's own
+  // settings, not the daemon's config, drove this scan.
+  EXPECT_TRUE(Contains(t.written(), "R=300,300"));
+  EXPECT_FALSE(Contains(t.written(), "R=100,100"));
+  EXPECT_TRUE(Contains(t.written(), "M=CGRAY"));
+
+  EXPECT_TRUE(runner_.calls().empty());
+}
+
 TEST_F(HandleButtonEventTest, ScanFailurePropagatesStatusAndSavesNothing) {
   brscan::FakeTransport t;
   t.QueueRead(std::string("-NG 401\r\n"));  // Busy greeting.
@@ -541,8 +625,7 @@ TEST_F(HandleButtonEventTest, RejectsUnknownFuncWithoutScanning) {
 
 TEST_F(HandleButtonEventTest, SanitizesPathTraversalInRegidAndStaysInsideSaveDir) {
   brscan::FakeTransport t;
-  QueuePreamble(&t);
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,16,427,8,"));
+  QueueButtonPreamble(&t, "FILE", "300,300,2,292,16,427,8,");
   const auto jpeg = MakeSyntheticJpeg(16, 8);
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());
@@ -585,8 +668,7 @@ TEST_F(HandleButtonEventTest, UnwritableSaveDirReturnsIoErrorNotCrash) {
   }
 
   brscan::FakeTransport t;
-  QueuePreamble(&t);
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,16,427,8,"));
+  QueueButtonPreamble(&t, "FILE", "300,300,2,292,16,427,8,");
   const auto jpeg = MakeSyntheticJpeg(16, 8);
   auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
   payload.insert(payload.end(), jpeg.begin(), jpeg.end());

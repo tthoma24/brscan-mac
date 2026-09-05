@@ -54,6 +54,56 @@ only apply to a black & white page; a color or gray page requested with
 See `config/brscan-scand.conf.example` for the commented key list and
 defaults.
 
+## Touch-Panel precedence
+
+The scan settings a button press actually uses come from one of two places,
+depending on how you triggered the scan on the printer's own LCD panel:
+
+- **Touch-Panel-OFF** (you just picked a destination and pressed Scan,
+  without opening that destination's settings screen first): this
+  daemon's own `<dest>.*` config settings drive the whole scan --
+  mode/resolution/source/duplex from `<dest>.mode`/`<dest>.dpi`/
+  `<dest>.source` etc., the scan area from `<dest>.paper` (if set), and the
+  output file format from `<dest>.format`.
+- **Touch-Panel-ON** (you opened the destination's settings screen on the
+  LCD and it shows a resolution, mode, paper size, etc.): the printer's own
+  settings, as dialed in right there on the panel, drive the whole scan
+  instead -- resolution, color mode, duplex, remove-background, and the
+  output file format all come from what the LCD currently shows, not from
+  this daemon's config file. The **route** (File/Image/OCR/E-mail) always
+  comes from the destination you pressed either way.
+
+Concretely: the printer pushes a config-command frame (below) right after
+`ESC K`, carrying a snapshot of whatever the LCD has open. The short "Auto"
+form (Touch-Panel-OFF) never carries a resolution (`R=`); the full LCD-set
+form (Touch-Panel-ON) always does -- that's the one signal this project
+uses to tell the two apart (`daemon/button_plan.h`'s `PlanButtonScan`,
+Task 1d.4).
+
+**OCR always yields a searchable PDF regardless of which form is in play**
+-- see "Output format" above; this holds whether Touch-Panel-ON or -OFF,
+and even if the LCD's own destination settings screen for OCR is set to a
+sub-format like Text/HTML/RTF (see "Not yet implemented" below).
+
+An unrecognized paper (`P=`) or output-type (`T=`) token from a
+Touch-Panel-ON config frame falls back safely (the ESC I offer's full
+scan area, or a PDF, respectively) and is logged -- it never aborts the
+scan.
+
+### Not yet implemented
+
+The config command also carries a few panel toggles this project parses
+but does not yet act on -- captured for a later task, not silently
+dropped:
+
+- **Skip-blank** (`W=`): host-side detection and removal of blank pages
+  from a multi-page scan.
+- **High-speed** (`X=`): the LCD's high-speed/landscape (rotated) scan
+  mode.
+- **OCR sub-formats** (`T=TXT`/`HTML`/`RTF`): OCR always produces a
+  searchable PDF today, regardless of which of these three the LCD's OCR
+  settings screen shows.
+
 ## How it works
 
 The Scan button uses Brother's own registration-and-notification mechanism,
@@ -137,8 +187,10 @@ same implementation.
 it reads the pushed config frame off the wire and hands the raw bytes to a
 caller-supplied callback (`ButtonParamsFn`), which returns the concrete
 `Params` to scan with (mode, scan area from the paper table, duplex,
-remove-background) or `std::nullopt` to abort. The daemon fills that callback
-in a later task; `libbrscan` itself never interprets the config.
+remove-background) or `std::nullopt` to abort. `daemon/handle_event.cpp`'s
+`HandleButtonEvent` fills that callback with `daemon/button_plan.h`'s
+`PlanButtonScan` -- the Touch-Panel precedence decision above -- so
+`libbrscan` itself still never interprets the config.
 
 **Provenance.** The `ESC K` opener, the `S=NORMAL_SCAN`-for-color `ESC I`, and
 the button `ESC X` variant were decoded black-box from our own hardware
@@ -154,9 +206,9 @@ identity or scan-image content.
 | `E` | `duplex_edge` | `LON`, `SHO` | Raw token; only meaningful when `duplex` is true. |
 | `R` | `dpi` | e.g. `200`, `300` | A single value here (`ESC I`/`ESC X` carry an `x,y` pair instead; see PROTOCOL.md). |
 | `M` | `mode` | `CGRAY` (color), `TEXT` (black & white) | Raw token. |
-| `P` | `paper` | `LETTER`, `LEGAL`, `A4`, `LEDGER`, `A3`, `A5`, `EXECUTIVE`, `PHOTO`, `BCARD` | Raw token; not mapped to a scan area by this parser. `daemon/paper_size.h`'s `AreaForPaper` holds the captured scan area for each of these 9 tokens, but nothing wires that lookup to this field yet -- that's a later task. |
+| `P` | `paper` | `LETTER`, `LEGAL`, `A4`, `LEDGER`, `A3`, `A5`, `EXECUTIVE`, `PHOTO`, `BCARD` | Raw token; not mapped to a scan area by this parser -- `daemon/paper_size.h`'s `AreaForPaper` does that (Touch-Panel-ON only; see "Touch-Panel precedence" above). |
 | `A` | `area_flag` | `0` | Observed always 0 (auto-area); the real scan area is computed downstream. |
-| `T` | `output_type` | `PDF(Image)`, `MULTI-TIFF`, `JPEG`, `TXT`, `HTML`, `RTF` | Raw token (parens and hyphen kept verbatim); not mapped to this project's `OutputFormat` by this parser. |
+| `T` | `output_type` | `PDF(Image)`, `MULTI-TIFF`, `JPEG`, `TXT`, `HTML`, `RTF` | Raw token (parens and hyphen kept verbatim); not mapped to this project's `OutputFormat` by this parser -- `daemon/button_plan.h`'s `PlanButtonScan` does that (Touch-Panel-ON only; the OCR sub-formats `TXT`/`HTML`/`RTF` are not yet acted on -- see "Not yet implemented" above). |
 | `W` | `skip_blank` | `0`/`1` | |
 | `G` | `remove_background` | `0`/`1` | OCR config commands omit this key entirely; its absence leaves `remove_background` at its `false` default. |
 | `L` | `remove_background_level` | `64` (Low), `128` (Med), `192` (High) | Present only when `G=1`; defaults to `0`. |

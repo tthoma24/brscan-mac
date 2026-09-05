@@ -46,36 +46,44 @@ std::string BuildOutputPath(const std::string& save_dir,
 // it isn't one of the four known FUNCs (config.h's IsKnownFunc) --
 // defense against a forged or corrupted notification, since an unknown
 // FUNC has no safe Params to scan with and its raw text must never reach
-// a file path unvalidated. Otherwise resolves `event.func` to Params via
-// ParamsForFunc(cfg, ...), runs RunScan over `transport` (which, for the
-// document feeder, may return more than one page -- see
-// libbrscan/scanner.h), and writes the pages in the format
-// config.h's OutputSettingsForFunc(cfg, event.func) configures for this
-// FUNC (see daemon/output_writer.h's WriteConfiguredOutput -- a combined
-// PDF/TIFF, per-page native/JPEG/PNG files, or several `every:N`-separated
-// documents). OCR's OutputSettings is promoted to a searchable PDF here
-// (native has no text layer to be "searchable"), overriding a configured
-// or default-native format; any other explicitly configured format is
-// left as-is. The base path comes from BuildOutputPath(), refusing to
-// write (Status::kIoError) if that path, once resolved, does not actually
-// land inside cfg.save_dir (a second independent check on top of
-// BuildOutputPath()'s own sanitization), and every path
-// WriteConfiguredOutput actually writes is re-checked the same way before
-// PerformAction() ever sees it (a third, since those paths are still
-// derived from the same untrusted base). PerformAction() then runs on the
-// full list of written files, not just the first. `transport` must
-// already be Transport::Connect()ed; this function neither connects nor
-// disconnects it (matching RunScan's own contract) so the caller controls
-// the connection's lifetime.
+// a file path unvalidated. Otherwise runs the scan-button flow
+// (libbrscan/scanner.h's RunButtonScan) over `transport`: once the
+// printer pushes its config-command frame, daemon/button_plan.h's
+// PlanButtonScan turns it (plus `event.func` and `cfg`) into both the
+// Params to scan with and the OutputSettings to write with, implementing
+// the Touch-Panel precedence rule (the printer's own LCD-set settings
+// drive the scan when it explicitly carries them -- resolution, mode,
+// paper, duplex, remove-background, output format -- this daemon's
+// per-FUNC config drives it otherwise; see button_plan.h for the full
+// rule and docs/BUTTON.md's "Touch-Panel precedence" section). A
+// malformed config frame maps to Status::kProtocolError, same as
+// RunButtonScan's own contract. RunButtonScan may return more than one
+// page for the document feeder (see libbrscan/scanner.h), and the pages
+// are written in the decided OutputSettings' format (see daemon/
+// output_writer.h's WriteConfiguredOutput -- a combined PDF/TIFF,
+// per-page native/JPEG/PNG files, or several `every:N`-separated
+// documents); OCR's OutputSettings is always promoted to a searchable PDF
+// by PlanButtonScan, in both precedence branches. The base path comes
+// from BuildOutputPath(), refusing to write (Status::kIoError) if that
+// path, once resolved, does not actually land inside cfg.save_dir (a
+// second independent check on top of BuildOutputPath()'s own
+// sanitization), and every path WriteConfiguredOutput actually writes is
+// re-checked the same way before PerformAction() ever sees it (a third,
+// since those paths are still derived from the same untrusted base).
+// PerformAction() then runs on the full list of written files, not just
+// the first. `transport` must already be Transport::Connect()ed; this
+// function neither connects nor disconnects it (matching RunButtonScan's
+// own contract) so the caller controls the connection's lifetime.
 //
 // On success, sets `*saved_path` to the first written file and returns
 // whatever PerformAction() returned (Status::kOk today; see
 // daemon/actions.h). `*saved_path` is left untouched on failure. Returns
-// RunScan's status unchanged if the scan itself failed (including
-// Status::kProtocolError if RunScan reported success with zero pages --
-// not expected, but guarded rather than assumed), or Status::kIoError if
-// the scan succeeded but the configured output could not be written
-// (including the save_dir-escape refusals above).
+// RunButtonScan's status unchanged if the scan itself failed (including
+// Status::kProtocolError if RunButtonScan reported success with zero
+// pages -- not expected, but guarded rather than assumed, or if
+// PlanButtonScan couldn't parse the pushed config frame at all), or
+// Status::kIoError if the scan succeeded but the configured output could
+// not be written (including the save_dir-escape refusals above).
 //
 // This overload runs PerformAction()'s IMAGE/EMAIL external commands
 // through DefaultCommandRunner (see daemon/actions.h) -- i.e. this is the
