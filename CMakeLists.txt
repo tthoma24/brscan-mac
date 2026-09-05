@@ -156,12 +156,18 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
     ${ICA_COREGRAPHICS_FRAMEWORK})
 
   # icdd reads Contents/Resources/DeviceMatchingInfo.plist for the Bonjour
-  # match; copy it into the bundle after link.
+  # match and DeviceInfo.plist for the matched device's presentation metadata;
+  # copy both into the bundle after link. (Task 1b: the first spike shipped
+  # only DeviceMatchingInfo.plist, with the wrong schema, and no DeviceInfo.plist
+  # at all — icdd matched nothing. Both are corrected here.)
   add_custom_command(TARGET brscan-ica-loadspike POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
       ${CMAKE_SOURCE_DIR}/ica-module/DeviceMatchingInfo.plist
       $<TARGET_BUNDLE_CONTENT_DIR:brscan-ica-loadspike>/Resources/DeviceMatchingInfo.plist
-    COMMENT "Installing DeviceMatchingInfo.plist into the ICA module bundle")
+    COMMAND ${CMAKE_COMMAND} -E copy
+      ${CMAKE_SOURCE_DIR}/ica-module/DeviceInfo.plist
+      $<TARGET_BUNDLE_CONTENT_DIR:brscan-ica-loadspike>/Resources/DeviceInfo.plist
+    COMMENT "Installing DeviceMatchingInfo.plist + DeviceInfo.plist into the ICA module bundle")
 
   # Ad-hoc code signature: the cheapest signing to try in the load spike. A
   # module in /Library/Image Capture/Devices/ is loaded into an Apple host, so

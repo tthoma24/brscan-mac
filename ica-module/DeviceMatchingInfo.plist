@@ -2,43 +2,48 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   DeviceMatchingInfo.plist — what the Image Capture discovery daemon (icdd)
-  reads out of a module's Contents/Resources/ to decide which devices this
-  module drives. icdd warns "Missing DeviceMatchingInfo.plist in '<bundle>'!"
-  when a module in the Devices directory lacks this file, and its matching path
-  is named after these keys: -[... addMatchingBonjourDevices:...],
-  -[... baseDictionaryForBonjourServiceType:andTXTRecords:devices:], and the
-  key ICABonjourServiceTypeKey (all recovered from the icdd binary's symbols).
+  reads out of a module's Contents/Resources/ to decide which Bonjour service
+  types this module drives. icdd warns "Missing DeviceMatchingInfo.plist in
+  '<bundle>'!" when a module in the Devices directory lacks this file.
 
-  IMPORTANT — this exact schema is UNCONFIRMED. No Bonjour-matching module ships
-  on this macOS to copy from (only Apple's AirScanScanner, which uses its own
-  eSCL discovery and a different DeviceInfo.plist). The key names below are the
-  best reconstruction from icdd's strings; the load spike (see the runbook) is
-  what tells us whether icdd accepts this shape. If icdd rejects or ignores it,
-  that is a finding, not a failure — record what it logged.
+  SCHEMA (corrected in Plan 2 Task 1b). The load spike's first reconstruction
+  used ICABonjourServiceTypeKey / bonjour / serviceType / devices / deviceType,
+  guessed from icdd's symbols. That was wrong — icdd read the file without the
+  "Missing…" warning but instantiated no device. Inspecting the one shipping
+  example, Apple's /System/Library/Image Capture/Devices/AirScanScanner.app,
+  shows the real shape:
 
-  Device identity is the synthetic Bonjour name BRW00AABBCCDDEE only.
+      BonjourNetwork = {
+          "<_service._tcp.>" = ( { "device type" = scanner; } );
+          ...
+      };
+      Version = "1.0";
+
+  i.e. a top-level "BonjourNetwork" dict keyed by the Bonjour service type,
+  each value an array of match dicts carrying the key "device type" (with the
+  space) = "scanner", plus a top-level "Version" string.
+
+  AirScanScanner matches the eSCL service types _uscan._tcp. / _uscans._tcp.
+  We drive the Brother raw-scan protocol advertised on _scanner._tcp., so we
+  key the same structure on that service type instead of cloning Apple's.
+
+  This is reading a public plugin interface (the plist schema), not Apple
+  source; the values here are our own. Device identity is the synthetic
+  Bonjour name BRW00AABBCCDDEE (see DeviceInfo.plist).
 -->
 <plist version="1.0">
 <dict>
-  <key>device info version</key>
-  <string>3.0</string>
-  <key>ICABonjourServiceTypeKey</key>
-  <string>_scanner._tcp.</string>
-  <key>bonjour</key>
-  <array>
-    <dict>
-      <key>serviceType</key>
-      <string>_scanner._tcp.</string>
-      <key>devices</key>
-      <array>
-        <dict>
-          <key>name</key>
-          <string>BRW00AABBCCDDEE</string>
-          <key>deviceType</key>
-          <string>scanner</string>
-        </dict>
-      </array>
-    </dict>
-  </array>
+  <key>BonjourNetwork</key>
+  <dict>
+    <key>_scanner._tcp.</key>
+    <array>
+      <dict>
+        <key>device type</key>
+        <string>scanner</string>
+      </dict>
+    </array>
+  </dict>
+  <key>Version</key>
+  <string>1.0</string>
 </dict>
 </plist>

@@ -34,15 +34,46 @@ Read from `MacOSX.sdk/System/Library/Frameworks/ICADevices.framework/Headers`
 
 **Two things the SDK does not settle, so the spike must:**
 
-1. The exact schema of `Contents/Resources/DeviceMatchingInfo.plist`. No
-   Bonjour-matching module ships on this macOS to copy — the only module in
-   `/System/Library/Image Capture/Devices/` is Apple's own `AirScanScanner.app`,
-   which uses its own eSCL discovery and a different `DeviceInfo.plist`. Our
-   `DeviceMatchingInfo.plist` is reconstructed from icdd's symbols and is
-   **unconfirmed**; the install test is what validates it.
+1. The exact schema of `Contents/Resources/DeviceMatchingInfo.plist`, and
+   whether a `DeviceInfo.plist` is also required.
 2. Whether icdd will load a non-Apple module at all on this OS, and under what
    signature. This is the make-or-break question and can only be answered by
    installing into the privileged directory (below).
+
+## Task 1b update — plist schema corrected, DeviceInfo.plist added
+
+The first spike installed and icdd read its `DeviceMatchingInfo.plist` without
+the `Missing…` warning, but **Image Capture showed DEVICES = 0** — no device
+was instantiated. Task 1b found two causes and fixed both:
+
+- **`DeviceMatchingInfo.plist` had the wrong schema.** The first version was
+  reconstructed from icdd's symbols (`ICABonjourServiceTypeKey`, a `bonjour`
+  array of `serviceType`/`devices`/`deviceType`). Inspecting the one shipping
+  example, `/System/Library/Image Capture/Devices/AirScanScanner.app`, shows the
+  real shape: a top-level **`BonjourNetwork`** dict keyed by the Bonjour service
+  type, each value an array of dicts carrying **`device type` = `scanner`**
+  (note the space), plus a top-level **`Version` = `1.0`**. AirScan keys it on
+  the eSCL types `_uscan._tcp.` / `_uscans._tcp.`; we key the same structure on
+  the Brother raw type `_scanner._tcp.`. The file is rewritten to this schema.
+- **No `DeviceInfo.plist` shipped at all.** AirScan carries one; we did not.
+  Added `ica-module/DeviceInfo.plist` (`device info version` = `3.0`, a
+  `devices` dict of `{ iconFile }` entries) and wired it into the bundle. It is
+  not settled from the public interface whether icdd keys `devices` by the
+  module name or the matched Bonjour device name, so we register both
+  (`BrscanICALoadSpike` and the synthetic `BRW00AABBCCDDEE`) to a stock system
+  icon.
+- **Added `os_log` tracing** to `module_main.mm` (subsystem
+  `ai.jiffylabs.brscan.ica`, category `loadspike`) at `main` /
+  `ICD_ScannerMain` entry and in every registered callback, so a re-run shows
+  whether icdd launches our executable and calls us — the key diagnostic that
+  was missing.
+
+Both schema shapes are learned from the **public plist interface** of the
+shipping module, not from Apple source; all values are synthetic.
+
+These changes are still **unverified** — they need the `sudo` install + Image
+Capture UI re-test below. A device appearing is success for this spike; the scan
+path is out of scope.
 
 ## 1. Build and sign (no privileges needed)
 
@@ -54,8 +85,8 @@ cmake --build build --target brscan-ica-loadspike
 ```
 
 That produces `build/BrscanICALoadSpike.app`, copies `DeviceMatchingInfo.plist`
-into `Contents/Resources/`, and **ad-hoc** signs the bundle (`codesign --sign -`),
-the cheapest signature to try first. Verify:
+and `DeviceInfo.plist` into `Contents/Resources/`, and **ad-hoc** signs the
+bundle (`codesign --sign -`), the cheapest signature to try first. Verify:
 
 ```bash
 codesign --verify --strict --verbose=2 build/BrscanICALoadSpike.app
@@ -102,6 +133,36 @@ Read the stream for:
 - any code-signing / library-validation rejection naming
   `ai.jiffylabs.brscan.ica-loadspike`,
 - a Bonjour browse of `_scanner._tcp.` and whether our declared device is added.
+
+### Our own tracing (Task 1b) — the key diagnostic
+
+The module now logs under its own subsystem. In a second terminal, before the
+rescan:
+
+```bash
+log stream --predicate 'subsystem == "ai.jiffylabs.brscan.ica"' --info --debug
+```
+
+Interpret it as follows:
+
+- **No lines at all** after a rescan → icdd never launched our executable. That
+  is a *load/signing gate*, not a plist bug — correlate with the AMFI / library-
+  validation query below; the fix is a stronger signature, not the plists.
+- **`main: BrscanICALoadSpike executable launched`** and
+  **`main: callbacks registered, entering ICD_ScannerMain`** appear → icdd loads
+  and runs our code. From here, a missing device is a match/DeviceInfo problem,
+  not a load problem.
+- **`callback: …` lines** (e.g. `ICD_ScannerOpenTCPIPDevice`,
+  `ICD_ScannerGetObjectInfo`) → icdd matched the device and is driving it; the
+  device should be present in Image Capture.
+- `main: ICD_ScannerMain returned …` should NOT appear in normal operation — it
+  means the service loop exited.
+
+A backward look at our trace specifically:
+
+```bash
+log show --last 10m --predicate 'subsystem == "ai.jiffylabs.brscan.ica"' --info --debug
+```
 
 A backward look at what already happened:
 

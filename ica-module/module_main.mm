@@ -26,71 +26,109 @@
 
 #import <Foundation/Foundation.h>
 #import <ICADevices/ICADevices.h>
+#import <os/log.h>
 
 namespace {
 
+// Tracing for the load spike. Item 2 of Plan 2 Task 1b: prove whether icdd
+// loads our executable and calls our entry points at all, versus only reading
+// the plists. Filter a live run with:
+//
+//   log stream --predicate 'subsystem == "ai.jiffylabs.brscan.ica"' --info --debug
+//
+// If NONE of these lines appear after a rescan, icdd never launched our
+// executable (a signing/load gate, not a plist bug). If "ICD_ScannerMain
+// entered" appears but no device shows, the module runs but the match/DeviceInfo
+// side is still wrong.
+os_log_t SpikeLog() {
+  static os_log_t log =
+      os_log_create("ai.jiffylabs.brscan.ica", "loadspike");
+  return log;
+}
+
 // The scanner-specific entry points, each a no-op stub with the exact signature
-// from ICD_ScannerCalls.h. Returning noErr (0) says "handled, no error".
+// from ICD_ScannerCalls.h. Returning noErr (0) says "handled, no error". Each
+// logs so the icdd log shows exactly which callbacks the host drives.
 
 ICAError SpikeOpenTCPIPDevice(CFDictionaryRef /*params*/,
                               ScannerObjectInfo* /*objectInfo*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerOpenTCPIPDevice");
   return noErr;
 }
 
-ICAError SpikeCloseDevice(ScannerObjectInfo* /*objectInfo*/) { return noErr; }
+ICAError SpikeCloseDevice(ScannerObjectInfo* /*objectInfo*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerCloseDevice");
+  return noErr;
+}
 
-ICAError SpikePeriodicTask(ScannerObjectInfo* /*objectInfo*/) { return noErr; }
+ICAError SpikePeriodicTask(ScannerObjectInfo* /*objectInfo*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerPeriodicTask");
+  return noErr;
+}
 
 ICAError SpikeGetObjectInfo(const ScannerObjectInfo* /*parentInfo*/,
                             UInt32 /*index*/,
                             ScannerObjectInfo* /*newInfo*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerGetObjectInfo");
   return noErr;
 }
 
-ICAError SpikeCleanup(ScannerObjectInfo* /*objectInfo*/) { return noErr; }
+ICAError SpikeCleanup(ScannerObjectInfo* /*objectInfo*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerCleanup");
+  return noErr;
+}
 
 ICAError SpikeGetPropertyData(const ScannerObjectInfo* /*objectInfo*/,
                               void* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerGetPropertyData");
   return noErr;
 }
 
 ICAError SpikeSetPropertyData(const ScannerObjectInfo* /*objectInfo*/,
                               const void* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerSetPropertyData");
   return noErr;
 }
 
 ICAError SpikeOpenSession(const ScannerObjectInfo* /*deviceObjectInfo*/,
                           ICD_ScannerOpenSessionPB* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerOpenSession");
   return noErr;
 }
 
 ICAError SpikeCloseSession(const ScannerObjectInfo* /*deviceObjectInfo*/,
                            ICD_ScannerCloseSessionPB* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerCloseSession");
   return noErr;
 }
 
 ICAError SpikeInitialize(const ScannerObjectInfo* /*deviceObjectInfo*/,
                          ICD_ScannerInitializePB* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerInitialize");
   return noErr;
 }
 
 ICAError SpikeGetParameters(const ScannerObjectInfo* /*deviceObjectInfo*/,
                             ICD_ScannerGetParametersPB* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerGetParameters");
   return noErr;
 }
 
 ICAError SpikeSetParameters(const ScannerObjectInfo* /*deviceObjectInfo*/,
                             ICD_ScannerSetParametersPB* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerSetParameters");
   return noErr;
 }
 
 ICAError SpikeStatus(const ScannerObjectInfo* /*deviceObjectInfo*/,
                      ICD_ScannerStatusPB* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerStatus");
   return noErr;
 }
 
 ICAError SpikeStart(const ScannerObjectInfo* /*deviceObjectInfo*/,
                     ICD_ScannerStartPB* /*pb*/) {
+  os_log(SpikeLog(), "callback: ICD_ScannerStart");
   return noErr;
 }
 
@@ -120,8 +158,14 @@ void RegisterCallbacks() {
 }  // namespace
 
 int main(int argc, const char* argv[]) {
+  // First line the icdd log should show if icdd launched our executable at all.
+  os_log(SpikeLog(), "main: BrscanICALoadSpike executable launched (argc=%d)",
+         argc);
   RegisterCallbacks();
+  os_log(SpikeLog(), "main: callbacks registered, entering ICD_ScannerMain");
   // ICD_ScannerMain runs the module's service loop and does not return in
   // normal operation; the host tears the process down.
-  return ICD_ScannerMain(argc, argv);
+  int rc = ICD_ScannerMain(argc, argv);
+  os_log(SpikeLog(), "main: ICD_ScannerMain returned %d (unexpected)", rc);
+  return rc;
 }
