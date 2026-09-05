@@ -139,11 +139,22 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
     ${CMAKE_BINARY_DIR}/ica-module/Info.plist
     @ONLY)
 
+  # Plan 2 Task 2 adds the session/open callbacks (module_main.mm) plus the
+  # scanner-parameter enumeration (scan_parameters.mm), which reuses the
+  # captured paper geometry in daemon/paper_size.cpp as its single source of
+  # truth (PLAN-2-DESIGN.md decision E). paper_size.cpp is self-contained
+  # (brscan::Area is a header POD in libbrscan/include), so it compiles into the
+  # module with only the include dirs below — no libbrscan link needed here.
   add_executable(brscan-ica-loadspike MACOSX_BUNDLE
-    ica-module/module_main.mm)
+    ica-module/module_main.mm
+    ica-module/scan_parameters.mm
+    daemon/paper_size.cpp)
   set_target_properties(brscan-ica-loadspike PROPERTIES
     OUTPUT_NAME ${MODULE_NAME}
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_BINARY_DIR}/ica-module/Info.plist)
+  target_include_directories(brscan-ica-loadspike PRIVATE
+    ${CMAKE_SOURCE_DIR}/libbrscan/include
+    ${CMAKE_SOURCE_DIR}/daemon)
 
   # ICADevices supplies ICD_ScannerMain + gICDScannerCallbackFunctions;
   # Foundation/CoreGraphics are pulled in by the umbrella header.
