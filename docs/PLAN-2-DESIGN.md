@@ -345,6 +345,25 @@ work) are answered first, before any effort is sunk into the framework glue.
    (`ica-module/`, `docs/RUNBOOK-plan-2-loadspike.md`). It builds, links
    `ICADevices`, and ad-hoc signs; the load/appearance result is a privileged,
    manual check the runbook drives — not yet run against hardware.
+   **Task 1d (match/binding gap — resolved as fixable):** the earlier re-test
+   showed our module was never *launched* and no AMFI line named it — a
+   match/binding gap, not a signing gate. The cause: our `_scanner._tcp.` match
+   dict carried only `device type = scanner`, but icdd binds a browsed device
+   via `compareBonjourDeviceModuleDictionary:withBonjourTXTRecord:`, which needs
+   an `ICABonjourTXTRecordKey` sub-dict to test against the device's TXT record.
+   `ICABonjourTXTRecordKey` is Apple's public match interface — Apple's own
+   `AirScanScanner.app` uses exactly this key to match its service type on
+   Bonjour TXT pairs — so a non-Apple module for `_scanner._tcp.` applies the
+   same interface, keyed on the TXT pairs the device itself broadcasts. Fixed
+   `ica-module/DeviceMatchingInfo.plist` to pair `device type = scanner` with
+   `ICABonjourTXTRecordKey = { mdl; mfg; }` and `device events = ( scan )`,
+   keyed on the device's own advertised `mdl=MFC-J6920DW` / `mfg=Brother` TXT
+   (captured black-box with `dns-sd -L`). This is **not structural** — Plan 2
+   stays viable past the match gap. The signing/library-validation gate is the *next* gate and is
+   still unverified: binding the device is what finally lets icdd *attempt* the
+   launch, so the runbook's §3 A-vs-B re-test now yields a real launch attempt
+   (success = our `main: … executable launched` log line; AMFI denial = the
+   signing wall → Plan 3).
 2. **Hermetic parameter-mapping unit + tests.** Apple parameters → `Params`,
    with resolution clamping and area/brightness/contrast conversion. Pure C++,
    GoogleTest, no framework. *Lands green in CI.*
