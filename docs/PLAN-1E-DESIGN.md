@@ -1,8 +1,15 @@
 # Plan 1e — graphical configuration UI (design)
 
 This document is the design and task plan for Plan 1e: a native macOS
-configuration UI for the "set from computer" side of `brscan-scand`. It is a
-plan only — no application code is written yet.
+configuration UI for the "set from computer" side of `brscan-scand`.
+
+> **Implementation status (all tasks 1e.0–1e.11 shipped).** The baseline was
+> built and differs from a few recommendations below; `gui/README.md` documents
+> the actual, shipped app. Two deviations to note when reading this design: (1)
+> `gui/BrscanConfigApp` is a **SwiftPM executable** (`swift build`/`swift run`),
+> not an Xcode project — the Xcode app target and signable `.app` bundle are
+> deferred; ignore `xcodebuild` references below. (2) First run seeds a starter
+> config from `DaemonConfig` **defaults**, not from a bundled example file.
 
 The UI is a front end over the daemon's config file,
 `~/.config/brscan-scand.conf`. The daemon stays the single source of truth for
