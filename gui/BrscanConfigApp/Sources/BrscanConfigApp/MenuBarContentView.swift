@@ -1,19 +1,28 @@
 import AppKit
 import SwiftUI
 
-/// Placeholder `MenuBarExtra` content: a static daemon-status stub and a
+/// `MenuBarExtra` content: a real daemon-status line (task 1e.10) plus a
 /// "Preferences..." item that opens the config window.
 ///
-/// Task 1e.5 doesn't wire either to real state -- the status line is static
-/// text (real daemon polling comes later), and "Preferences..." only opens
-/// the existing `WindowGroup` via `openWindow`.
+/// Task 1e.5 left the status line a static stub; this task wires it to a
+/// `DaemonViewModel`, refreshed whenever the menu opens (`onAppear`, which
+/// SwiftUI fires each time this content becomes visible again) rather than
+/// on a timer, since a menu-bar item's content is only worth re-querying
+/// while someone is actually looking at it.
 struct MenuBarContentView: View {
   @Environment(\.openWindow) private var openWindow
+  @StateObject private var daemon = DaemonViewModel()
 
   var body: some View {
-    // Static placeholder; real daemon-status polling is a later task.
-    Text("Daemon status: unknown")
+    Text("Daemon status: \(daemon.state.statusText)")
       .foregroundStyle(.secondary)
+      .onAppear {
+        daemon.refreshState()
+      }
+
+    Button("Refresh Status") {
+      daemon.refreshState()
+    }
 
     Divider()
 
