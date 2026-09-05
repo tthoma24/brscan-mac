@@ -83,6 +83,20 @@ struct Config {
   std::string ocr_paper;
   std::string email_paper;
 
+  // Per-FUNC remove-background level (see reference/protocol-notes-button-
+  // options.md's decode of the button config command's G=/L=): 0 (off,
+  // the default), 64 (low), 128 (medium), or 192 (high). Mirrors
+  // file_paper/image_paper/etc.'s raw-per-dest-field pattern above --
+  // mapped to brscan::Params::remove_background(bool)/
+  // remove_background_level(int) only in daemon/button_plan.cpp's
+  // Touch-Panel-OFF branch (Touch-Panel-ON stays authoritative from the
+  // printer's own config command's G=/L=; see PlanButtonScan's header
+  // comment).
+  int file_remove_background_level = 0;
+  int image_remove_background_level = 0;
+  int ocr_remove_background_level = 0;
+  int email_remove_background_level = 0;
+
   // IMAGE-destination action setting (see daemon/actions.cpp's
   // PerformImageAction): the app name passed to `open -a <image_app>`
   // when opening a saved scan. Empty means no `-a` flag at all -- `open`
@@ -158,6 +172,13 @@ Config DefaultConfig();
 //                        PHOTO | BCARD (default empty -- no explicit
 //                        paper; stored raw, not validated here -- see
 //                        daemon/paper_size.h)
+//   <dest>.remove_background
+//                        off | low | medium | high (default off; low=64,
+//                        medium=128, high=192 -- the level daemon/
+//                        button_plan.cpp's Touch-Panel-OFF branch sets
+//                        brscan::Params::remove_background_level to;
+//                        Touch-Panel-ON ignores this key and uses the
+//                        printer's own config command's G=/L= instead)
 // where <dest> is one of file, image, ocr, email.
 Config ParseConfig(const std::string& text);
 
@@ -206,6 +227,15 @@ const OutputSettings& OutputSettingsForFunc(const Config& cfg,
 // configured); this accessor does not validate or map the token to an
 // area -- see daemon/paper_size.h for that.
 const std::string& PaperForFunc(const Config& cfg, const std::string& func);
+
+// The configured `<dest>.remove_background` level (0/64/128/192; see
+// Config::file_remove_background_level above) for a button event's FUNC
+// (FILE/IMAGE/OCR/EMAIL, matched case-sensitively per the wire protocol --
+// see daemon/button_listener.h's ButtonEvent::func). Returns
+// cfg.file_remove_background_level for any other string, mirroring
+// ParamsForFunc's FILE-as-safe-fallback behavior. 0 means off (no
+// `<dest>.remove_background` configured, or explicitly configured off).
+int RemoveBackgroundLevelForFunc(const Config& cfg, const std::string& func);
 
 // True if `func` is one of the four known FUNCs (kFuncFile/kFuncImage/
 // kFuncOcr/kFuncEmail above), false for anything else. `func` comes

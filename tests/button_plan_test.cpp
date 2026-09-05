@@ -116,6 +116,24 @@ TEST(PlanButtonScanTest, TouchPanelOnRemoveBackgroundSetsFlagAndLevel) {
   EXPECT_EQ(plan->params.remove_background_level, 128);
 }
 
+TEST(PlanButtonScanTest,
+     TouchPanelOnRemoveBackgroundIgnoresConfiguredDaemonKey) {
+  // The printer's config command's G=/L= stay authoritative on the ON
+  // branch regardless of a configured `<dest>.remove_background` -- that
+  // key is the OFF-path counterpart only (see button_plan.h).
+  const std::string payload =
+      "F=FILE\nD=SIN\nE=LON\nR=300\nM=CGRAY\nP=LETTER\nA=0\n"
+      "T=PDF(Image)\nW=0\nG=0\nX=0\n";
+  Config cfg = DefaultConfig();
+  cfg.file_remove_background_level = 192;  // "high" -- deliberately unused.
+  const auto plan = PlanButtonScan(BuildFrame(payload), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_TRUE(plan->touch_panel_on);
+  EXPECT_FALSE(plan->params.remove_background);
+  EXPECT_EQ(plan->params.remove_background_level, 0);
+}
+
 TEST(PlanButtonScanTest, TouchPanelOnKnownPaperLegalUnchangedByDefaultGuard) {
   // A concrete, valid area from a known P= token must survive the final
   // zero-area safety-net guard untouched.
@@ -275,6 +293,37 @@ TEST(PlanButtonScanTest, TouchPanelOffWithConfiguredPaperUsesAreaForPaper) {
   ASSERT_TRUE(want_area.has_value());
   ExpectArea(plan->params.area, want_area->x0, want_area->y0, want_area->x1,
              want_area->y1);
+}
+
+TEST(PlanButtonScanTest,
+     TouchPanelOffRemoveBackgroundSetsFlagAndLevelFromConfiguredDest) {
+  // The brief's exact case: a configured `image.remove_background = medium`
+  // must set plan.params.remove_background/level on the OFF branch, which
+  // ParamsForFunc's own default (off/0) would otherwise leave in place.
+  const std::string short_form = "F=IMAGE\nD=SIN\nE=LON\n";
+  Config cfg = DefaultConfig();
+  cfg.image_remove_background_level = 128;  // "medium"
+
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "IMAGE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->touch_panel_on);
+  EXPECT_TRUE(plan->params.remove_background);
+  EXPECT_EQ(plan->params.remove_background_level, 128);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOffRemoveBackgroundDefaultsToOff) {
+  // No `<dest>.remove_background` configured -> off/0, same as
+  // ParamsForFunc's own default.
+  const std::string short_form = "F=FILE\nD=SIN\nE=LON\n";
+  const Config cfg = DefaultConfig();
+
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->touch_panel_on);
+  EXPECT_FALSE(plan->params.remove_background);
+  EXPECT_EQ(plan->params.remove_background_level, 0);
 }
 
 TEST(PlanButtonScanTest, TouchPanelOffOcrFuncStillForcesSearchablePdf) {

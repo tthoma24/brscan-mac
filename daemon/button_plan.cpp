@@ -81,7 +81,9 @@ std::optional<ButtonScanPlan> PlanButtonScan(
   if (touch_panel_on) {
     // Touch-Panel-ON: the printer's own LCD-set settings are authoritative
     // for mode/dpi/area/remove-background (duplex is set above,
-    // unconditionally).
+    // unconditionally). Unchanged by the `<dest>.remove_background` config
+    // key below -- that key is this branch's Touch-Panel-OFF counterpart
+    // only (see the `else` branch), never consulted here.
     plan.params.x_dpi = parsed->dpi;
     plan.params.y_dpi = parsed->dpi;
     plan.params.mode = ModeForToken(parsed->mode);
@@ -116,6 +118,16 @@ std::optional<ButtonScanPlan> PlanButtonScan(
       // else: leave plan.params.area as ParamsForFunc's own area -- a
       // configured-but-unknown paper token has no captured area to use.
     }
+
+    // Remove-background likewise comes from the daemon's config here --
+    // the OFF-path counterpart of the LCD's own G=/L=, which the printer's
+    // config command carries (and the ON branch above uses) only when
+    // Touch-Panel is ON. ParamsForFunc's own remove_background/_level
+    // default (off/0) would otherwise apply unconditionally, since the
+    // short "Auto" form never carries G=/L= itself.
+    const int remove_background_level = RemoveBackgroundLevelForFunc(cfg, func);
+    plan.params.remove_background = remove_background_level != 0;
+    plan.params.remove_background_level = remove_background_level;
   }
 
   // Final safety net, both branches: if the area is still the zero value
