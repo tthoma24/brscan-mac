@@ -145,8 +145,14 @@ Config DefaultConfig();
 //                        (default native; see output_writer.h)
 //   <dest>.tiff_compression
 //                        lzw | g3 | g4 (default lzw; only affects TIFF)
-//   <dest>.separation   combine | every:N (N a positive int; default
-//                        combine -- one container for all pages)
+//   <dest>.separation   combine | off | image:N | page:N (N a positive
+//                        int; default combine -- one container for all
+//                        pages). image:N starts a new document every N
+//                        single-sided images; page:N starts a new document
+//                        every N pages (see output_writer.h's
+//                        OutputSeparation for why these currently behave
+//                        identically). `every:N` is accepted as a
+//                        backward-compat alias for `image:N`.
 //   <dest>.paper        LETTER | LEGAL | A4 | LEDGER | A3 | A5 | EXECUTIVE |
 //                        PHOTO | BCARD (default empty -- no explicit
 //                        paper; stored raw, not validated here -- see

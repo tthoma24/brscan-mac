@@ -66,23 +66,51 @@ std::optional<TiffCompression> ParseTiffCompressionString(const std::string& s) 
   return std::nullopt;
 }
 
-// Parses a `<dest>.separation` value: "combine" (all pages in one
-// container) or "every:N" (a new container every N pages, N a positive
-// int). Returns nullopt for anything else, so the caller leaves the
-// default (combine) in place, per ParseConfig()'s tolerant-parse contract.
+// Parses a `<dest>.separation` value into the vendor dialog's three-way
+// Document Separation shape: "combine" or "off" (all pages in one
+// container), "image:N" (a new document every N single-sided images), or
+// "page:N" (a new document every N pages) -- N a positive int in both
+// prefixed forms. "every:N" is also accepted, as a backward-compat alias
+// for "image:N" (the sole mode this key offered before the vendor's
+// image/page distinction was added). Returns nullopt for anything else, so
+// the caller leaves the default (combine) in place, per ParseConfig()'s
+// tolerant-parse contract.
+//
+// image:N and page:N currently produce the same behavior in
+// WriteConfiguredOutput (split every N ScanResults) -- see
+// output_writer.h's OutputSeparation doc comment for why the duplex
+// page-vs-sheet question is deliberately left open rather than guessed at.
+// Confirming the vendor's actual duplex grouping needs a capture: a duplex
+// ADF scan-button press with "separate by page count = 1" set in the
+// vendor driver (port 54921/54925), observing whether it groups two sides
+// of one sheet into one document or starts a new document every side.
 std::optional<OutputSeparation> ParseSeparationString(const std::string& s,
                                                       int* separate_n) {
-  if (s == "combine") {
+  if (s == "combine" || s == "off") {
     *separate_n = 1;
     return OutputSeparation::kCombine;
   }
-  constexpr char kEveryPrefix[] = "every:";
-  const size_t prefix_len = sizeof(kEveryPrefix) - 1;
-  if (s.compare(0, prefix_len, kEveryPrefix) == 0) {
-    if (const auto n = ParsePositiveInt(s.substr(prefix_len))) {
-      *separate_n = *n;
-      return OutputSeparation::kEveryN;
-    }
+  constexpr char kImagePrefix[] = "image:";
+  constexpr char kPagePrefix[] = "page:";
+  constexpr char kEveryPrefix[] = "every:";  // Alias for image:N.
+
+  const auto try_prefix = [&](const char* prefix, size_t prefix_len)
+      -> std::optional<int> {
+    if (s.compare(0, prefix_len, prefix) != 0) return std::nullopt;
+    return ParsePositiveInt(s.substr(prefix_len));
+  };
+
+  if (const auto n = try_prefix(kImagePrefix, sizeof(kImagePrefix) - 1)) {
+    *separate_n = *n;
+    return OutputSeparation::kEveryImage;
+  }
+  if (const auto n = try_prefix(kPagePrefix, sizeof(kPagePrefix) - 1)) {
+    *separate_n = *n;
+    return OutputSeparation::kEveryPage;
+  }
+  if (const auto n = try_prefix(kEveryPrefix, sizeof(kEveryPrefix) - 1)) {
+    *separate_n = *n;
+    return OutputSeparation::kEveryImage;
   }
   return std::nullopt;
 }

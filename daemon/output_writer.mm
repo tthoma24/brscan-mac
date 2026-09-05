@@ -204,10 +204,13 @@ brscan::Status WriteSingleImageFile(const brscan::ScanResult& page,
 }
 
 // The number of pages each split container holds: `separate_n` (>= 1) when
-// separating every N pages, otherwise all pages in one container.
+// separating every N ScanResults (by image count or by page count -- they
+// split identically for now, see OutputSeparation's doc comment),
+// otherwise all pages in one container.
 int PagesPerDocument(const OutputSettings& settings, int total) {
-  if (settings.separation == OutputSeparation::kEveryN &&
-      settings.separate_n >= 1) {
+  const bool separating = settings.separation == OutputSeparation::kEveryImage ||
+                          settings.separation == OutputSeparation::kEveryPage;
+  if (separating && settings.separate_n >= 1) {
     return settings.separate_n;
   }
   return total > 0 ? total : 1;

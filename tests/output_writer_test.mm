@@ -323,16 +323,16 @@ TEST(WriteConfiguredOutputTest, PngSinglePageIsNotNumbered) {
 }
 
 // ---------------------------------------------------------------------
-// Document separation (kEveryN).
+// Document separation (kEveryImage / kEveryPage).
 // ---------------------------------------------------------------------
 
-TEST(WriteConfiguredOutputTest, PdfSeparationEveryNSplitsIntoDocuments) {
+TEST(WriteConfiguredOutputTest, PdfSeparationByImageCountSplitsIntoDocuments) {
   const std::vector<brscan::ScanResult> pages = {
       MakeGrayPage(20, 10, 10), MakeGrayPage(20, 10, 20),
       MakeGrayPage(20, 10, 30)};
   OutputSettings settings;
   settings.format = OutputFormat::kPdf;
-  settings.separation = OutputSeparation::kEveryN;
+  settings.separation = OutputSeparation::kEveryImage;
   settings.separate_n = 2;
 
   const std::filesystem::path base = TempPath("split.jpg");
@@ -349,13 +349,39 @@ TEST(WriteConfiguredOutputTest, PdfSeparationEveryNSplitsIntoDocuments) {
   RemoveAll(written);
 }
 
-TEST(WriteConfiguredOutputTest, TiffSeparationEveryNSplitsIntoDocuments) {
+TEST(WriteConfiguredOutputTest, PdfSeparationByPageCountSplitsIntoDocuments) {
+  // kEveryPage currently behaves identically to kEveryImage (split every N
+  // ScanResults) -- see output_writer.h's OutputSeparation doc comment on
+  // why duplex page-vs-sheet grouping is deliberately left unimplemented.
+  const std::vector<brscan::ScanResult> pages = {
+      MakeGrayPage(20, 10, 10), MakeGrayPage(20, 10, 20),
+      MakeGrayPage(20, 10, 30)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kPdf;
+  settings.separation = OutputSeparation::kEveryPage;
+  settings.separate_n = 2;
+
+  const std::filesystem::path base = TempPath("split_page.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(written.size(), 2u);
+  EXPECT_EQ(written[0], TempPath("split_page-doc001.pdf").string());
+  EXPECT_EQ(written[1], TempPath("split_page-doc002.pdf").string());
+  EXPECT_EQ(PdfPageCount(written[0]), 2);  // First two pages.
+  EXPECT_EQ(PdfPageCount(written[1]), 1);  // Remaining page.
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, TiffSeparationByImageCountSplitsIntoDocuments) {
   const std::vector<brscan::ScanResult> pages = {
       MakeGrayPage(20, 10, 10), MakeGrayPage(20, 10, 20),
       MakeGrayPage(20, 10, 30)};
   OutputSettings settings;
   settings.format = OutputFormat::kTiff;
-  settings.separation = OutputSeparation::kEveryN;
+  settings.separation = OutputSeparation::kEveryImage;
   settings.separate_n = 2;
 
   const std::filesystem::path base = TempPath("split_tiff.jpg");
@@ -367,6 +393,50 @@ TEST(WriteConfiguredOutputTest, TiffSeparationEveryNSplitsIntoDocuments) {
   ASSERT_EQ(written.size(), 2u);
   EXPECT_EQ(ImageCount(written[0]), 2);
   EXPECT_EQ(ImageCount(written[1]), 1);
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, TiffSeparationByPageCountSplitsIntoDocuments) {
+  const std::vector<brscan::ScanResult> pages = {
+      MakeGrayPage(20, 10, 10), MakeGrayPage(20, 10, 20),
+      MakeGrayPage(20, 10, 30)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kTiff;
+  settings.separation = OutputSeparation::kEveryPage;
+  settings.separate_n = 2;
+
+  const std::filesystem::path base = TempPath("split_tiff_page.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(written.size(), 2u);
+  EXPECT_EQ(ImageCount(written[0]), 2);
+  EXPECT_EQ(ImageCount(written[1]), 1);
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, CombineIgnoresSeparateN) {
+  // kCombine always puts every page in one container, regardless of
+  // separate_n -- separate_n only takes effect under kEveryImage/
+  // kEveryPage.
+  const std::vector<brscan::ScanResult> pages = {
+      MakeGrayPage(20, 10, 10), MakeGrayPage(20, 10, 20),
+      MakeGrayPage(20, 10, 30)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kPdf;
+  settings.separation = OutputSeparation::kCombine;
+  settings.separate_n = 2;
+
+  const std::filesystem::path base = TempPath("combine.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(written.size(), 1u);
+  EXPECT_EQ(PdfPageCount(written[0]), 3);
   RemoveAll(written);
 }
 
