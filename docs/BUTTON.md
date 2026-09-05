@@ -181,7 +181,14 @@ It differs from the normal flow (`RunScan`) in exactly three places:
 
 Everything from `ESC X` onward -- the block-header/image readout, including
 multi-page ADF de-interleaving -- is identical to `RunScan` and shares the
-same implementation.
+same implementation, with one exception: the job-final terminator that
+follows the last page's end-of-page marker (`82 07 00 <pidx> 00 84 00 00 00
+00`, see PROTOCOL.md's "Multi-page (ADF)"). The driver flow's persistent
+connection sends the two-byte form, `80 80`. The button flow's connection is
+one scan and done, so the device sends a **single** `0x80` and then closes
+the connection -- there is no second `0x80` to wait for. `RunColorScan`
+peeks one byte and treats a leading `0x80` as job-final either way, so it
+never blocks waiting for a second byte the button flow will never send.
 
 `RunButtonScan` keeps `libbrscan` free of config parsing and the paper table:
 it reads the pushed config frame off the wire and hands the raw bytes to a

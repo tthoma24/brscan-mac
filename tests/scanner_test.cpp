@@ -962,6 +962,18 @@ void QueueButtonGreeting(brscan::FakeTransport* t) {
   t->QueueRead(std::string("+OK 200\r\n"));
 }
 
+// The real scan-button job-final terminator: the end-of-page marker
+// followed by a SINGLE 0x80, after which the device closes the connection
+// (modeled by the FakeTransport queue ending). This is what the device
+// actually sends in the button flow (reference/brscan-daemon-live.pcap and
+// the vendor's own reference/brscan-button-options.pcap) -- NOT the driver
+// flow's 0x80 0x80.
+std::vector<uint8_t> EncodeButtonJobFinal(uint8_t pidx) {
+  std::vector<uint8_t> out = EncodeEndOfPageMarker(pidx);
+  out.push_back(0x80);
+  return out;
+}
+
 }  // namespace
 
 // Full color scan-button session over a mock transport: greeting, ESC K ->
@@ -1048,6 +1060,81 @@ TEST(RunButtonScan, ColorMultiPageReturnsAllPages) {
   block2.insert(block2.end(), jpeg2.begin(), jpeg2.end());
   t.QueueRead(block2);
   t.QueueRead(EncodeJobFinalTerminator(2));  // tail: `80 80`, job done.
+
+  const brscan::ButtonParamsFn cb =
+      [&](const std::vector<uint8_t>&) -> std::optional<brscan::Params> {
+    brscan::Params p;
+    p.mode = brscan::ScanMode::kColor;
+    p.x_dpi = 300;
+    p.y_dpi = 300;
+    p.area = kButtonLetterArea;
+    return p;
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunButtonScan(t, cb, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[0].data, jpeg1);
+  EXPECT_EQ(pages[1].data, jpeg2);
+}
+
+// The real device terminates a scan-button job with a single 0x80 (then
+// closes the connection), not the driver flow's 0x80 0x80. Confirmed byte
+// for byte in reference/brscan-daemon-live.pcap and the vendor's own
+// reference/brscan-button-options.pcap. RunButtonScan must end the job on
+// this single-byte terminator instead of blocking for a second 0x80 that
+// never arrives.
+TEST(RunButtonScan, SingleByteJobFinalTerminatorEndsScan) {
+  brscan::FakeTransport t;
+  QueueButtonGreeting(&t);
+  t.QueueRead(EncodeButtonConfigFrame(kColorLetterConfigPayload));
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  const auto jpeg = MakeSyntheticJpeg(16, 8);
+  auto block = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()), 1);
+  block.insert(block.end(), jpeg.begin(), jpeg.end());
+  t.QueueRead(block);
+  t.QueueRead(EncodeButtonJobFinal(1));
+
+  const brscan::ButtonParamsFn cb =
+      [&](const std::vector<uint8_t>&) -> std::optional<brscan::Params> {
+    brscan::Params p;
+    p.mode = brscan::ScanMode::kColor;
+    p.x_dpi = 300;
+    p.y_dpi = 300;
+    p.area = kButtonLetterArea;
+    return p;
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunButtonScan(t, cb, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].data, jpeg);
+}
+
+// The exact live scenario: two color pages, the first closed by the plain
+// end-of-page marker (followed by the next page's block header) and the
+// second -- the job's last page -- closed by the single-0x80 terminator.
+// Mirrors ColorMultiPageReturnsAllPages but with EncodeButtonJobFinal in
+// place of the driver flow's EncodeJobFinalTerminator.
+TEST(RunButtonScan, MultiPageSingleByteJobFinalReturnsAllPages) {
+  brscan::FakeTransport t;
+  QueueButtonGreeting(&t);
+  t.QueueRead(EncodeButtonConfigFrame(kColorLetterConfigPayload));
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  const auto jpeg1 = MakeSyntheticJpeg(16, 8);
+  const auto jpeg2 = MakeSyntheticJpeg(16, 8);
+  auto block1 = EncodeBlockHeader(static_cast<uint16_t>(jpeg1.size()), 1);
+  block1.insert(block1.end(), jpeg1.begin(), jpeg1.end());
+  t.QueueRead(block1);
+  t.QueueRead(EncodeEndOfPageMarker(1));  // tail: next page's `64 07`.
+  auto block2 = EncodeBlockHeader(static_cast<uint16_t>(jpeg2.size()), 2);
+  block2.insert(block2.end(), jpeg2.begin(), jpeg2.end());
+  t.QueueRead(block2);
+  t.QueueRead(EncodeButtonJobFinal(2));  // tail: single `80`, job done.
 
   const brscan::ButtonParamsFn cb =
       [&](const std::vector<uint8_t>&) -> std::optional<brscan::Params> {
