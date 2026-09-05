@@ -108,6 +108,10 @@ std::optional<ButtonScanPlan> PlanButtonScan(
   // yet acted on; OCR always produces a searchable PDF regardless of
   // which of those three the panel offered.
   if (func == kFuncOcr) {
+    // Start from the daemon's configured OCR output settings (so a
+    // configured separation/separate_n/tiff_compression survive), then
+    // override only the two fields OCR's deliverable always forces.
+    plan.output = OutputSettingsForFunc(cfg, func);
     plan.output.format = OutputFormat::kPdf;
     plan.output.searchable = true;
   } else if (touch_panel_on) {

@@ -69,10 +69,12 @@ struct ButtonScanPlan {
 // comes from OutputSettingsForFunc(cfg, func).
 //
 // Either branch: params.button_flow is always true, and func == kFuncOcr
-// always yields output {kPdf, searchable=true} (OCR's deliverable is
-// always a searchable PDF -- see docs/BUTTON.md's "Output format"),
-// regardless of the LCD's own T= sub-format (TXT/HTML/RTF) -- see the
-// deferred-fields note in button_plan.cpp.
+// always yields output = OutputSettingsForFunc(cfg, kFuncOcr) with format
+// and searchable forced to {kPdf, true} (OCR's deliverable is always a
+// searchable PDF -- see docs/BUTTON.md's "Output format"), regardless of
+// the LCD's own T= sub-format (TXT/HTML/RTF) -- see the deferred-fields
+// note in button_plan.cpp. Every other configured OCR output setting
+// (separation/separate_n/tiff_compression) is preserved from cfg.
 std::optional<ButtonScanPlan> PlanButtonScan(
     const std::vector<uint8_t>& config_frame, const std::string& func,
     const Config& cfg);

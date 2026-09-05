@@ -203,6 +203,27 @@ TEST(PlanButtonScanTest, TouchPanelOffOcrFuncStillForcesSearchablePdf) {
   EXPECT_TRUE(plan->output.searchable);
 }
 
+// Regression test: a configured OCR separation (or any other non-default
+// OCR output setting) must survive the OCR format/searchable promotion --
+// PlanButtonScan should start from OutputSettingsForFunc(cfg, "OCR") and
+// override only format/searchable, not replace the whole OutputSettings
+// with a default-constructed one (which would silently drop
+// ocr.separation=every:N).
+TEST(PlanButtonScanTest, OcrFuncPreservesConfiguredSeparation) {
+  const std::string short_form = "F=OCR\nD=SIN\nE=LON\n";
+  Config cfg = DefaultConfig();
+  cfg.ocr_output.separation = OutputSeparation::kEveryN;
+  cfg.ocr_output.separate_n = 3;
+
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "OCR", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_EQ(plan->output.format, OutputFormat::kPdf);
+  EXPECT_TRUE(plan->output.searchable);
+  EXPECT_EQ(plan->output.separation, OutputSeparation::kEveryN);
+  EXPECT_EQ(plan->output.separate_n, 3);
+}
+
 // ---------------------------------------------------------------------
 // button_flow is always true, in every branch.
 // ---------------------------------------------------------------------
