@@ -34,7 +34,7 @@ namespace {
 // loads our executable and calls our entry points at all, versus only reading
 // the plists. Filter a live run with:
 //
-//   log stream --predicate 'subsystem == "ai.jiffylabs.brscan.ica"' --info --debug
+//   log stream --predicate 'subsystem == "me.tthoma24.brscan.ica"' --info --debug
 //
 // If NONE of these lines appear after a rescan, icdd never launched our
 // executable (a signing/load gate, not a plist bug). If "ICD_ScannerMain
@@ -42,7 +42,7 @@ namespace {
 // side is still wrong.
 os_log_t SpikeLog() {
   static os_log_t log =
-      os_log_create("ai.jiffylabs.brscan.ica", "loadspike");
+      os_log_create("me.tthoma24.brscan.ica", "loadspike");
   return log;
 }
 

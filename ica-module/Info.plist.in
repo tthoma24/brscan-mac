@@ -6,9 +6,18 @@
   Keys that matter for loading, cross-checked against Apple's shipping module
   /System/Library/Image Capture/Devices/AirScanScanner.app/Contents/Info.plist:
     - CFBundlePackageType APPL + NSPrincipalClass NSApplication: an ICA module
-      is a (background) app, not a plug-in bundle.
+      is a (background) app, not a plug-in bundle. icdd launches it as a process
+      (nm shows Apple's own AirScanScanner only *imports* ICD_ScannerMain /
+      gICDScannerCallbackFunctions and exports nothing; icdd does not dlsym the
+      module, it runs main() which hands control to ICD_ScannerMain), so the
+      executable entry-point contract here is complete.
     - LSBackgroundOnly: the module has no UI; icdd runs it headless.
     - LSMinimumSystemVersion: matched to the build target.
+    - CFBundleSupportedPlatforms [MacOSX]: present on Apple's shipping module.
+      icdd launches modules through LaunchServices (openApplicationAtURL:), which
+      reads this key; CMake's MACOSX_BUNDLE does not emit it, so we add it for
+      bundle parity. Task 1c added it plus a PkgInfo file (APPL????, also emitted
+      by the CMake target) so nothing LaunchServices expects is missing.
   The Bonjour device match itself lives in Resources/DeviceMatchingInfo.plist,
   which is what icdd reads (see that file).
 -->
@@ -19,13 +28,17 @@
   <key>CFBundleExecutable</key>
   <string>${MODULE_NAME}</string>
   <key>CFBundleIdentifier</key>
-  <string>ai.jiffylabs.brscan.ica-loadspike</string>
+  <string>me.tthoma24.brscan.ica-loadspike</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
   <string>${MODULE_NAME}</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleSupportedPlatforms</key>
+  <array>
+    <string>MacOSX</string>
+  </array>
   <key>CFBundleShortVersionString</key>
   <string>0.1</string>
   <key>CFBundleVersion</key>

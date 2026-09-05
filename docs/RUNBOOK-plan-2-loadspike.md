@@ -63,10 +63,55 @@ was instantiated. Task 1b found two causes and fixed both:
   (`BrscanICALoadSpike` and the synthetic `BRW00AABBCCDDEE`) to a stock system
   icon.
 - **Added `os_log` tracing** to `module_main.mm` (subsystem
-  `ai.jiffylabs.brscan.ica`, category `loadspike`) at `main` /
+  `me.tthoma24.brscan.ica`, category `loadspike`) at `main` /
   `ICD_ScannerMain` entry and in every registered callback, so a re-run shows
-  whether icdd launches our executable and calls us — the key diagnostic that
-  was missing.
+  whether icdd launches our executable and calls us.
+
+## Task 1c update — rename, bundle parity, and a re-test that separates A vs B
+
+The earlier interpretation ("zero of our `os_log` lines ⇒ a signing/load gate")
+was wrong, and this task corrects it. What we established locally:
+
+- **Renamed** the identifier `ai.jiffylabs` → `me.tthoma24` everywhere: bundle id
+  `me.tthoma24.brscan.ica-loadspike`, `os_log` subsystem `me.tthoma24.brscan.ica`,
+  and the predicates in this runbook.
+- **How icdd loads a module — confirmed by inspecting Apple's shipping module,
+  not source.** `nm -gU` on
+  `/System/Library/Image Capture/Devices/AirScanScanner.app/Contents/MacOS/AirScanScanner`
+  exports **no** `ICD_` symbols; it only *imports* `_ICD_ScannerMain` and
+  `_gICDScannerCallbackFunctions` from the framework, and its `Info.plist` is a
+  plain `CFBundlePackageType APPL` app. icdd's own strings show it launches
+  modules as **processes** (`launchDeviceModule`,
+  `launchDeviceModuleForBrowseID:fromClientPID:runningPID:`,
+  `launchedTaskWithLaunchPath:arguments:`, `openApplicationAtURL:configuration:`)
+  — it does **not** `dlsym` an entry point out of the module. Our bundle already
+  matches this contract: `main()` fills `gICDScannerCallbackFunctions` and calls
+  `ICD_ScannerMain`, and our imports are identical to Apple's. **So "entry points
+  not exported under the names icdd looks up" is not the gap — there is no such
+  lookup.**
+- **Ad-hoc signing is not a blanket exec/load gate.** Running our ad-hoc bundle's
+  binary directly launches it, loads `ICADevices.framework`, enters
+  `ICD_ScannerMain`, and emits our `os_log` lines. Ad-hoc code executes on this
+  macOS; the only open A-question is whether icdd's *launch context* additionally
+  enforces library validation on the child — which only the live re-test settles.
+- **Bundle-parity fixes** (close plausible match/load B-gaps, learned from Apple's
+  keys, values our own): added `CFBundleSupportedPlatforms = [MacOSX]` and a
+  `Contents/PkgInfo` (`APPL????`) to match Apple's module for the LaunchServices
+  path icdd uses.
+
+**Why "zero of our `os_log` lines" does NOT prove A.** icdd launches a module
+only *after* a Bonjour browse resolves a device and matches it to that module
+(the `launchDeviceModuleForBrowseID:` path). So no os_log lines means only "the
+module process was never started" — which is equally:
+
+- **(A) signing/library-validation gate:** icdd *tried* to launch our module and
+  the launch was denied, or
+- **(B) match/bundle gap:** icdd *never tried* — no `_scanner._tcp.` device
+  matched our module, so there was nothing to launch.
+
+Our subsystem is silent in both. The discriminator is in the **icdd** log (did a
+launch get *attempted*?) plus AMFI (was a launch *denied*?), streamed together in
+§3 below so one re-test tells A from B.
 
 Both schema shapes are learned from the **public plist interface** of the
 shipping module, not from Apple source; all values are synthetic.
@@ -116,65 +161,92 @@ sudo ica-module/install-loadspike.sh uninstall
 killall icdd 2>/dev/null || true
 ```
 
-## 3. Check whether it loaded (as headless as possible)
+## 3. One re-test that tells A (signing gate) from B (match/bundle gap)
 
-icdd has no query CLI, so watch its log. In one terminal:
+The point of this run is to see, in a single log stream, **whether icdd
+*attempted* to launch our module and, if so, whether the launch was *denied*.**
+That, not the presence/absence of our own `os_log` lines, is what separates A
+from B.
+
+### 3.0 Clear the stale device-info cache first (required)
+
+icdd caches per-device presentation state at
+`~/Library/Application Support/icdd/deviceInfoCacheV2.plist`, keyed by device
+UUID. Earlier runs (wrong-schema plist, old bundle id) can leave entries that
+suppress a fresh match, so clear it before the re-test:
 
 ```bash
-log stream --predicate 'process == "icdd"' --info --debug
+rm -f ~/Library/Application\ Support/icdd/deviceInfoCacheV2.plist
+killall icdd 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.apple.icdd
 ```
 
-Then trigger a rescan (kickstart icdd as above, or open **Image Capture**).
-Read the stream for:
+### 3.1 Stream everything the discriminator needs, in one terminal
 
-- our bundle path being scanned, and specifically whether the
-  `Missing DeviceMatchingInfo.plist` warning fires (it should NOT — the file is
-  present; if it does, our file is in the wrong place or unreadable),
-- any code-signing / library-validation rejection naming
-  `ai.jiffylabs.brscan.ica-loadspike`,
-- a Bonjour browse of `_scanner._tcp.` and whether our declared device is added.
-
-### Our own tracing (Task 1b) — the key diagnostic
-
-The module now logs under its own subsystem. In a second terminal, before the
-rescan:
+Start this **before** the rescan. It merges the icdd log (launch attempts,
+Bonjour browse, the `Missing DeviceMatchingInfo.plist` warning), AMFI / `amfid`
+(library-validation and launch denials), and our own subsystem:
 
 ```bash
-log stream --predicate 'subsystem == "ai.jiffylabs.brscan.ica"' --info --debug
+log stream --info --debug --predicate '
+  process == "icdd"
+  OR process == "amfid"
+  OR sender == "AppleMobileFileIntegrity"
+  OR subsystem == "me.tthoma24.brscan.ica"
+  OR eventMessage CONTAINS[c] "library validation"
+  OR eventMessage CONTAINS[c] "code signature"
+  OR eventMessage CONTAINS[c] "was denied"'
 ```
 
-Interpret it as follows:
-
-- **No lines at all** after a rescan → icdd never launched our executable. That
-  is a *load/signing gate*, not a plist bug — correlate with the AMFI / library-
-  validation query below; the fix is a stronger signature, not the plists.
-- **`main: BrscanICALoadSpike executable launched`** and
-  **`main: callbacks registered, entering ICD_ScannerMain`** appear → icdd loads
-  and runs our code. From here, a missing device is a match/DeviceInfo problem,
-  not a load problem.
-- **`callback: …` lines** (e.g. `ICD_ScannerOpenTCPIPDevice`,
-  `ICD_ScannerGetObjectInfo`) → icdd matched the device and is driving it; the
-  device should be present in Image Capture.
-- `main: ICD_ScannerMain returned …` should NOT appear in normal operation — it
-  means the service loop exited.
-
-A backward look at our trace specifically:
+Then trigger discovery: open **Image Capture** (and keep it open — icdd only
+launches a module when a client is browsing) with the real `_scanner._tcp.`
+device on the network. Optionally confirm the device advertises the type we
+declare, in another terminal:
 
 ```bash
-log show --last 10m --predicate 'subsystem == "ai.jiffylabs.brscan.ica"' --info --debug
+dns-sd -B _scanner._tcp local     # our module declares this type
+dns-sd -B _uscan._tcp local       # eSCL/AirScan; Apple's module claims this
 ```
 
-A backward look at what already happened:
+### 3.2 Read the stream — the exact lines that decide A vs B
+
+- **A — signing / library-validation gate (→ no-go, go to Plan 3):** icdd logs a
+  launch **attempt** for our bundle — a line naming `BrscanICALoadSpike.app` from
+  `launchDeviceModule` / `launchDeviceModuleForBrowseID:` /
+  `openApplicationAtURL:` — **and** it is followed by an AMFI / codesign denial:
+  a line from `AppleMobileFileIntegrity` or `amfid`, or containing
+  `library validation failed`, `code signature`, or `Launch … was denied`, that
+  names `me.tthoma24.brscan.ica-loadspike` or the bundle path. Our own
+  `me.tthoma24.brscan.ica` subsystem stays **silent** (the child was killed
+  before `main`). This means ad-hoc is not enough to *load*; the bar is
+  Developer-ID + notarization, which turns every iteration into a notarization
+  round trip → **Plan 2 is not viable without an Apple-level signature; take
+  Plan 3.**
+- **B — match / bundle gap (→ fixable):** there is **no** launch attempt for our
+  bundle in the icdd log and **no** AMFI/codesign line naming it. icdd browsed
+  `_scanner._tcp.` but either resolved no device (then `dns-sd -B _scanner._tcp`
+  is also empty → the Brother advertises only eSCL `_uscan._tcp.`, so declare
+  that type instead) or resolved one without binding it to our module (a
+  match-dict/`DeviceInfo` gap). The fix is in our plists/bundle, not the
+  signature.
+- **Success (spike passes):** our subsystem prints
+  `main: BrscanICALoadSpike executable launched` then
+  `main: callbacks registered, entering ICD_ScannerMain` — icdd launched and ran
+  our code. `callback: …` lines mean it is driving the device; it should now
+  appear in Image Capture. `main: ICD_ScannerMain returned …` should NOT appear
+  (it means the service loop exited).
+
+Watch for the `Missing DeviceMatchingInfo.plist in '…'!` warning: it should
+**not** fire (the file is present); if it does, the bundle is in the wrong place
+or unreadable — a third, trivially-fixable variant of B.
+
+Backward look (same predicate) if you missed the live stream:
 
 ```bash
-log show --last 10m --predicate 'process == "icdd"' --info --debug
-```
-
-Also check for an AMFI / code-signing gate on load:
-
-```bash
-log show --last 10m --predicate \
-  'subsystem == "com.apple.amfi" OR eventMessage CONTAINS "library validation"' --info
+log show --last 10m --info --debug --predicate '
+  process == "icdd" OR process == "amfid"
+  OR sender == "AppleMobileFileIntegrity"
+  OR subsystem == "me.tthoma24.brscan.ica"
+  OR eventMessage CONTAINS[c] "library validation"'
 ```
 
 ## 4. The manual UI check (the actual go/no-go)
@@ -185,9 +257,9 @@ The definitive pass is visual and cannot be automated:
    **System Settings ▸ Printers & Scanners**.
 2. **Go** = the synthetic device `BRW00AABBCCDDEE` appears in the source list
    (even if selecting it does nothing — this spike has no scan path).
-3. **No-go** = it never appears. Correlate with the icdd log from step 3 to see
-   why: `DeviceMatchingInfo.plist` schema rejected, signature/library-validation
-   rejected, or the service simply never browsed.
+3. **No-go** = it never appears. Correlate with §3.2 to classify it: a denied
+   launch of our bundle = **A** (signature/library-validation → Plan 3); no
+   launch attempt at all = **B** (match/bundle gap → fixable in our plists).
 
 Record which happened. A rejection is a finding, not a failure — it tells us the
 real bar (schema fix, or Developer-ID + notarization) before Plan 2 continues.
