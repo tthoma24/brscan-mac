@@ -101,6 +101,14 @@ to a new Mail message. See [docs/BUTTON.md](docs/BUTTON.md) for setup, and
 [config/brscan-scand.conf.example](config/brscan-scand.conf.example) for the
 configuration options.
 
+## Configuration app (Plan 1e)
+
+Instead of hand-editing `~/.config/brscan-scand.conf`, you can use
+**Brscan Config**, a standalone macOS app with a tabbed window for these same
+settings. It's a developer-built Swift package today, not yet a signed `.app`
+you can download — see [gui/README.md](gui/README.md) for what it covers and
+how to build and run it.
+
 ## Trademark and affiliation
 
 This project is unofficial and not affiliated with, authorized by, or
