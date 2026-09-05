@@ -690,13 +690,20 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
       return Status::kProtocolError;
     }
 
+    // Peek the byte after the marker. A job-final terminator leads with
+    // 0x80; a next page's block header with 0x64 (or 0x00 0x64). The
+    // scan-button flow terminates a job with a SINGLE 0x80 and then
+    // closes the connection; the vendor driver flow (persistent
+    // connection) sends 0x80 0x80 before the next scan's data. A leading
+    // 0x80 ends the job either way -- headers never lead with 0x80 and
+    // the EOP marker leads with 0x82 -- so do NOT wait for a second 0x80:
+    // Peek(2) blocks to the read timeout against the button flow's
+    // single byte + connection close (the live BW/TIFF failure, same
+    // root cause as the color path fixed in RunColorScan).
     std::vector<uint8_t> tail;
-    status = framer->Peek(2, timeout_ms, &tail);
+    status = framer->Peek(1, timeout_ms, &tail);
     if (status != Status::kOk) return status;
-    if (tail[0] == 0x80 && tail[1] == 0x80) {
-      std::vector<uint8_t> consumed;
-      status = framer->ReadExact(2, timeout_ms, &consumed);
-      if (status != Status::kOk) return status;
+    if (tail[0] == 0x80) {
       break;  // Job-final terminator: no more pages.
     }
     // Otherwise `tail` is the next page's block header (e.g. `64 07` for
