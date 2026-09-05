@@ -120,6 +120,70 @@ These changes are still **unverified** — they need the `sudo` install + Image
 Capture UI re-test below. A device appearing is success for this spike; the scan
 path is out of scope.
 
+## Task 1d update — the match/binding gap is FIXABLE (missing TXT match key)
+
+Task 1d answered the crux Plan 2 question with the earlier re-test's evidence
+already in hand: our `me.tthoma24.brscan.ica` subsystem is silent AND no AMFI /
+codesign line names our bundle — i.e. **no launch was even *attempted***. That
+is scenario **B (match/binding gap)**, not A (signing). The question left was
+whether B is fixable or structural — does icdd dispatch a raw `_scanner._tcp.`
+device to a *third-party* module at all?
+
+**Finding: FIXABLE. icdd does dispatch `_scanner._tcp.` to third-party modules;
+our match dict was just missing the TXT criterion icdd binds on.** The evidence,
+from Apple's public plugin interface and the device's own broadcast:
+
+1. **The bind test is a TXT-record comparison, and our match dict gave it
+   nothing to compare.** icdd exports the selector
+   `compareBonjourDeviceModuleDictionary:withBonjourTXTRecord:` and
+   `baseDictionaryForBonjourServiceType:andTXTRecords:devices:` (strings in
+   `/System/Library/Image Capture/Support/icdd`). The comparison needs an
+   **`ICABonjourTXTRecordKey`** sub-dict of TXT key/value pairs to test against
+   the device's advertised TXT record. `ICABonjourTXTRecordKey` is Apple's
+   public match key — Apple's own `AirScanScanner.app` uses exactly it to match
+   its service type on Bonjour TXT pairs. Our Task 1b/1c dict carried only
+   `device type = scanner` — no `ICABonjourTXTRecordKey` — so the comparison had
+   no TXT pair to test and the device never bound.
+2. **The device advertises usable identity TXT keys.** Captured independently on
+   the live network:
+
+   ```
+   dns-sd -L "Brother MFC-J6920DW" _scanner._tcp local
+   # ... can be reached at <host>.local.:54921
+   #   txtvers=1 ty=Brother MFC-J6920DW mfg=Brother mdl=MFC-J6920DW
+   #   button=T feeder=T flatbed=T
+   ```
+
+   The device does **not** advertise eSCL `_uscan._tcp.` at all (`dns-sd -B
+   _uscan._tcp local` is empty), so `_scanner._tcp.` is the only network scan
+   path it exposes.
+
+Whether icdd will actually dispatch a raw `_scanner._tcp.` device to a
+third-party module is what the §3 re-test settles — Apple's `AirScanScanner`
+demonstrates the match *interface* on its own service type, not this dispatch;
+this fix supplies the missing TXT criterion so binding, and then a launch
+attempt, can finally happen.
+
+**The fix (applied):** `ica-module/DeviceMatchingInfo.plist`'s `_scanner._tcp.`
+match dict now carries `ICABonjourTXTRecordKey = { mdl = MFC-J6920DW; mfg =
+Brother; }` and `device events = ( scan )`, matching the proven schema. The two
+values are the device's own publicly-broadcast TXT strings (from the `dns-sd`
+capture above), captured black-box; `mdl`/`mfg` are device-class identity
+(the project's public target model), while the synthetic per-unit Bonjour name
+`BRW00AABBCCDDEE` stays in `DeviceInfo.plist`.
+
+**Residual risk — the signing gate (A) is the NEXT gate, still unverified.**
+Making the device *bind* is what lets icdd finally *attempt* to launch our
+module. Only then can the library-validation / Developer-ID question actually
+fire (Apple's own modules in the system directory are Team-signed and carry the
+library-validation flag, so an ad-hoc third-party module may still be refused).
+So a clean bind
+does not by itself prove Plan 2 green; it unblocks the go/no-go by turning the
+silent non-result into a real launch attempt whose success or AMFI-denial the
+§3 stream will now show. If, after this fix, the device binds and icdd launches
+our ad-hoc module (success log line below), Plan 2 is go; if the launch is
+AMFI-denied, that is the signing wall and the fallback is Plan 3.
+
 ## 1. Build and sign (no privileges needed)
 
 From the repo root:

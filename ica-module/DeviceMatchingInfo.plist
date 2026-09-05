@@ -27,9 +27,41 @@
   We drive the Brother raw-scan protocol advertised on _scanner._tcp., so we
   key the same structure on that service type instead of cloning Apple's.
 
-  This is reading a public plugin interface (the plist schema), not Apple
-  source; the values here are our own. Device identity is the synthetic
-  Bonjour name BRW00AABBCCDDEE (see DeviceInfo.plist).
+  MATCH-BIND FIX (Plan 2 Task 1d). The Task 1b/1c bundle declared this service
+  type with a bare match dict — { "device type" = scanner; } and nothing else —
+  and icdd browsed _scanner._tcp., saw the device, but never bound it to this
+  module (Image Capture DEVICES = 0; our os_log subsystem stayed silent, i.e.
+  no launch was even attempted — the match/binding gap, not a signing gate).
+
+  Task 1d found the missing criterion. icdd binds a browsed Bonjour device to a
+  module's match dict via its own selector
+  compareBonjourDeviceModuleDictionary:withBonjourTXTRecord: (a symbol in
+  /System/Library/Image Capture/Support/icdd). That comparison needs an
+  ICABonjourTXTRecordKey sub-dict of TXT key/value pairs to test against the
+  device's advertised TXT record; a match dict carrying only "device type"
+  gives it nothing to compare and does not bind. ICABonjourTXTRecordKey is
+  Apple's public match interface: AirScanScanner.app -- Apple's own module in
+  /System/Library/Image Capture/Devices -- uses exactly this key to match its
+  service type against Bonjour TXT pairs. We apply the same public interface to
+  _scanner._tcp., keying on the TXT pairs this device broadcasts (below) plus
+  "device events" = ( scan ). No vendor file, source, or proprietary content is
+  consulted or copied.
+
+  The two TXT values below are the device's OWN publicly-broadcast Bonjour TXT
+  record, captured independently with
+    dns-sd -L "Brother MFC-J6920DW" _scanner._tcp local
+  which returns, on port 54921 (our raw-scan protocol):
+    ... ty=Brother MFC-J6920DW mfg=Brother mdl=MFC-J6920DW button=T feeder=T
+        flatbed=T ...
+  So mfg=Brother and mdl=MFC-J6920DW are the exact strings icdd will compare.
+  The model name is the project's public target device (repo name, docs/), not
+  a per-unit secret; the synthetic per-unit Bonjour NAME BRW00AABBCCDDEE (a
+  MAC-derived .local host) stays in DeviceInfo.plist and is never used here.
+
+  This is reading a public plugin interface (the plist schema), not vendor
+  source; the mdl/mfg strings are the device's own advertised TXT values.
+  Device identity is the synthetic Bonjour name BRW00AABBCCDDEE (see
+  DeviceInfo.plist).
 -->
 <plist version="1.0">
 <dict>
@@ -38,6 +70,17 @@
     <key>_scanner._tcp.</key>
     <array>
       <dict>
+        <key>ICABonjourTXTRecordKey</key>
+        <dict>
+          <key>mdl</key>
+          <string>MFC-J6920DW</string>
+          <key>mfg</key>
+          <string>Brother</string>
+        </dict>
+        <key>device events</key>
+        <array>
+          <string>scan</string>
+        </array>
         <key>device type</key>
         <string>scanner</string>
       </dict>
