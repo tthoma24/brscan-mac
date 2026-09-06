@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
 #include <optional>
 #include <random>
 #include <string>
@@ -1001,6 +1002,407 @@ TEST(RunScan, BlackWhiteAdfMultiPageSingleByteJobFinalReturnsAllPages) {
   const std::vector<uint8_t> want4 = {0x11, 0x22, 0x33, 0x44};
   EXPECT_EQ(pages[0].data, want3);
   EXPECT_EQ(pages[1].data, want4);
+}
+
+// --- Streaming RunScan (per-band callback) --------------------------------
+
+namespace {
+
+// A band captured by the streaming RunScan callback. ScanBand::data is only
+// valid during the callback, so the bytes are copied out here.
+struct CapturedBand {
+  int page_index;
+  brscan::PixelFormat format;
+  int full_width;
+  int full_height;
+  int start_row;
+  int num_rows;
+  std::vector<uint8_t> data;
+};
+
+size_t BandStride(brscan::PixelFormat f, int width) {
+  switch (f) {
+    case brscan::PixelFormat::kRgb:
+      return static_cast<size_t>(width) * 3;
+    case brscan::PixelFormat::kGray:
+      return static_cast<size_t>(width);
+    case brscan::PixelFormat::kBitonal:
+      return (static_cast<size_t>(width) + 7) / 8;
+  }
+  return 0;
+}
+
+// A BandCallback that copies every band into `sink`.
+brscan::BandCallback Collect(std::vector<CapturedBand>* sink) {
+  return [sink](const brscan::ScanBand& b) {
+    CapturedBand c;
+    c.page_index = b.page_index;
+    c.format = b.format;
+    c.full_width = b.full_width;
+    c.full_height = b.full_height;
+    c.start_row = b.start_row;
+    c.num_rows = b.num_rows;
+    c.data.assign(b.data, b.data + b.size);
+    sink->push_back(std::move(c));
+    return true;
+  };
+}
+
+// Decodes a whole JPEG buffer to interleaved RGB exactly as DecodeJpeg does
+// (TJPF_RGB, accurate IDCT) -- the byte-exact oracle the streaming color
+// bands must reconstruct.
+std::vector<uint8_t> DecodeWholeJpegRgb(const std::vector<uint8_t>& jpeg) {
+  tjhandle h = tjInitDecompress();
+  int w = 0, hgt = 0, ss = 0, cs = 0;
+  EXPECT_EQ(tjDecompressHeader3(h, jpeg.data(),
+                                static_cast<unsigned long>(jpeg.size()), &w,
+                                &hgt, &ss, &cs),
+            0);
+  std::vector<uint8_t> rgb(static_cast<size_t>(w) * hgt * 3);
+  EXPECT_EQ(tjDecompress2(h, jpeg.data(),
+                          static_cast<unsigned long>(jpeg.size()), rgb.data(),
+                          w, 0, hgt, TJPF_RGB, TJFLAG_ACCURATEDCT),
+            0);
+  tjDestroy(h);
+  return rgb;
+}
+
+// Groups captured bands by page_index, verifies per page that the bands are
+// contiguous, monotonic, and cover [0, full_height) exactly once, and
+// returns the concatenated (row-order) band pixels per page_index.
+std::map<int, std::vector<uint8_t>> ConcatBandsPerPage(
+    const std::vector<CapturedBand>& bands) {
+  std::map<int, std::vector<uint8_t>> pixels;
+  std::map<int, int> next_row;  // Expected start_row of the next band.
+  std::map<int, int> height;    // full_height reported for the page.
+  for (const auto& b : bands) {
+    EXPECT_EQ(b.start_row, next_row[b.page_index])
+        << "bands must be contiguous with no gap or overlap";
+    EXPECT_GT(b.num_rows, 0);
+    EXPECT_EQ(b.data.size(),
+              static_cast<size_t>(b.num_rows) *
+                  BandStride(b.format, b.full_width));
+    next_row[b.page_index] = b.start_row + b.num_rows;
+    height[b.page_index] = b.full_height;
+    pixels[b.page_index].insert(pixels[b.page_index].end(), b.data.begin(),
+                                b.data.end());
+  }
+  for (const auto& kv : height) {
+    EXPECT_EQ(next_row[kv.first], kv.second)
+        << "bands must cover every row of the page exactly once";
+  }
+  return pixels;
+}
+
+}  // namespace
+
+// Core invariant, color: the concatenation of the streaming bands (in
+// page/row order) is byte-identical to the whole-page image the
+// non-streaming path decodes. The JPEG spans several network blocks so the
+// suspending incremental decoder is fed across multiple chunks, exactly as
+// on the wire.
+TEST(RunScan, StreamingColorFlatbedBandsMatchWholePage) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,3460,427,5052,"));
+
+  const auto jpeg = MakeLargeSyntheticJpeg(300, 300);
+  ASSERT_GT(jpeg.size(), 0xfff4u);
+  constexpr size_t kMaxChunkBytes = 0xfff4;
+  for (size_t offset = 0; offset < jpeg.size(); offset += kMaxChunkBytes) {
+    const size_t remaining = jpeg.size() - offset;
+    const size_t chunk_len = std::min(remaining, kMaxChunkBytes);
+    auto block = EncodeBlockHeader(static_cast<uint16_t>(chunk_len));
+    block.insert(block.end(), jpeg.begin() + offset,
+                 jpeg.begin() + offset + chunk_len);
+    t.QueueRead(block);
+  }
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<CapturedBand> bands;
+  std::vector<brscan::ScanResult> pages;
+  const auto status =
+      brscan::RunScan(t, ColorParams(), &pages, Collect(&bands));
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].width, 300);
+  EXPECT_EQ(pages[0].height, 300);
+  ASSERT_EQ(pages[0].data, jpeg);  // Non-streaming payload still delivered.
+
+  ASSERT_FALSE(bands.empty());
+  for (const auto& b : bands) {
+    EXPECT_EQ(b.page_index, 0);
+    EXPECT_EQ(b.format, brscan::PixelFormat::kRgb);
+    EXPECT_EQ(b.full_width, 300);
+    EXPECT_EQ(b.full_height, 300);
+  }
+  const auto per_page = ConcatBandsPerPage(bands);
+  ASSERT_EQ(per_page.size(), 1u);
+  EXPECT_EQ(per_page.at(0), DecodeWholeJpegRgb(jpeg));
+}
+
+// Same invariant across a multi-page (simplex ADF) color scan: each page's
+// bands reconstruct that page's whole decoded image.
+TEST(RunScan, StreamingColorAdfMultiPageBandsMatchWholePages) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC D ADF ack
+  t.QueueTimeout();                               // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 300, 300};
+
+  const auto jpeg1 = MakeLargeSyntheticJpeg(300, 300);
+  const auto jpeg2 = MakeLargeSyntheticJpeg(300, 300);
+  ASSERT_GT(jpeg1.size(), 0xfff4u);
+
+  const auto emit_page = [&](const std::vector<uint8_t>& jpeg, uint8_t pidx) {
+    constexpr size_t kMaxChunkBytes = 0xfff4;
+    for (size_t offset = 0; offset < jpeg.size(); offset += kMaxChunkBytes) {
+      const size_t remaining = jpeg.size() - offset;
+      const size_t chunk_len = std::min(remaining, kMaxChunkBytes);
+      auto block = EncodeBlockHeader(static_cast<uint16_t>(chunk_len), pidx);
+      block.insert(block.end(), jpeg.begin() + offset,
+                   jpeg.begin() + offset + chunk_len);
+      t.QueueRead(block);
+    }
+  };
+  emit_page(jpeg1, 1);
+  t.QueueRead(EncodeEndOfPageMarker(1));  // tail: next `64 07` header.
+  emit_page(jpeg2, 2);
+  t.QueueRead(EncodeJobFinalTerminator(2));
+
+  std::vector<CapturedBand> bands;
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages, Collect(&bands));
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+
+  const auto per_page = ConcatBandsPerPage(bands);
+  ASSERT_EQ(per_page.size(), 2u);
+  EXPECT_EQ(per_page.at(0), DecodeWholeJpegRgb(jpeg1));
+  EXPECT_EQ(per_page.at(1), DecodeWholeJpegRgb(jpeg2));
+}
+
+// Duplex: two pages' chunks interleaved on the wire, each tagged with its
+// page index. The per-page suspending decoders must keep separate state so
+// each page's bands still reconstruct its own whole image.
+TEST(RunScan, StreamingColorDuplexInterleavedBandsMatchWholePages) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC D ADF ack
+  t.QueueTimeout();                               // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.duplex = true;
+  params.area = brscan::Area{0, 0, 300, 300};
+
+  const auto jpeg1 = MakeLargeSyntheticJpeg(300, 300);
+  const auto jpeg2 = MakeLargeSyntheticJpeg(320, 288);
+  ASSERT_GT(jpeg1.size(), 0xfff4u);
+  ASSERT_GT(jpeg2.size(), 0xfff4u);
+
+  // Split a page's JPEG into on-the-wire blocks whose lengths fit the 16-bit
+  // block-header width field (and stay under the 0xfff4 sentinel).
+  const auto blocks = [](const std::vector<uint8_t>& jpeg, uint8_t pidx) {
+    constexpr size_t kChunk = 60000;
+    std::vector<std::vector<uint8_t>> out;
+    for (size_t off = 0; off < jpeg.size(); off += kChunk) {
+      const size_t len = std::min(kChunk, jpeg.size() - off);
+      auto block = EncodeBlockHeader(static_cast<uint16_t>(len), pidx);
+      block.insert(block.end(), jpeg.begin() + off, jpeg.begin() + off + len);
+      out.push_back(std::move(block));
+    }
+    return out;
+  };
+  const auto b1 = blocks(jpeg1, 1);
+  const auto b2 = blocks(jpeg2, 2);
+  ASSERT_GT(b1.size(), 1u);
+  ASSERT_GT(b2.size(), 1u);
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  // Interleave: page1 chunk 0, page2 chunk 0, then page1's remaining chunks,
+  // then EOP(1) -- page 1 completes while page 2 is still mid-stream -- then
+  // page2's remaining chunks and EOP(2). This forces the per-page decoders to
+  // keep independent state across page 1's finalization.
+  append(b1[0]);
+  append(b2[0]);
+  for (size_t i = 1; i < b1.size(); ++i) append(b1[i]);
+  append(EncodeEndOfPageMarker(1));
+  for (size_t i = 1; i < b2.size(); ++i) append(b2[i]);
+  append(EncodeJobFinalTerminator(2));
+  t.QueueRead(stream);
+
+  std::vector<CapturedBand> bands;
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages, Collect(&bands));
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+
+  const auto per_page = ConcatBandsPerPage(bands);
+  ASSERT_EQ(per_page.size(), 2u);
+  // page_index is the 0-based device page index (pidx - 1).
+  EXPECT_EQ(per_page.at(0), DecodeWholeJpegRgb(jpeg1));
+  EXPECT_EQ(per_page.at(1), DecodeWholeJpegRgb(jpeg2));
+}
+
+// Core invariant, raw gray (GRAY64/C=NONE): band concatenation equals the
+// page's decoded samples (which for raw gray are the payload bytes verbatim).
+// Height is large enough to span several bands.
+TEST(RunScan, StreamingGrayFlatbedBandsMatchWholePage) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,40,427,100,"));
+
+  const int width = 40;
+  const int height = 100;
+  std::vector<uint8_t> raw(static_cast<size_t>(width) * height);
+  for (size_t i = 0; i < raw.size(); ++i) raw[i] = static_cast<uint8_t>(i & 0xff);
+  auto block = EncodeBlockHeader(static_cast<uint16_t>(width));
+  block.insert(block.end(), raw.begin(), raw.end());
+  t.QueueRead(block);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = GrayParams();
+  params.area = brscan::Area{0, 0, width, height};
+
+  std::vector<CapturedBand> bands;
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages, Collect(&bands));
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].data, raw);
+
+  ASSERT_GT(bands.size(), 1u) << "a 100-row page must span several bands";
+  for (const auto& b : bands) {
+    EXPECT_EQ(b.format, brscan::PixelFormat::kGray);
+    EXPECT_EQ(b.full_width, width);
+    EXPECT_EQ(b.full_height, height);
+  }
+  const auto per_page = ConcatBandsPerPage(bands);
+  ASSERT_EQ(per_page.size(), 1u);
+  EXPECT_EQ(per_page.at(0), raw);
+}
+
+// Core invariant, bitonal (TEXT/C=RLENGTH): band concatenation equals the
+// page's decoded 1-bpp samples.
+TEST(RunScan, StreamingBlackWhiteBandsMatchWholePage) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=9 (row_bytes = 2), height_px=40 -> spans several bands.
+  const int height = 40;
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,40,"));
+
+  std::vector<uint8_t> want;
+  for (int row = 0; row < height; ++row) {
+    const uint8_t a = static_cast<uint8_t>(row);
+    const uint8_t b = static_cast<uint8_t>(row * 2 + 1);
+    auto block = EncodeRlengthBlockHeader(0x42, 3);
+    const std::vector<uint8_t> payload = {0x01, a, b};  // literal run of 2.
+    block.insert(block.end(), payload.begin(), payload.end());
+    t.QueueRead(block);
+    want.push_back(a);
+    want.push_back(b);
+  }
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<CapturedBand> bands;
+  std::vector<brscan::ScanResult> pages;
+  const auto status =
+      brscan::RunScan(t, BlackWhiteParams(), &pages, Collect(&bands));
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].data, want);
+
+  ASSERT_GT(bands.size(), 1u);
+  for (const auto& b : bands) {
+    EXPECT_EQ(b.format, brscan::PixelFormat::kBitonal);
+    EXPECT_EQ(b.full_width, 9);
+    EXPECT_EQ(b.full_height, height);
+  }
+  const auto per_page = ConcatBandsPerPage(bands);
+  ASSERT_EQ(per_page.size(), 1u);
+  EXPECT_EQ(per_page.at(0), want);
+}
+
+// An empty BandCallback makes the streaming overload behave exactly like the
+// three-argument overload (which is itself implemented by delegating here).
+TEST(RunScan, StreamingEmptyCallbackMatchesNonStreaming) {
+  const auto build = [](brscan::FakeTransport* t) {
+    QueuePreamble(t);
+    t->QueueRead(EncodeOfferFrame("300,300,2,292,3460,427,5052,"));
+    const auto jpeg = MakeSyntheticJpeg(16, 8);
+    auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
+    payload.insert(payload.end(), jpeg.begin(), jpeg.end());
+    t->QueueRead(payload);
+    t->QueueRead(EncodeJobFinalTerminator(1));
+  };
+
+  brscan::FakeTransport t3;
+  build(&t3);
+  std::vector<brscan::ScanResult> pages3;
+  ASSERT_EQ(brscan::RunScan(t3, ColorParams(), &pages3), brscan::Status::kOk);
+
+  brscan::FakeTransport t4;
+  build(&t4);
+  std::vector<brscan::ScanResult> pages4;
+  ASSERT_EQ(
+      brscan::RunScan(t4, ColorParams(), &pages4, brscan::BandCallback{}),
+      brscan::Status::kOk);
+
+  ASSERT_EQ(pages3.size(), pages4.size());
+  ASSERT_EQ(pages3.size(), 1u);
+  EXPECT_EQ(pages3[0].data, pages4[0].data);
+  EXPECT_EQ(pages3[0].width, pages4[0].width);
+  EXPECT_EQ(pages3[0].height, pages4[0].height);
+}
+
+// Returning false from the callback cancels promptly: RunScan returns
+// kCancelled and, as the one documented exception, keeps in `out` the pages
+// that completed before the cancel (here page 1), dropping the rest.
+TEST(RunScan, StreamingCancellationStopsPromptlyAndKeepsCompletedPages) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC D ADF ack
+  t.QueueTimeout();                               // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  const auto jpeg1 = MakeSyntheticJpeg(16, 8);
+  const auto jpeg2 = MakeSyntheticJpeg(16, 8);
+  auto block1 = EncodeBlockHeader(static_cast<uint16_t>(jpeg1.size()), 1);
+  block1.insert(block1.end(), jpeg1.begin(), jpeg1.end());
+  t.QueueRead(block1);
+  t.QueueRead(EncodeEndOfPageMarker(1));  // page 1 completes.
+  auto block2 = EncodeBlockHeader(static_cast<uint16_t>(jpeg2.size()), 2);
+  block2.insert(block2.end(), jpeg2.begin(), jpeg2.end());
+  t.QueueRead(block2);
+  t.QueueRead(EncodeJobFinalTerminator(2));
+
+  // Cancel on the first band of page 2 (page_index 1).
+  int seen = 0;
+  const brscan::BandCallback cb = [&](const brscan::ScanBand& b) {
+    ++seen;
+    return b.page_index == 0;  // keep page 0, cancel when page 1 starts.
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages, cb);
+  EXPECT_EQ(status, brscan::Status::kCancelled);
+  EXPECT_GT(seen, 0);
+  // Page 1 completed before the cancel and is kept; page 2 is dropped.
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].data, jpeg1);
 }
 
 // A malformed end-of-page marker (byte[0] isn't the 0x82 anchor) must

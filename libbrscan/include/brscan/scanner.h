@@ -58,7 +58,9 @@ struct ScanResult {
 // per page, each with the scanned image's native payload bytes and the
 // dimensions the device reported for it. On any other Status, `out` is
 // left empty (cleared) rather than holding a partial page list, so a
-// caller can never mistake a partial read for a complete one:
+// caller can never mistake a partial read for a complete one -- with one
+// deliberate exception for the streaming overload below (kCancelled keeps
+// the pages completed before the cancel; see that overload's contract):
 //   - kBusy: the device reported busy at the greeting (-NG 401).
 //   - kNoPaper: params.source == Source::kAdf and the feeder did not ack
 //     source selection within the ack timeout. See scanner.cpp for the
@@ -83,6 +85,61 @@ struct ScanResult {
 // protocol lets this code rule out structurally.
 Status RunScan(Transport& transport, const Params& params,
                 std::vector<ScanResult>* out);
+
+// One horizontal band of a page, delivered by RunScan's streaming overload
+// as its rows are decoded off the wire -- the foundation for a truly-live
+// progressive overview (the ICA module wires this up separately). A band
+// carries decoded, host-ready pixels for a contiguous run of rows, in the
+// same layout DescribeBuffer describes for a whole page:
+//   - kRgb: 3 bytes/pixel (R,G,B), stride = full_width * 3;
+//   - kGray: 1 byte/pixel, stride = full_width;
+//   - kBitonal: 1 bit/pixel, MSB-first, stride = (full_width + 7) / 8.
+// so `size == num_rows * stride` and band N of a page begins at pixel row
+// `start_row`. Within a page the bands are contiguous and cover every row
+// exactly once, with monotonically increasing start_row -- concatenating a
+// page's bands in arrival order reproduces that page's whole decoded image
+// byte-for-byte.
+struct ScanBand {
+  int page_index;      // 0-based device page order (duplex: interleaved).
+  PixelFormat format;  // kRgb / kGray / kBitonal.
+  int full_width;      // Full page width in pixels.
+  int full_height;     // Full page height in pixels (from the JPEG SOF for
+                       // color; from the requested area for gray/bitonal).
+  int start_row;       // Row offset of this band within the page.
+  int num_rows;        // Rows in this band.
+  const uint8_t* data;  // Decoded rows for THIS band; valid only during the
+                        // callback. Stride is as documented above.
+  size_t size;          // num_rows * stride.
+};
+
+// Invoked once per decoded band. Return true to keep scanning; return false
+// to request cancellation -- RunScan then stops reading promptly and returns
+// Status::kCancelled (see the streaming overload below).
+using BandCallback = std::function<bool(const ScanBand&)>;
+
+// Streaming form of RunScan: identical to the three-argument overload above
+// -- same flow, same `out` contract, same page semantics -- but it ALSO
+// delivers each page's rows through `on_band` as they decode off the wire,
+// instead of only handing back whole pages at the end. The two paths are not
+// mutually exclusive: `out` is still filled with the complete pages (color
+// pages still carry their native JPEG bytes, gray/bitonal their decoded
+// samples), so a file-transfer caller can encode the finished image while a
+// preview caller consumes the live bands.
+//
+// Color (M=CGRAY, C=JPEG) is decoded incrementally through a libjpeg-turbo
+// suspending source as its chunks arrive; gray/bitonal (RLENGTH or raw)
+// emits bands as its rows decode. `on_band` may be null/empty, in which case
+// this behaves exactly like the three-argument overload (and that overload
+// is implemented by calling this one with an empty callback).
+//
+// Cancellation: if `on_band` returns false, RunScan stops reading the job
+// promptly and returns Status::kCancelled. This is the ONE non-kOk status
+// that does NOT clear `out`: it leaves `out` holding the pages that fully
+// completed before the cancel (any page still mid-stream is dropped), so a
+// host-cancel can still keep what already arrived. Every other non-kOk
+// status clears `out` exactly as the three-argument overload documents.
+Status RunScan(Transport& transport, const Params& params,
+                std::vector<ScanResult>* out, const BandCallback& on_band);
 
 // Given the printer's pushed config-command bytes (the full 0x30 <len> 0x00
 // frame, header included), returns the Params to scan with, or std::nullopt
