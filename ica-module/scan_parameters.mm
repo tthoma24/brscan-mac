@@ -32,11 +32,20 @@ constexpr int kDefaultResolution = 300;
 
 // ICScannerBitDepth values (SDK ICScannerFunctionalUnits.h): 1-bit for
 // black-and-white, 8-bit otherwise. The raw value equals the bit count. The
-// colour choice rides on ICAP_BITDEPTH plus the pixel type at scan time; we do
-// NOT advertise a separate pixel-data-type list (no client mirror).
+// colour choice rides on ICAP_PIXELTYPE (advertised below) and ICAP_BITDEPTH.
 constexpr int kBitDepth1 = 1;
 constexpr int kBitDepth8 = 8;
 constexpr int kDefaultBitDepth = 8;
+
+// ICScannerPixelDataType values (SDK ICScannerFunctionalUnits.h, documented as
+// "Corresponds to ICAP_PIXELTYPE of the TWAIN Specification"): BW=0, Gray=1,
+// RGB=2. Advertised as ICAP_PIXELTYPE so Image Capture renders the colour-mode
+// picker; RGB is the default. Pairs with the "scan mode" echo SetParameters maps
+// back to a ScanMode (module_main.mm::PixelTypeForScanMode).
+constexpr int kPixelTypeBw = 0;
+constexpr int kPixelTypeGray = 1;
+constexpr int kPixelTypeRgb = 2;
+constexpr int kDefaultPixelType = kPixelTypeRgb;
 
 // ICScannerMeasurementUnit value for pixels (SDK: inches=0, cm=1, picas=2,
 // points=3, twips=4, pixels=5). Advertised as ICAP_UNITS so the host's scan-area
@@ -46,6 +55,16 @@ constexpr int kMeasurementUnitPixels = 5;
 // ICScannerFunctionalUnitType values (SDK): flatbed=0, documentFeeder=3.
 constexpr int kFunctionalUnitFlatbed = 0;
 constexpr int kFunctionalUnitFeeder = 3;
+
+// The functional unit whose capabilities are advertised flat inside `device`
+// (see BuildScannerParameters). The flatbed is the default selection.
+constexpr int kSelectedFunctionalUnit = kFunctionalUnitFlatbed;
+
+// TWAIN CAP_DUPLEX value for "no duplex" (TWDX_NONE). CAP_FEEDERENABLED /
+// CAP_DUPLEX are advertised so the source and duplex controls appear; for the
+// selected flatbed unit both are off.
+constexpr int kDuplexNone = 0;
+constexpr int kFeederDisabled = 0;
 
 // TWAIN container value-type tags (TWON_*), the TWAIN Specification vocabulary
 // that Image Capture's TWAIN-derived capability dictionaries use. INTERFACE
@@ -104,11 +123,14 @@ NSArray* ResolutionArray() {
   return r;
 }
 
-// Builds the capability sub-dictionary for one functional unit. Capabilities are
-// scoped per unit because the flatbed and feeder differ: the flatbed exposes the
-// platten (ICScannerDocumentTypeDefault) and the flatbed-only sizes and has the
-// larger maximum extent, while the feeder omits the platten and the flatbed-only
-// sizes.
+// Builds the ICAP_* capability set for one functional unit, flat (each key maps
+// to a TWAIN-style container). Capabilities are scoped per unit because the
+// flatbed and feeder differ: the flatbed exposes the platten
+// (ICScannerDocumentTypeDefault) and the flatbed-only sizes and has the larger
+// maximum extent, while the feeder omits the platten and the flatbed-only sizes.
+// Only the selected unit's set is advertised this task (see
+// BuildScannerParameters); the `feeder` parameter keeps the per-unit geometry
+// correct and lets a follow-up switch the flat set when the host reselects.
 NSDictionary* BuildUnit(bool feeder) {
   NSMutableArray* supportedSizes = [NSMutableArray array];
   // The platten "default" size is meaningful only for the flatbed.
@@ -142,6 +164,9 @@ NSDictionary* BuildUnit(bool feeder) {
         Enumeration(ResolutionArray(), kDefaultResolution, kDefaultResolution),
     @"ICAP_BITDEPTH" : Enumeration(@[ Int(kBitDepth1), Int(kBitDepth8) ],
                                    kDefaultBitDepth, kDefaultBitDepth),
+    @"ICAP_PIXELTYPE" : Enumeration(
+        @[ Int(kPixelTypeBw), Int(kPixelTypeGray), Int(kPixelTypeRgb) ],
+        kDefaultPixelType, kDefaultPixelType),
     @"ICAP_PHYSICALWIDTH" : OneValue(maxWidthPx),
     @"ICAP_PHYSICALHEIGHT" : OneValue(maxHeightPx),
     @"ICAP_SUPPORTEDSIZES" :
@@ -156,20 +181,31 @@ void BuildScannerParameters(CFMutableDictionaryRef dict) {
   if (dict == nullptr) return;
   NSMutableDictionary* d = (__bridge NSMutableDictionary*)dict;
 
-  // The capabilities are scoped per functional unit inside a top-level
-  // functionalUnits dict. Alongside the available/selected type keys, each
-  // unit's capability sub-dict is keyed by its ICScannerFunctionalUnitType value
-  // rendered as a string ("0" flatbed, "3" feeder).
-  NSMutableDictionary* functionalUnits = [NSMutableDictionary dictionary];
-  functionalUnits[@"availableFunctionalUnitTypes"] =
-      @[ Int(kFunctionalUnitFlatbed), Int(kFunctionalUnitFeeder) ];
-  functionalUnits[@"selectedFunctionalUnitType"] = Int(kFunctionalUnitFlatbed);
-  functionalUnits[[@(kFunctionalUnitFlatbed) stringValue]] =
-      BuildUnit(/*feeder=*/false);
-  functionalUnits[[@(kFunctionalUnitFeeder) stringValue]] =
-      BuildUnit(/*feeder=*/true);
+  // Everything the host reads lives under a single top-level `device` dict. The
+  // ICAP_*/CAP_* capability entries for the SELECTED functional unit sit FLAT
+  // inside it; a `functionalUnits` sub-dict then carries ONLY which unit types
+  // exist and which is selected. (The previous shape put functionalUnits at the
+  // top level with per-unit capability sub-dicts keyed "0"/"3"; Image Capture
+  // rendered no controls from it. This flat-under-`device` layout is the shape
+  // its scanner modules actually consume.)
+  NSMutableDictionary* deviceDict =
+      [NSMutableDictionary dictionaryWithDictionary:
+                               BuildUnit(/*feeder=*/kSelectedFunctionalUnit ==
+                                         kFunctionalUnitFeeder)];
 
-  d[@"functionalUnits"] = functionalUnits;
+  // Source (flatbed vs feeder) and duplex controls. TWON_ONEVALUE scalars for
+  // the selected unit: the flatbed uses no feeder and no duplex.
+  deviceDict[@"CAP_FEEDERENABLED"] = OneValue(kFeederDisabled);
+  deviceDict[@"CAP_DUPLEX"] = OneValue(kDuplexNone);
+
+  // Which functional units exist and which is selected -- nothing else.
+  deviceDict[@"functionalUnits"] = @{
+    @"availableFunctionalUnitTypes" :
+        @[ Int(kFunctionalUnitFlatbed), Int(kFunctionalUnitFeeder) ],
+    @"selectedFunctionalUnitType" : Int(kSelectedFunctionalUnit),
+  };
+
+  d[@"device"] = deviceDict;
 }
 
 }  // namespace brscan::ica

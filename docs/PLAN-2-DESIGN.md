@@ -257,28 +257,45 @@ flow.
 `ICD_ScannerGetParameters` dict with invented descriptive keys
 (`supportedResolutions`, `paperSizes`, …); the live Scan test showed Image
 Capture recognised none of them, rendered no controls, and never called `Start`.
-Image Capture's scanner modules speak the TWAIN-derived `ICAP_*` capability
-vocabulary, so `GetParameters` now emits, under a top-level `functionalUnits`
-dict:
+Image Capture's scanner modules speak the TWAIN-derived `ICAP_*`/`CAP_*`
+capability vocabulary, and expect it under a single top-level **`device`** dict.
+Task 8 first emitted a top-level `functionalUnits` dict with per-unit capability
+sub-dicts keyed `"0"`/`"3"`; Image Capture rendered **no** controls from that
+shape and never called `Start`. Task 10 corrects it to the shape those modules
+actually consume: `GetParameters` now emits
 
-- `availableFunctionalUnitTypes` → array of `ICScannerFunctionalUnitType`
-  numbers (`0` flatbed, `3` documentFeeder); `selectedFunctionalUnitType` → `0`.
-- one capability sub-dict **per unit**, keyed by the stringified unit type
-  (`"0"`, `"3"`) — capabilities are scoped per unit because the flatbed and
-  feeder differ (the flatbed adds the platten "default" size and the
-  flatbed-only sizes and has the larger extent).
+```
+theDict["device"] = {
+    <ICAP_*/CAP_* capability entries, FLAT, for the selected unit>,
+    functionalUnits : {
+        availableFunctionalUnitTypes : [0, 3],   // flatbed, documentFeeder.
+        selectedFunctionalUnitType   : 0,        // flatbed.
+    }
+}
+```
+
+- The capability entries sit **flat** inside `device` and describe the SELECTED
+  functional unit (flatbed). The nested `functionalUnits` dict holds **only**
+  `availableFunctionalUnitTypes` + `selectedFunctionalUnitType` — no per-unit
+  capability sub-dicts. Advertising both unit types is what makes the source
+  picker appear; switching the flat capability set when the host reselects a unit
+  is a follow-up (the flatbed and feeder differ — the flatbed adds the platten
+  "default" size and the flatbed-only sizes and has the larger extent).
 
 Each capability is a TWAIN-style container
 `{ "type": "TWON_ENUMERATION" | "TWON_ONEVALUE", "value": <array | scalar>,
 "current": <v>, "default": <v> }` under these keys:
 
-| ICAP capability key | Shape | Value | `brscan::Params` on the way back in |
+| ICAP/CAP capability key | Shape | Value | `brscan::Params` on the way back in |
 |---|---|---|---|
 | `ICAP_XRESOLUTION`, `ICAP_YRESOLUTION` | `TWON_ENUMERATION` | DPI `{100,150,200,300,400,600}`, current/default 300 | `x_dpi`, `y_dpi` (clamped to the `ESC I` `Offer` max) |
-| `ICAP_BITDEPTH` | `TWON_ENUMERATION` | `ICScannerBitDepth` `{1, 8}`, default 8 | `mode` (with the scan-mode/pixel type: 8-bit RGB → `kColor`, 8-bit gray → `kGray`, 1-bit → `kBlackWhite`) |
+| `ICAP_BITDEPTH` | `TWON_ENUMERATION` | `ICScannerBitDepth` `{1, 8}`, default 8 | `mode` (paired with `ICAP_PIXELTYPE`) |
+| `ICAP_PIXELTYPE` | `TWON_ENUMERATION` | `ICScannerPixelDataType` `{0 BW, 1 Gray, 2 RGB}`, current/default RGB (2) | `mode` (drives the colour-mode picker: RGB → `kColor`, Gray → `kGray`, BW → `kBlackWhite`) |
 | `ICAP_PHYSICALWIDTH`, `ICAP_PHYSICALHEIGHT` | `TWON_ONEVALUE` | the unit's max extent in `ICAP_UNITS` (pixels at 300 dpi, from `daemon/paper_size.cpp`) | bounds `area` |
 | `ICAP_SUPPORTEDSIZES` | `TWON_ENUMERATION` | array of `ICScannerDocumentType` values (see paper mapping) | `area` (via the size picker) |
 | `ICAP_UNITS` | `TWON_ONEVALUE` | `ICScannerMeasurementUnit` pixels = `5` | keeps host geometry in the module's pixel space |
+| `CAP_FEEDERENABLED` | `TWON_ONEVALUE` | `0` (flatbed selected) | source picker; feeder selection maps to `Source::kAdf` |
+| `CAP_DUPLEX` | `TWON_ONEVALUE` | `0` (`TWDX_NONE`) | duplex control (feeder only) |
 
 Paper-token → `ICScannerDocumentType` (raw values are the **non-contiguous**
 ImageCaptureCore enum, verified against the SDK header
