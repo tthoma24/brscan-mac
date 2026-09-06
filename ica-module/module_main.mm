@@ -108,6 +108,16 @@ struct DeviceContext {
   ICAScannerSessionID sessionID = 0;
   bool sessionOpen = false;
 
+  // The framework-assigned DEVICE object (ScannerObjectInfo::icaObject, marked
+  // "Apple" in ICD_ScannerCalls.h). This -- NOT ICD_ScannerStartPB::object -- is
+  // the object every scanner notification must reference under
+  // kICANotificationICAObjectKey (Task 15): the host keys its scan session on the
+  // device object, and posting notifications against Start's `object` left Image
+  // Capture waiting forever ("Scanning document" hang) and never rendering the
+  // overview. Captured in OpenSession and Start from deviceObjectInfo->icaObject
+  // and snapshotted into each ScanJob.
+  ICAObject deviceObject = 0;
+
   // Task 7 scan state. The host's last SetParameters selection, translated to a
   // brscan::Params, is stored here so ICD_ScannerStart can run RunScan with it.
   brscan::Params params;  // Defaults (kColor/flatbed/300) until SetParameters.
@@ -647,9 +657,13 @@ ICAError OpenSession(const ScannerObjectInfo* deviceObjectInfo,
   if (ctx) {
     ctx->sessionID = pb->sessionID;
     ctx->sessionOpen = true;
+    // Capture the framework-assigned device object now that the framework has
+    // populated it; scanner notifications reference this (Task 15).
+    if (deviceObjectInfo) ctx->deviceObject = deviceObjectInfo->icaObject;
   }
   pb->header.err = noErr;
-  os_log(Log(), "OpenSession: sessionID=%u opened (no -21345)", pb->sessionID);
+  os_log(Log(), "OpenSession: sessionID=%u opened deviceObject=0x%08x (no -21345)",
+         pb->sessionID, ctx ? ctx->deviceObject : 0);
   return noErr;
 }
 
@@ -974,6 +988,11 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 //
 // HAND-BACK ORCHESTRATION (Task 14, corrected against a working ICA scanner
 // module's convention -- interface facts only, clean-room, no source copied):
+//   - WARM-UP (Task 15): the canonical per-scan sequence opens with two
+//     kICANotificationTypeDeviceStatusInfo notifications carrying
+//     kICANotificationSubTypeKey = kICANotificationSubTypeWarmUpStarted then
+//     kICANotificationSubTypeWarmUpDone (all ICAApplication.h) before any scan
+//     pass; the worker posts these against the device object.
 //   - The in-memory (overview/preview) pixels are delivered INLINE in a
 //     kICANotificationTypeScanProgressStatus notification packed with
 //     ICDAddImageInfoToNotificationDictionary -- the IMAGE-info packer, NOT the
@@ -991,9 +1010,13 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 //     exactly as it accepts a running series (startRow advancing by chunk).
 //   - ICDSendNotificationAndWaitForReply keeps `bytes` alive until icdd copies
 //     it and surfaces a user cancel in replyCode.
-//   - EVERY scanner notification references the device/scanner object's
-//     framework-assigned ICAObject (ScannerObjectInfo::icaObject, which for a
-//     scan is ICD_ScannerStartPB::object) under kICANotificationICAObjectKey.
+//   - EVERY scanner notification references the framework-assigned DEVICE object
+//     (ScannerObjectInfo::icaObject, marked "Apple" in ICD_ScannerCalls.h) under
+//     kICANotificationICAObjectKey. Task 15 corrected this: prior builds used
+//     ICD_ScannerStartPB::object (the scan trigger), and the host -- which keys
+//     its scan session on the device object -- never completed the scan
+//     ("Scanning document" hang) nor rendered the overview. The device object is
+//     captured in OpenSession/Start from deviceObjectInfo->icaObject.
 //     The reference sets this on every ScanProgressStatus / ScannerPageDone /
 //     ScannerScanDone; it does NOT use kICANotificationDeviceICAObjectKey here.
 //   - kICANotificationTypeScannerPageDone then signals the page is complete, and
@@ -1032,6 +1055,27 @@ ICAError SendScannerNotification(CFMutableDictionaryRef dict,
                       : ICDSendNotification(&pb);
 }
 
+// Posts one warm-up status notification (Task 15). The authoritative per-scan
+// sequence opens with a kICANotificationTypeDeviceStatusInfo carrying
+// kICANotificationSubTypeKey = kICANotificationSubTypeWarmUpStarted, then a
+// second with kICANotificationSubTypeWarmUpDone, before any scan pass -- the host
+// expects this pair to move its scan UI out of the pre-scan state (all constants
+// from ICADevices.framework ICAApplication.h). `icaObject` is the device object.
+// Status info is not data-bearing, so it is fire-and-forget (plain
+// ICDSendNotification). Returns the framework's ICAError.
+ICAError PostWarmUp(ICAObject icaObject, CFStringRef subtype) {
+  CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  if (dict == nullptr) return kICADeviceMemoryAllocationErr;
+  CFDictionarySetValue(dict, kICANotificationSubTypeKey, subtype);
+  ICAError err = SendScannerNotification(
+      dict, icaObject, kICANotificationTypeDeviceStatusInfo,
+      /*waitForReply=*/false);
+  CFRelease(dict);
+  return err;
+}
+
 // Logs the notification dictionary's keys and the image geometry it carries,
 // WITHOUT dumping the raw pixel bytes (kICANotificationImageDataKey holds the
 // whole image). This is the Defect-A follow-up hook: a device-in-the-loop
@@ -1050,8 +1094,8 @@ void LogNotificationDict(const char* label, CFDictionaryRef dict) {
 // full-height IMAGE-info chunk in a ScanProgressStatus, then signals the page
 // complete. `bytes` must point at `byteCount` host-ready bytes: interleaved
 // 24-bit RGB (post-DecodeJpeg) for kRgb, raw 8-bit gray for kGray, packed 1-bpp
-// for kBitonal. `icaObject` is the device/scanner object (ICD_ScannerStartPB::
-// object). Returns true if the image was accepted and both notifications sent.
+// for kBitonal. `icaObject` is the DEVICE object (Task 15). Returns true if the
+// image was accepted and both notifications sent.
 bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
               const uint8_t* bytes, size_t byteCount, int width, int height,
               int pageIndex) {
@@ -1060,6 +1104,35 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
   if (!d) {
     os_log_error(Log(), "PostPage[%d]: invalid geometry %dx%d", pageIndex,
                  width, height);
+    return false;
+  }
+
+  // The IMAGE-info packer copies exactly `dataSize` bytes starting at `bytes`
+  // and describes the buffer with `bytesPerRow`; a silent mismatch between these
+  // and the real pixel buffer renders nothing (Task 15 bug 3). The
+  // authoritative dataSize is the geometric buffer size (stride * height =
+  // DescribeBuffer's expected_byte_count), which must not exceed the pixels we
+  // actually hold. Verify and log the exact args before packing.
+  const int64_t dataSize = d->expected_byte_count;  // stride * height.
+  const int spp = d->samples_per_pixel;
+  const char* colorSpace = (d->color_space == brscan::ica::ColorSpace::kDeviceRGB)
+                               ? "DeviceRGB"
+                               : (d->color_space ==
+                                          brscan::ica::ColorSpace::kDeviceGray
+                                      ? "DeviceGray"
+                                      : "BlackWhite1Bit");
+  os_log(Log(),
+         "PostPage[%d]: image-info args width=%d height=%d bytesPerRow=%lld "
+         "dataStartRow=0 dataNumberOfRows=%d dataSize=%lld bpp=%d components=%d "
+         "colorspace=%{public}s bufferBytes=%zu (match=%d)",
+         pageIndex, width, height, (long long)d->bytes_per_row, height,
+         (long long)dataSize, d->bits_per_pixel, spp, colorSpace, byteCount,
+         byteCount >= static_cast<size_t>(dataSize));
+  if (bytes == nullptr || byteCount < static_cast<size_t>(dataSize)) {
+    os_log_error(Log(),
+                 "PostPage[%d]: buffer too small for image-info (%zu < %lld); "
+                 "not sending",
+                 pageIndex, byteCount, (long long)dataSize);
     return false;
   }
 
@@ -1076,7 +1149,7 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
       imageDict, static_cast<UInt32>(width), static_cast<UInt32>(height),
       static_cast<UInt32>(d->bytes_per_row),
       /*dataStartRow=*/0, /*dataNumberOfRows=*/static_cast<UInt32>(height),
-      static_cast<UInt32>(byteCount), const_cast<uint8_t*>(bytes));
+      static_cast<UInt32>(dataSize), const_cast<uint8_t*>(bytes));
 
   LogNotificationDict("PostPage.progress", imageDict);
 
@@ -1252,10 +1325,14 @@ bool PostFilePage(const ScanJob& job, ICAObject icaObject,
              (long long)size.longLongValue, fileURL.path);
     }
 
-    // Page-done notification: reference the scanner ICAObject like every scanner
-    // notification, and carry the written file path under the document-name key
-    // (VirtualScanner's file mode posts the path here so the host picks up the
-    // saved file).
+    // Page-done notification: reference the DEVICE object like every scanner
+    // notification (Task 15), and carry the EXACT written file path under the
+    // document-name key -- the same absolute path the file was written to
+    // (`<document folder>/<document name>.<document extension>`), so the host
+    // picks up the saved file. Log the exact value sent.
+    os_log(Log(),
+           "PostFilePage[%d]: documentName key path=%{public}s (wrote=%d)",
+           pageIndex, writtenPath.c_str(), wrote);
     CFMutableDictionaryRef pageDict = CFDictionaryCreateMutable(
         nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
         &kCFTypeDictionaryValueCallBacks);
@@ -1324,6 +1401,17 @@ void RunScanWorker(DeviceContext* ctx, ScanJob job) {
   if (connectStatus != brscan::Status::kOk) {
     finalErr = kICADeviceInternalErr;
   } else {
+    // Warm-up handshake (Task 15): the canonical sequence posts warm-up-started
+    // then warm-up-done before any scan pass. Sent against the device object.
+    ICAError wuStart =
+        PostWarmUp(deviceObject, kICANotificationSubTypeWarmUpStarted);
+    ICAError wuDone =
+        PostWarmUp(deviceObject, kICANotificationSubTypeWarmUpDone);
+    os_log(Log(),
+           "ScanWorker: warm-up notifications sent object=0x%08x started=%d "
+           "done=%d",
+           deviceObject, wuStart, wuDone);
+
     std::vector<brscan::ScanResult> pages;
     const brscan::Status scanStatus =
         brscan::RunScan(transport, params, &pages);
@@ -1452,9 +1540,28 @@ ICAError Start(const ScannerObjectInfo* deviceObjectInfo,
   // rewriting the mutable ctx fields. Ownership of the resolved security-scoped
   // URL MOVES from ctx into the job (its access-token lifetime is now per-job,
   // released when the job is destroyed), leaving ctx with nothing to double-free.
+  // Notification object (Task 15 prime fix). Prior builds handed every
+  // ScanProgressStatus / ScannerPageDone / ScannerScanDone the trigger's
+  // ICD_ScannerStartPB::object; the host keys its scan session on the DEVICE
+  // object (ScannerObjectInfo::icaObject, "Apple" in ICD_ScannerCalls.h), so
+  // notifications against the wrong object never completed the scan or rendered
+  // the overview. Prefer the captured device object; fall back to pb->object only
+  // if the framework has not populated it. Log both once so a re-test confirms
+  // which is right.
+  if (deviceObjectInfo && deviceObjectInfo->icaObject != 0) {
+    ctx->deviceObject = deviceObjectInfo->icaObject;
+  }
+  const ICAObject notifyObject =
+      ctx->deviceObject != 0 ? ctx->deviceObject : pb->object;
+  os_log(Log(),
+         "Start: notification object -> deviceObjectInfo->icaObject=0x%08x "
+         "pb->object=0x%08x using=0x%08x",
+         deviceObjectInfo ? deviceObjectInfo->icaObject : 0, pb->object,
+         notifyObject);
+
   ScanJob job;
   job.params = ctx->params;
-  job.deviceObject = pb->object;
+  job.deviceObject = notifyObject;
   job.fileTransfer = ctx->fileTransfer;
   job.transferPlan = ctx->transferPlan;
   job.documentFolderPath = ctx->documentFolderPath;

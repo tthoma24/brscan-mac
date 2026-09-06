@@ -335,6 +335,45 @@ prefers the nested `userScanArea`, falls back to the top-level dict, and probes 
 | `ICAP_BITDEPTH.value`, `ICAP_UNITS.value` | — | Captured for the trace; `ICAP_UNITS` selects the offset/extent conversion, bit depth follows from the mode. |
 | — (no ICA control) | `ScanMode::kTrueGray`, `kErrorDiffusion` | Not exposed; the panel has no natural control for them. |
 
+#### Authoritative per-scan notification sequence (Task 15)
+
+The module diverged from Apple's canonical module→host notification protocol
+(pinned from `ICADevices.framework` `ICAApplication.h` + `ICD_ScannerCalls.h`
+plus reference modules, interface facts only). The corrected sequence, in order:
+
+1. **Warm-up.** Two `kICANotificationTypeDeviceStatusInfo` notifications, the
+   first carrying `kICANotificationSubTypeKey = kICANotificationSubTypeWarmUpStarted`,
+   the second `kICANotificationSubTypeWarmUpDone` (`ICAApplication.h`), before any
+   scan pass. The worker posts these right after a successful connect.
+2. **`kICANotificationTypeScanProgressStatus`** (per pass) — overview pixels via
+   `ICDAddImageInfoToNotificationDictionary`; sent with
+   `ICDSendNotificationAndWaitForReply` (a cancel is `replyCode == userCanceledErr`).
+3. **`kICANotificationTypeScannerPageDone`** — plain `ICDSendNotification`; on
+   file transfer it carries the exact written path under
+   `kICANotificationScannerDocumentNameKey`.
+4. **`kICANotificationTypeScannerScanDone`** — plain `ICDSendNotification`.
+
+**The notification object is the DEVICE object, not the scan trigger (prime
+fix).** Every scanner notification references
+`ScannerObjectInfo::icaObject` (the framework-assigned device object, marked
+"Apple" in `ICD_ScannerCalls.h`) under `kICANotificationICAObjectKey`. Earlier
+builds passed `ICD_ScannerStartPB::object` (the trigger, observed as `0x02000001`
+in logs); the host keys its scan session on the **device** object, so
+notifications against the trigger left Image Capture on "Scanning document"
+forever and never rendered the overview. The device object is captured in
+`OpenSession`/`Start` from `deviceObjectInfo->icaObject` and snapshotted into each
+`ScanJob`; `Start` logs `deviceObjectInfo->icaObject` vs `pb->object` once so a
+re-test confirms which is right.
+
+**Overview image-info args must match the buffer exactly.**
+`ICDAddImageInfoToNotificationDictionary(dict, width, height, bytesPerRow,
+dataStartRow, dataNumberOfRows, dataSize, dataBuffer)` copies `dataSize` bytes and
+describes the row stride with `bytesPerRow`; a silent mismatch renders nothing.
+`PostPage` now sets `bytesPerRow = DescribeBuffer` stride, `dataSize = stride ×
+height` (`expected_byte_count`), `dataStartRow = 0`, `dataNumberOfRows = height`,
+guards that the real buffer is at least `dataSize` bytes, and logs every arg
+(width/height/stride/dataSize/bpp/components/colorspace/bufferBytes).
+
 Reverse direction (device → host), per page: `RunScan` fills a `ScanResult`
 with `format`, `width`, `height`, and native `data`; decision G turns that into
 one full-height image chunk. **Task 14 corrected the in-memory (overview) packer**:
@@ -348,9 +387,10 @@ Band-info keys. Convention confirmed against a working SANE-backed ICA scanner
 module's `ScanProgressStatus` hand-back (interface facts only, no source copied).
 The chunk is carried in a `kICANotificationTypeScanProgressStatus` notification
 (**not** the page-done), and **every** scanner notification (progress /
-`ScannerPageDone` / `ScannerScanDone`) references the device/scanner object's
-framework-assigned `ICAObject` (`ICD_ScannerStartPB::object`) under
-`kICANotificationICAObjectKey`. `PostPage` logs the full notification key set so a
+`ScannerPageDone` / `ScannerScanDone`) references the framework-assigned **device**
+object (`ScannerObjectInfo::icaObject`) under `kICANotificationICAObjectKey` —
+**not** `ICD_ScannerStartPB::object`, corrected in Task 15 (see the authoritative
+sequence above). `PostPage` logs the full notification key set so a
 device-in-the-loop re-test can confirm the host consumes the Image-info keys.
 The Task-7 build did neither — it packed the band into a `ScannerPageDone` and
 tried to mint a per-page object with `ICDNewObject`, which returns `unimpErr`
@@ -372,10 +412,12 @@ public `VirtualScanner` sample module, interface facts only):
 
 - **Overview / preview → in-memory image.** The request carries
   `"scan mode" = overview`, `progressNotificationWithData = 1`, and **no**
-  destination. The module pushes the decoded page as one full-height chunk via
-  `ICDAddImageInfoToNotificationDictionary` (the Task-14 Defect-A fix; see the
-  reverse-direction note above) in a `kICANotificationTypeScanProgressStatus`,
-  then `ScannerPageDone`, then `ScannerScanDone`.
+  destination. The module posts the warm-up pair (Task 15), then pushes the
+  decoded page as one full-height chunk via
+  `ICDAddImageInfoToNotificationDictionary` (the Task-14 Defect-A fix + the
+  Task-15 device-object/arg fixes; see the authoritative sequence above) in a
+  `kICANotificationTypeScanProgressStatus`, then `ScannerPageDone`, then
+  `ScannerScanDone` — all against the device object.
 
 - **Final scan → file-based transfer.** The request carries a security-scoped
   destination folder under `ICSecurityScopedWrappedURL` (a modern icdd key not
@@ -395,10 +437,13 @@ public `VirtualScanner` sample module, interface facts only):
   `<document name>.<extension>` into the folder (multi-page/ADF appends a
   ` N` index; single-page flatbed is the must-pass, multi-page a follow-up);
   `stopAccessingSecurityScopedResource`; then posts a
-  `kICANotificationTypeScannerPageDone` carrying the written path under
-  `kICANotificationScannerDocumentNameKey`, and finally one
-  `kICANotificationTypeScannerScanDone`. Encoding uses ImageIO directly in the
-  module — it does **not** pull in `daemon/output_writer` (different scope).
+  `kICANotificationTypeScannerPageDone` carrying **the exact written absolute
+  path** (`<document folder>/<document name>.<document extension>`) under
+  `kICANotificationScannerDocumentNameKey` — the same path the file was written
+  to, logged verbatim (Task 15) — and finally one
+  `kICANotificationTypeScannerScanDone`, both against the device object. Encoding
+  uses ImageIO directly in the module — it does **not** pull in
+  `daemon/output_writer` (different scope).
 
   For a **local** client (a `"document folder"` is present, as with Image
   Capture saving to `~/Documents`) VirtualScanner writes the file and posts
