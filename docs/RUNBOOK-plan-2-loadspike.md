@@ -218,6 +218,22 @@ sudo ica-module/install-loadspike.sh install
 killall icdd 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.apple.icdd
 ```
 
+**Also kill any already-running module process, not just icdd.** icdd launches
+the module as a *child* process that keeps running after `killall icdd`, so a
+freshly reinstalled bundle does not take effect until the old child dies —
+symptom: the log keeps showing the *previous* build's lines (e.g. an old
+callback string) even though the installed binary is new. Reap the stale child
+too, and confirm the *installed* binary carries your change before re-testing:
+
+```bash
+sudo killall BrscanICALoadSpike 2>/dev/null || true
+# Prove the installed copy (not just build/) has your change — grep a string
+# you added; it is embedded in the binary as an os_log format literal:
+strings "/Library/Image Capture/Devices/BrscanICALoadSpike.app/Contents/MacOS/BrscanICALoadSpike" \
+  | grep "<a string you just added>"
+ps -Ao pid,lstart,comm | grep -i brscan   # no stale PID older than the reinstall
+```
+
 Remove it when done:
 
 ```bash
