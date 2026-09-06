@@ -63,11 +63,25 @@ constexpr int kMeasurementUnitPixels = 5;
 constexpr int kFunctionalUnitFlatbed = 0;
 constexpr int kFunctionalUnitFeeder = 3;
 
-// TWAIN CAP_DUPLEX value for "no duplex" (TWDX_NONE). CAP_FEEDERENABLED /
-// CAP_DUPLEX are advertised so the source and duplex controls appear.
-// CAP_FEEDERENABLED reflects the SELECTED unit: on when the feeder is selected,
-// off for the flatbed. Duplex stays off for both (single-sided this task).
-constexpr int kDuplexNone = 0;
+// Source / duplex control values. CAP_FEEDERENABLED reflects the SELECTED unit
+// (on when the feeder is selected, off for the flatbed) so the source picker
+// tracks the choice. Duplex is a per-unit capability of the document feeder
+// only: the SDK models it as ICScannerFunctionalUnitDocumentFeeder's
+// `supportsDuplexScanning` (readonly BOOL) + `duplexScanningEnabled` (readwrite
+// BOOL) -- ICScannerFunctionalUnits.h lines 802-811 -- which map onto the
+// TWAIN-derived capability dict Image Capture consumes as CAP_DUPLEX (the
+// duplexer type / "supported") and CAP_DUPLEXENABLED (the read/write on-off
+// toggle). To surface a 2-sided control we advertise BOTH for the feeder: a
+// CAP_DUPLEX enumeration [0, 1] (0=TWDX_NONE, 1=TWDX_1PASSDUPLEX; current 0) and
+// a CAP_DUPLEXENABLED enumeration [0, 1] (current 0). The exact key the host
+// echoes back on the scan request is not yet observed live (the control did not
+// render before this task), so both are advertised and the read side honours
+// whichever appears; module_main.mm logs the full request dict to confirm it.
+// The flatbed advertises a fixed CAP_DUPLEX = TWDX_NONE (no control).
+constexpr int kDuplexNone = 0;         // TWDX_NONE.
+constexpr int kDuplexOnePass = 1;      // TWDX_1PASSDUPLEX.
+constexpr int kDuplexEnabledOff = 0;
+constexpr int kDuplexEnabledOn = 1;
 constexpr int kFeederDisabled = 0;
 constexpr int kFeederEnabled = 1;
 
@@ -254,11 +268,23 @@ void BuildScannerParameters(CFMutableDictionaryRef dict,
   NSMutableDictionary* deviceDict =
       [NSMutableDictionary dictionaryWithDictionary:BuildUnit(feeder)];
 
-  // Source (flatbed vs feeder) and duplex controls. TWON_ONEVALUE scalars for
-  // the selected unit: CAP_FEEDERENABLED tracks the selection; duplex stays off.
+  // Source (flatbed vs feeder) and duplex controls for the selected unit.
+  // CAP_FEEDERENABLED tracks the selection. Duplex is a feeder-only capability:
+  // the feeder advertises a changeable CAP_DUPLEX / CAP_DUPLEXENABLED enumeration
+  // so Image Capture renders a 2-sided toggle; the flatbed advertises a fixed
+  // CAP_DUPLEX = TWDX_NONE (no control). See the constants note above.
   deviceDict[@"CAP_FEEDERENABLED"] =
       OneValue(feeder ? kFeederEnabled : kFeederDisabled);
-  deviceDict[@"CAP_DUPLEX"] = OneValue(kDuplexNone);
+  if (feeder) {
+    deviceDict[@"CAP_DUPLEX"] =
+        Enumeration(@[ Int(kDuplexNone), Int(kDuplexOnePass) ], kDuplexNone,
+                    kDuplexNone);
+    deviceDict[@"CAP_DUPLEXENABLED"] =
+        Enumeration(@[ Int(kDuplexEnabledOff), Int(kDuplexEnabledOn) ],
+                    kDuplexEnabledOff, kDuplexEnabledOff);
+  } else {
+    deviceDict[@"CAP_DUPLEX"] = OneValue(kDuplexNone);
+  }
 
   // Which functional units exist and which is selected -- nothing else. The
   // selected type echoes the tracked value so the host's choice sticks.

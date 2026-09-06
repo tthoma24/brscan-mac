@@ -77,8 +77,9 @@ theDict["device"] = {
   "ICAP_PHYSICALHEIGHT": { ... },
   "ICAP_SUPPORTEDSIZES": { ... }, // array of ICScannerDocumentType values
   "ICAP_UNITS":        { ... },   // measurement unit; inches=0 … pixels=5
-  "CAP_FEEDERENABLED": { ... },
-  "CAP_DUPLEX":        { ... },
+  "CAP_FEEDERENABLED": { ... },   // TWON_ONEVALUE; tracks the selected unit
+  "CAP_DUPLEX":        { ... },   // feeder: TWON_ENUMERATION [0,1]; flatbed: fixed 0
+  "CAP_DUPLEXENABLED": { ... },   // feeder only: TWON_ENUMERATION [0,1] toggle
   "functionalUnits": {            // ONLY these two keys
     "availableFunctionalUnitTypes": [ 0, 3 ],
     "selectedFunctionalUnitType": 0
@@ -117,6 +118,36 @@ entries plus scan-area and destination fields. Observed keys:
 Read the scan area in the request's own `ICAP_UNITS` and convert to pixels at
 the chosen DPI (inches × dpi; cm × dpi / 2.54; pixels pass through). The host
 switches its unit to whatever the module advertises for the platen.
+
+### Source selection (flatbed vs feeder)
+
+The host does **not** always echo `selectedFunctionalUnitType` in the scan
+request. When the user picks the Document Feeder and scans, the request carries
+`CAP_FEEDERENABLED == 1` but **no** functional unit — so deriving the source from
+the functional unit alone silently ran every ADF scan as flatbed. Resolve the
+source by precedence (`scan_translate.cpp::ScanRequestFromIcap`, logged as
+`source=<signal>`):
+
+1. an explicit `functionalUnit` / `selectedFunctionalUnitType` in the request;
+2. else `CAP_FEEDERENABLED == 1` → the document feeder (`brscan::Source::kAdf`);
+3. else the unit the module tracked from an earlier unit-switch `SetParameters`
+   (`DeviceContext.selectedFunctionalUnit`);
+4. else flatbed.
+
+### Duplex (2-sided)
+
+Duplex is a document-feeder capability only. The SDK models it on
+`ICScannerFunctionalUnitDocumentFeeder` as `supportsDuplexScanning` (readonly)
+and `duplexScanningEnabled` (readwrite) — `ICScannerFunctionalUnits.h` lines
+802–811 — which map onto the TWAIN-derived dict as `CAP_DUPLEX` (duplexer type;
+`TWDX_NONE=0`, `TWDX_1PASSDUPLEX=1`, `TWDX_2PASSDUPLEX=2`) and `CAP_DUPLEXENABLED`
+(the enable toggle). To make a 2-sided control render, the **feeder** advertises
+both as `TWON_ENUMERATION [0,1]` (current 0); the flatbed advertises a fixed
+`CAP_DUPLEX = 0` (no control). The exact key the host echoes back on the scan
+request is not yet confirmed live, so the read side (`ScanRequestFromIcap`) treats
+any of `duplex` (bool), `CAP_DUPLEX != 0`, or `CAP_DUPLEXENABLED != 0` as
+2-sided; the full request dict is logged so the actual key can be pinned in a
+follow-up. Duplex is honoured only when the resolved source is the feeder.
 
 ### Transfer mode (host-selected, per scan)
 

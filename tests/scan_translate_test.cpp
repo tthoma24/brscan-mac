@@ -387,6 +387,127 @@ TEST(ScanRequestFromIcapTest, FunctionalUnitAndDuplexMapThrough) {
   EXPECT_TRUE(p.duplex);
 }
 
+// ---------------------------------------------------------------------------
+// Source-selection precedence (Task 19). A feeder scan carries CAP_FEEDERENABLED
+// == 1 but no functional unit; without this it defaulted to funit=0 -> flatbed.
+
+// CAP_FEEDERENABLED == 1 with no functional unit selects the feeder (adf).
+TEST(ScanRequestFromIcapTest, FeederEnabledSelectsAdf) {
+  IcapScanSelection sel;
+  sel.has_feeder_enabled = true;
+  sel.feeder_enabled = 1;  // no functional unit present.
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  ASSERT_TRUE(r.has_functional_unit);
+  EXPECT_EQ(r.functional_unit, 3);
+  EXPECT_EQ(r.source_signal, SourceSignal::kFeederEnabled);
+  EXPECT_EQ(TranslateScanParams(r, ScanLimits{}).source, Source::kAdf);
+}
+
+// CAP_FEEDERENABLED == 0 does not force the feeder; it falls through.
+TEST(ScanRequestFromIcapTest, FeederDisabledFallsThrough) {
+  IcapScanSelection sel;
+  sel.has_feeder_enabled = true;
+  sel.feeder_enabled = 0;
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  EXPECT_FALSE(r.has_functional_unit);
+  EXPECT_EQ(r.source_signal, SourceSignal::kNone);
+  EXPECT_EQ(TranslateScanParams(r, ScanLimits{}).source, Source::kFlatbed);
+}
+
+// An explicit functional unit wins over CAP_FEEDERENABLED.
+TEST(ScanRequestFromIcapTest, ExplicitUnitBeatsFeederEnabled) {
+  IcapScanSelection sel;
+  sel.has_functional_unit = true;
+  sel.functional_unit = 0;  // explicit flatbed.
+  sel.has_feeder_enabled = true;
+  sel.feeder_enabled = 1;  // contradicts, but loses.
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  EXPECT_EQ(r.functional_unit, 0);
+  EXPECT_EQ(r.source_signal, SourceSignal::kExplicitUnit);
+  EXPECT_EQ(TranslateScanParams(r, ScanLimits{}).source, Source::kFlatbed);
+}
+
+// With neither an explicit unit nor CAP_FEEDERENABLED, the tracked unit decides.
+TEST(ScanRequestFromIcapTest, TrackedUnitIsTheFallback) {
+  IcapScanSelection sel;
+  sel.has_tracked_functional_unit = true;
+  sel.tracked_functional_unit = 3;  // feeder tracked from an earlier switch.
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  ASSERT_TRUE(r.has_functional_unit);
+  EXPECT_EQ(r.functional_unit, 3);
+  EXPECT_EQ(r.source_signal, SourceSignal::kTrackedUnit);
+  EXPECT_EQ(TranslateScanParams(r, ScanLimits{}).source, Source::kAdf);
+}
+
+// CAP_FEEDERENABLED beats the tracked unit (a fresh feeder request overrides a
+// previously tracked flatbed).
+TEST(ScanRequestFromIcapTest, FeederEnabledBeatsTrackedUnit) {
+  IcapScanSelection sel;
+  sel.has_feeder_enabled = true;
+  sel.feeder_enabled = 1;
+  sel.has_tracked_functional_unit = true;
+  sel.tracked_functional_unit = 0;  // flatbed tracked, but feeder wins.
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  EXPECT_EQ(r.functional_unit, 3);
+  EXPECT_EQ(r.source_signal, SourceSignal::kFeederEnabled);
+}
+
+// Nothing at all -> no unit, signal none, flatbed default.
+TEST(ScanRequestFromIcapTest, NoSourceSignalMeansFlatbedDefault) {
+  const ScanRequest r = ScanRequestFromIcap(IcapScanSelection{});
+  EXPECT_FALSE(r.has_functional_unit);
+  EXPECT_EQ(r.source_signal, SourceSignal::kNone);
+  EXPECT_EQ(TranslateScanParams(r, ScanLimits{}).source, Source::kFlatbed);
+}
+
+// ---------------------------------------------------------------------------
+// Duplex keys (Task 19). The exact key the host echoes for the 2-sided toggle is
+// unobserved, so any of the legacy `duplex` bool, CAP_DUPLEX, or
+// CAP_DUPLEXENABLED being non-zero maps to params.duplex (feeder only).
+
+TEST(ScanRequestFromIcapTest, CapDuplexEnabledMapsToDuplex) {
+  IcapScanSelection sel;
+  sel.has_functional_unit = true;
+  sel.functional_unit = 3;  // feeder.
+  sel.has_cap_duplex_enabled = true;
+  sel.cap_duplex_enabled = 1;
+  EXPECT_TRUE(ScanRequestFromIcap(sel).duplex);
+  EXPECT_TRUE(TranslateScanParams(ScanRequestFromIcap(sel), ScanLimits{}).duplex);
+}
+
+TEST(ScanRequestFromIcapTest, CapDuplexNonZeroMapsToDuplex) {
+  IcapScanSelection sel;
+  sel.has_functional_unit = true;
+  sel.functional_unit = 3;  // feeder.
+  sel.has_cap_duplex = true;
+  sel.cap_duplex = 1;  // TWDX_1PASSDUPLEX.
+  EXPECT_TRUE(ScanRequestFromIcap(sel).duplex);
+  EXPECT_TRUE(TranslateScanParams(ScanRequestFromIcap(sel), ScanLimits{}).duplex);
+}
+
+TEST(ScanRequestFromIcapTest, CapDuplexZeroIsNotDuplex) {
+  IcapScanSelection sel;
+  sel.has_functional_unit = true;
+  sel.functional_unit = 3;  // feeder.
+  sel.has_cap_duplex = true;
+  sel.cap_duplex = 0;  // TWDX_NONE.
+  sel.has_cap_duplex_enabled = true;
+  sel.cap_duplex_enabled = 0;
+  EXPECT_FALSE(ScanRequestFromIcap(sel).duplex);
+}
+
+// Duplex via CAP_DUPLEXENABLED is still gated on the feeder downstream.
+TEST(ScanRequestFromIcapTest, DuplexKeyIgnoredOnFlatbed) {
+  IcapScanSelection sel;
+  sel.has_functional_unit = true;
+  sel.functional_unit = 0;  // flatbed.
+  sel.has_cap_duplex_enabled = true;
+  sel.cap_duplex_enabled = 1;
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  EXPECT_TRUE(r.duplex);  // the key was read,
+  EXPECT_FALSE(TranslateScanParams(r, ScanLimits{}).duplex);  // but flatbed gates.
+}
+
 TEST(ScanRequestFromIcapTest, FullAreaInPixelsIsHonoured) {
   IcapScanSelection sel;
   sel.has_units = true;

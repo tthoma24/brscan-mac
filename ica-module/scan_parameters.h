@@ -15,7 +15,10 @@
 //   device = {
 //     ICAP_XRESOLUTION, ICAP_YRESOLUTION, ICAP_BITDEPTH, ICAP_PIXELTYPE,
 //     ICAP_PHYSICALWIDTH, ICAP_PHYSICALHEIGHT, ICAP_SUPPORTEDSIZES, ICAP_UNITS,
-//     CAP_FEEDERENABLED, CAP_DUPLEX,          // source / duplex controls.
+//     CAP_FEEDERENABLED,                      // source (selected unit).
+//     CAP_DUPLEX [, CAP_DUPLEXENABLED],       // duplex; feeder advertises an
+//                                             // enumeration so a 2-sided toggle
+//                                             // renders, flatbed a fixed none.
 //     functionalUnits : {
 //       availableFunctionalUnitTypes : [0, 3],  // flatbed, documentFeeder.
 //       selectedFunctionalUnitType   : <tracked>,  // 0 flatbed / 3 feeder.

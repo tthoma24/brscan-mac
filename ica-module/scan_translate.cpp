@@ -11,6 +11,14 @@
 
 namespace brscan::ica {
 
+namespace {
+// ICScannerFunctionalUnitType raw value for the document feeder (SDK
+// ICScannerFunctionalUnits.h); any other value is the flatbed. Shared by the
+// source-precedence resolution in ScanRequestFromIcap and the source mapping in
+// TranslateScanParams so the two never diverge.
+constexpr int kFeederFunctionalUnit = 3;
+}  // namespace
+
 int DocumentTypeForPaperToken(const std::string& token) {
   // Tokens are the exact, upper-case daemon/paper_size.cpp names. PHOTO and
   // BCARD have no clean ICScannerDocumentType case, so they map to "none" and
@@ -72,11 +80,35 @@ ScanRequest ScanRequestFromIcap(const IcapScanSelection& sel) {
     req.pixel_type = sel.pixel_type;
   }
 
+  // Source precedence (Task 19). The host can signal the feeder three ways, so
+  // resolve the source in priority order and record which signal won -- a feeder
+  // scan that carried only CAP_FEEDERENABLED (no functional unit) previously
+  // defaulted to funit=0 -> flatbed and hit the glass.
+  //   1. an explicit functionalUnit / selectedFunctionalUnitType, else
+  //   2. CAP_FEEDERENABLED == 1 -> the document feeder, else
+  //   3. the tracked unit from an earlier unit-switch SetParameters, else
+  //   4. absent -> TranslateScanParams defaults to the flatbed.
   if (sel.has_functional_unit) {
     req.has_functional_unit = true;
     req.functional_unit = sel.functional_unit;
+    req.source_signal = SourceSignal::kExplicitUnit;
+  } else if (sel.has_feeder_enabled && sel.feeder_enabled != 0) {
+    req.has_functional_unit = true;
+    req.functional_unit = kFeederFunctionalUnit;
+    req.source_signal = SourceSignal::kFeederEnabled;
+  } else if (sel.has_tracked_functional_unit) {
+    req.has_functional_unit = true;
+    req.functional_unit = sel.tracked_functional_unit;
+    req.source_signal = SourceSignal::kTrackedUnit;
   }
-  req.duplex = sel.duplex;
+
+  // Duplex: honour any observed duplex key. The exact key the host echoes for
+  // the 2-sided toggle is not yet confirmed live, so the legacy `duplex` bool,
+  // CAP_DUPLEX (!= 0), and CAP_DUPLEXENABLED (!= 0) are all treated as "on".
+  // TranslateScanParams gates this on the feeder.
+  req.duplex = sel.duplex ||
+               (sel.has_cap_duplex_enabled && sel.cap_duplex_enabled != 0) ||
+               (sel.has_cap_duplex && sel.cap_duplex != 0);
 
   // Scan area: honour the offset+extent only with a complete rectangle whose
   // unit converts to pixels. The host reports the rectangle in ICAP_UNITS; an
@@ -114,7 +146,6 @@ namespace {
 constexpr int kPixelTypeBW = 0;
 constexpr int kPixelTypeGray = 1;
 constexpr int kPixelTypeRGB = 2;
-constexpr int kFunctionalUnitFeeder = 3;  // else flatbed.
 
 int Clamp(int v, int lo, int hi) { return std::max(lo, std::min(v, hi)); }
 
@@ -151,7 +182,7 @@ Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
 
   // Functional unit -> source. Duplex is only meaningful for the feeder.
   const bool feeder =
-      req.has_functional_unit && req.functional_unit == kFunctionalUnitFeeder;
+      req.has_functional_unit && req.functional_unit == kFeederFunctionalUnit;
   p.source = feeder ? Source::kAdf : Source::kFlatbed;
   p.duplex = feeder && req.duplex;
 
