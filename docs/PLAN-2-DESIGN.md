@@ -315,26 +315,46 @@ contrast are **not** scalar client capabilities (they are `vendorFeatures` /
 selection back through `ICD_ScannerSetParameters`; the module reads the real
 keys, each presence-aware (a missing key falls back to the design default):
 
-| Echoed key | `brscan::Params` field | Notes |
+Task 11 live trace corrected the on-the-wire shape: the host does **not** send
+flat top-level keys. It sends ONE top-level `userScanArea` dictionary whose
+entries are TWAIN `{type, value[, current]}` sub-dicts. `ReadScanRequest`
+(`ica-module/module_main.mm`) does the CoreFoundation traversal — read each
+entry's `value`, falling back to `current` — into a plain `IcapScanSelection`,
+and the pure, unit-tested `scan_translate.h::ScanRequestFromIcap` maps that to a
+`ScanRequest` (which `TranslateScanParams` then turns into `Params`). The parse
+prefers the nested `userScanArea`, falls back to the top-level dict, and probes a
+`device` wrapper, so it survives either shape.
+
+| Nested `userScanArea` entry | `brscan::Params` field | Notes |
 |---|---|---|
-| `ICAP_XRESOLUTION` (number) | `x_dpi`, `y_dpi` | Same value both axes; clamped to the offered max. Default 300. |
-| `scan mode` (string) | `mode` | Best-effort case-insensitive map to a pixel type (black/bw/bitonal/text → `kBlackWhite`, gray → `kGray`, else `kColor`); exact string vocabulary is device-in-the-loop. |
-| `selectedFunctionalUnitType` (number) | `source` | Flatbed `0` → `Source::kFlatbed`; feeder `3` → `Source::kAdf`. |
+| `ICAP_XRESOLUTION.value` (falls back to `ICAP_YRESOLUTION.value`) | `x_dpi`, `y_dpi` | Same value both axes; clamped to the offered max. Default 300. |
+| `ICAP_PIXELTYPE.value` (0/1/2) | `mode` | `0 → kBlackWhite`, `1 → kGray`, `2 → kColor`. (The old `"scan mode"` string heuristic is retired — the host sends the numeric pixel type.) |
+| `selectedFunctionalUnitType.value` | `source` | Flatbed `0` → `Source::kFlatbed`; feeder `3` → `Source::kAdf`. Probed nested then top-level. |
 | `duplex` (bool) | `duplex` | Only honoured for `kAdf`. |
-| `userScanArea` (dict: `offsetX`,`offsetY`,`width`,`height`) | `area` (`Area{x0,y0,x1,y1}`, pixels — `ICAP_UNITS`) | `x0=offsetX`, `y0=offsetY`, `x1=offsetX+width`, `y1=offsetY+height`, via the pure, unit-tested `scan_translate.h::CornersFromUserScanArea`. A degenerate/absent rect means `{0,0,0,0}` = "full offered area," which `RunScan` honours. |
-| `ICAP_UNITS`, `document folder`/`name`/`extension`/`format`, `ColorSyncMode` | — | Logged for the live trace; the destination strings do not affect the in-memory band hand-back. |
+| scan-rectangle offset + extent (in `ICAP_UNITS`) | `area` (`Area{x0,y0,x1,y1}`) | `x0=offsetX`, `y0=offsetY`, `x1=offsetX+width`, `y1=offsetY+height`, via the pure `CornersFromUserScanArea`; honoured only with a full positive rect and pixel units (`ICAP_UNITS == 5`) or unspecified units. A degenerate/absent rect means `{0,0,0,0}` = "full offered area." **The exact offset/extent key names are still device-in-the-loop** (the live log truncated before them); `ReadScanRequest` probes the likeliest spellings and logs the FULL `userScanArea` dict so a re-test confirms them. |
+| `ICAP_BITDEPTH.value`, `ICAP_UNITS.value` | — | Captured for the trace; `ICAP_UNITS` gates the area, bit depth follows from the mode. |
 | — (no ICA control) | `ScanMode::kTrueGray`, `kErrorDiffusion` | Not exposed; the panel has no natural control for them. |
 
 Reverse direction (device → host), per page: `RunScan` fills a `ScanResult`
 with `format`, `width`, `height`, and native `data`; decision G turns that into
-the host's band buffer via `ICDAddBandInfoToNotificationDictionary`. Each
-`kICANotificationTypeScannerPageDone` now also carries
-`kICANotificationICAObjectKey` — a per-page image `ICAObject` minted as a child
-of the device object with `ICDNewObject` — which the public headers say the page
-notification must reference. The `Offer` the device returns from `ESC I` gives
-the true maximum resolution and pixel dimensions, which the module should use to
-bound the parameter ranges it advertises to the host so the UI never offers an
-impossible value.
+one full-height band via `ICDAddBandInfoToNotificationDictionary`. Task 11
+corrected the notification orchestration against the ICADevices reference modules
+(interface facts only): the band is carried in a
+`kICANotificationTypeScanProgressStatus` notification (**not** the page-done),
+and **every** scanner notification (progress / `ScannerPageDone` /
+`ScannerScanDone`) references the device/scanner object's framework-assigned
+`ICAObject` (`ICD_ScannerStartPB::object`) under `kICANotificationICAObjectKey`.
+The Task-7 build did neither — it packed the band into a `ScannerPageDone` and
+tried to mint a per-page object with `ICDNewObject`, which returns `unimpErr`
+(-4) in the scanner-module runtime (it is the legacy generic object API and is
+not serviced for scanner modules). No object is minted on the in-memory band
+path; the scanner-specific `ICDScannerNewObjectInfoCreated` +
+`kICANotificationTypeObjectAdded` + `kICANotificationScannerDocumentNameKey`
+belong to the alternative file-based transfer mode (the documented fallback if
+the band path does not render). The `Offer` the device returns from `ESC I`
+gives the true maximum resolution and pixel dimensions, which bound the
+parameter ranges advertised to the host so the UI never offers an impossible
+value.
 
 ## Testing strategy
 

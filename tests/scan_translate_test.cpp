@@ -259,5 +259,131 @@ TEST(CornersFromUserScanAreaTest, FeedsTranslateScanParams) {
   EXPECT_EQ(p.area.y1, 306);
 }
 
+// ---------------------------------------------------------------------------
+// Nested ICAP selection (host's userScanArea entries) -> ScanRequest. Pure; the
+// CoreFoundation traversal that fills IcapScanSelection lives in module_main.mm.
+TEST(ScanRequestFromIcapTest, EmptySelectionIsAllAbsent) {
+  const ScanRequest r = ScanRequestFromIcap(IcapScanSelection{});
+  EXPECT_FALSE(r.has_resolution);
+  EXPECT_FALSE(r.has_pixel_type);
+  EXPECT_FALSE(r.has_functional_unit);
+  EXPECT_FALSE(r.has_area);
+  // Feeds the defaults end to end.
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.x_dpi, kDefaultDpi);
+  EXPECT_EQ(p.mode, ScanMode::kColor);
+  EXPECT_EQ(p.source, Source::kFlatbed);
+}
+
+TEST(ScanRequestFromIcapTest, ResolutionPixelTypeAndUnitMapThrough) {
+  IcapScanSelection sel;
+  sel.has_x_resolution = true;
+  sel.x_resolution = 100;
+  sel.has_pixel_type = true;
+  sel.pixel_type = 2;  // RGB.
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  ASSERT_TRUE(r.has_resolution);
+  EXPECT_EQ(r.resolution, 100);
+  ASSERT_TRUE(r.has_pixel_type);
+  EXPECT_EQ(r.pixel_type, 2);
+  // End to end: the host's 100 dpi + RGB is honoured (the Task-7 bug ignored it).
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.x_dpi, 100);
+  EXPECT_EQ(p.y_dpi, 100);
+  EXPECT_EQ(p.mode, ScanMode::kColor);
+}
+
+TEST(ScanRequestFromIcapTest, ResolutionFallsBackToYAxis) {
+  IcapScanSelection sel;
+  sel.has_y_resolution = true;
+  sel.y_resolution = 200;  // X absent.
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  ASSERT_TRUE(r.has_resolution);
+  EXPECT_EQ(r.resolution, 200);
+}
+
+TEST(ScanRequestFromIcapTest, NonPositiveResolutionIsAbsent) {
+  IcapScanSelection sel;
+  sel.has_x_resolution = true;
+  sel.x_resolution = 0;
+  EXPECT_FALSE(ScanRequestFromIcap(sel).has_resolution);
+}
+
+TEST(ScanRequestFromIcapTest, PixelTypeGrayAndBwMapThrough) {
+  auto mode_for = [](int pixel_type) {
+    IcapScanSelection sel;
+    sel.has_pixel_type = true;
+    sel.pixel_type = pixel_type;
+    return TranslateScanParams(ScanRequestFromIcap(sel), ScanLimits{}).mode;
+  };
+  EXPECT_EQ(mode_for(0), ScanMode::kBlackWhite);
+  EXPECT_EQ(mode_for(1), ScanMode::kGray);
+  EXPECT_EQ(mode_for(2), ScanMode::kColor);
+}
+
+TEST(ScanRequestFromIcapTest, FunctionalUnitAndDuplexMapThrough) {
+  IcapScanSelection sel;
+  sel.has_functional_unit = true;
+  sel.functional_unit = 3;  // feeder.
+  sel.duplex = true;
+  const Params p = TranslateScanParams(ScanRequestFromIcap(sel), ScanLimits{});
+  EXPECT_EQ(p.source, Source::kAdf);
+  EXPECT_TRUE(p.duplex);
+}
+
+TEST(ScanRequestFromIcapTest, FullAreaInPixelsIsHonoured) {
+  IcapScanSelection sel;
+  sel.has_units = true;
+  sel.units = kIcapUnitsPixels;
+  sel.has_offset_x = true;
+  sel.offset_x = 10;
+  sel.has_offset_y = true;
+  sel.offset_y = 20;
+  sel.has_width = true;
+  sel.width = 500;
+  sel.has_height = true;
+  sel.height = 700;
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  ASSERT_TRUE(r.has_area);
+  EXPECT_EQ(r.area_x0, 10);
+  EXPECT_EQ(r.area_y0, 20);
+  EXPECT_EQ(r.area_x1, 510);
+  EXPECT_EQ(r.area_y1, 720);
+}
+
+TEST(ScanRequestFromIcapTest, AreaHonouredWhenUnitsUnspecified) {
+  IcapScanSelection sel;  // has_units == false.
+  sel.has_offset_x = true;
+  sel.has_offset_y = true;
+  sel.has_width = true;
+  sel.width = 100;
+  sel.has_height = true;
+  sel.height = 200;
+  EXPECT_TRUE(ScanRequestFromIcap(sel).has_area);
+}
+
+TEST(ScanRequestFromIcapTest, NonPixelUnitsRejectArea) {
+  IcapScanSelection sel;
+  sel.has_units = true;
+  sel.units = 1;  // e.g. inches -- not pixels; area geometry is unknown.
+  sel.has_offset_x = true;
+  sel.has_offset_y = true;
+  sel.has_width = true;
+  sel.width = 100;
+  sel.has_height = true;
+  sel.height = 200;
+  EXPECT_FALSE(ScanRequestFromIcap(sel).has_area);
+}
+
+TEST(ScanRequestFromIcapTest, PartialAreaIsNotHonoured) {
+  IcapScanSelection sel;
+  sel.has_offset_x = true;
+  sel.has_offset_y = true;
+  sel.has_width = true;
+  sel.width = 100;
+  // height absent.
+  EXPECT_FALSE(ScanRequestFromIcap(sel).has_area);
+}
+
 }  // namespace
 }  // namespace brscan::ica

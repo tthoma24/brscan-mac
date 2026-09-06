@@ -34,6 +34,49 @@ bool CornersFromUserScanArea(int offset_x, int offset_y, int width, int height,
   return true;
 }
 
+ScanRequest ScanRequestFromIcap(const IcapScanSelection& sel) {
+  ScanRequest req;
+
+  // Resolution: prefer X, fall back to Y (the host sends both, equal). A
+  // non-positive value is treated as absent so the default (300) applies.
+  if (sel.has_x_resolution && sel.x_resolution > 0) {
+    req.has_resolution = true;
+    req.resolution = sel.x_resolution;
+  } else if (sel.has_y_resolution && sel.y_resolution > 0) {
+    req.has_resolution = true;
+    req.resolution = sel.y_resolution;
+  }
+
+  if (sel.has_pixel_type) {
+    req.has_pixel_type = true;
+    req.pixel_type = sel.pixel_type;
+  }
+
+  if (sel.has_functional_unit) {
+    req.has_functional_unit = true;
+    req.functional_unit = sel.functional_unit;
+  }
+  req.duplex = sel.duplex;
+
+  // Scan area: honour the offset+extent only with a complete rectangle and
+  // pixel units (or unspecified units); CornersFromUserScanArea rejects a
+  // degenerate rect, leaving has_area false (full offered area).
+  const bool units_ok = !sel.has_units || sel.units == kIcapUnitsPixels;
+  if (units_ok && sel.has_offset_x && sel.has_offset_y && sel.has_width &&
+      sel.has_height) {
+    Area corners{};
+    if (CornersFromUserScanArea(sel.offset_x, sel.offset_y, sel.width,
+                                sel.height, &corners)) {
+      req.has_area = true;
+      req.area_x0 = corners.x0;
+      req.area_y0 = corners.y0;
+      req.area_x1 = corners.x1;
+      req.area_y1 = corners.y1;
+    }
+  }
+  return req;
+}
+
 namespace {
 
 // ImageCaptureCore client enum values the module advertises and the host echoes.
