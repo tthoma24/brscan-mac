@@ -276,6 +276,22 @@ void ReadIcapDouble(CFDictionaryRef parent, CFStringRef key, bool* has,
   }
 }
 
+// Human-readable name of the signal that decided the scan source, for tracing a
+// feeder scan that unexpectedly ran as flatbed (or vice versa).
+const char* SourceSignalName(brscan::ica::SourceSignal signal) {
+  switch (signal) {
+    case brscan::ica::SourceSignal::kNone:
+      return "none(flatbed-default)";
+    case brscan::ica::SourceSignal::kExplicitUnit:
+      return "explicit-unit";
+    case brscan::ica::SourceSignal::kFeederEnabled:
+      return "CAP_FEEDERENABLED";
+    case brscan::ica::SourceSignal::kTrackedUnit:
+      return "tracked-unit";
+  }
+  return "?";
+}
+
 // Reads the host's SetParameters CFDictionary into a framework-free ScanRequest.
 // Plan 2 Task 11 live trace: the host nests the ICAP_* selection inside ONE
 // top-level `userScanArea` dictionary, each entry a TWAIN {type, value[,current]}
@@ -287,7 +303,12 @@ void ReadIcapDouble(CFDictionaryRef parent, CFStringRef key, bool* has,
 // here; the pure integers -> ScanRequest mapping is scan_translate's
 // ScanRequestFromIcap (unit-tested), and the userScanArea -> corners conversion
 // is CornersFromUserScanArea (also unit-tested).
-brscan::ica::ScanRequest ReadScanRequest(CFDictionaryRef dict) {
+// `trackedFunctionalUnit` is the unit the module recorded from an earlier
+// unit-switch SetParameters (DeviceContext.selectedFunctionalUnit), or a
+// negative value when there is no device context. It is the source fallback used
+// only when the request carries neither an explicit unit nor CAP_FEEDERENABLED.
+brscan::ica::ScanRequest ReadScanRequest(CFDictionaryRef dict,
+                                         int trackedFunctionalUnit) {
   CFDictionaryRef area = GetSubDict(dict, CFSTR("userScanArea"));
   if (!area) {
     CFDictionaryRef device = GetSubDict(dict, CFSTR("device"));
@@ -313,15 +334,48 @@ brscan::ica::ScanRequest ReadScanRequest(CFDictionaryRef dict) {
                 &sel.bit_depth);
   ReadIcapEntry(src, CFSTR("ICAP_UNITS"), &sel.has_units, &sel.units);
 
-  // Functional unit / duplex: prefer the nested source, fall back to top level.
+  // Functional unit: prefer the nested source, fall back to top level.
   ReadIcapEntry(src, CFSTR("selectedFunctionalUnitType"),
                 &sel.has_functional_unit, &sel.functional_unit);
   if (!sel.has_functional_unit) {
     ReadIcapEntry(dict, CFSTR("selectedFunctionalUnitType"),
                   &sel.has_functional_unit, &sel.functional_unit);
   }
+
+  // CAP_FEEDERENABLED: the feeder scan request carries this (== 1) but NO
+  // functional unit, so it is the signal that decides the source when no unit is
+  // present. Prefer the nested source, fall back to top level.
+  ReadIcapEntry(src, CFSTR("CAP_FEEDERENABLED"), &sel.has_feeder_enabled,
+                &sel.feeder_enabled);
+  if (!sel.has_feeder_enabled) {
+    ReadIcapEntry(dict, CFSTR("CAP_FEEDERENABLED"), &sel.has_feeder_enabled,
+                  &sel.feeder_enabled);
+  }
+
+  // The tracked unit is the last source fallback (see ReadScanRequest contract).
+  if (trackedFunctionalUnit >= 0) {
+    sel.has_tracked_functional_unit = true;
+    sel.tracked_functional_unit = trackedFunctionalUnit;
+  }
+
+  // Duplex: the legacy plain `duplex` bool plus the TWAIN duplex capability keys
+  // (CAP_DUPLEX = duplexer type, CAP_DUPLEXENABLED = enable toggle). The exact
+  // key the host echoes for the 2-sided control is not yet observed live, so all
+  // three are read and ScanRequestFromIcap treats any non-zero as "on"; the FULL
+  // request dump above captures whichever key actually appears for follow-up.
   if (!CopyBoolParam(src, CFSTR("duplex"), &sel.duplex)) {
     CopyBoolParam(dict, CFSTR("duplex"), &sel.duplex);
+  }
+  ReadIcapEntry(src, CFSTR("CAP_DUPLEX"), &sel.has_cap_duplex, &sel.cap_duplex);
+  if (!sel.has_cap_duplex) {
+    ReadIcapEntry(dict, CFSTR("CAP_DUPLEX"), &sel.has_cap_duplex,
+                  &sel.cap_duplex);
+  }
+  ReadIcapEntry(src, CFSTR("CAP_DUPLEXENABLED"), &sel.has_cap_duplex_enabled,
+                &sel.cap_duplex_enabled);
+  if (!sel.has_cap_duplex_enabled) {
+    ReadIcapEntry(dict, CFSTR("CAP_DUPLEXENABLED"),
+                  &sel.has_cap_duplex_enabled, &sel.cap_duplex_enabled);
   }
 
   // Scan rectangle offset/extent. The exact key spellings are device-in-the-loop
@@ -336,11 +390,16 @@ brscan::ica::ScanRequest ReadScanRequest(CFDictionaryRef dict) {
 
   os_log(Log(),
          "ReadScanRequest: parsed xres=%d(has=%d) yres=%d pixeltype=%d(has=%d) "
-         "bitdepth=%d units=%d funit=%d(has=%d) area=%d(%d,%d,%d,%d)",
+         "bitdepth=%d units=%d funit=%d(has=%d) feederEnabled=%d(has=%d) "
+         "tracked=%d capDuplex=%d(has=%d) capDuplexEnabled=%d(has=%d) "
+         "source=%{public}s resolvedFunit=%d duplex=%d area=%d(%d,%d,%d,%d)",
          sel.x_resolution, sel.has_x_resolution, sel.y_resolution,
          sel.pixel_type, sel.has_pixel_type, sel.bit_depth, sel.units,
-         sel.functional_unit, sel.has_functional_unit, req.has_area,
-         req.area_x0, req.area_y0, req.area_x1, req.area_y1);
+         sel.functional_unit, sel.has_functional_unit, sel.feeder_enabled,
+         sel.has_feeder_enabled, trackedFunctionalUnit, sel.cap_duplex,
+         sel.has_cap_duplex, sel.cap_duplex_enabled, sel.has_cap_duplex_enabled,
+         SourceSignalName(req.source_signal), req.functional_unit, req.duplex,
+         req.has_area, req.area_x0, req.area_y0, req.area_x1, req.area_y1);
   return req;
 }
 
@@ -857,24 +916,32 @@ ICAError SetParameters(const ScannerObjectInfo* deviceObjectInfo,
     LogFullDict("SetParameters.dict", pb->theDict);
 
     // Translate the host's selection to a brscan::Params and stash it on the
-    // device context for ICD_ScannerStart to scan with.
-    brscan::ica::ScanRequest req = ReadScanRequest(pb->theDict);
+    // device context for ICD_ScannerStart to scan with. The tracked unit (from an
+    // earlier unit-switch SetParameters) is the last source fallback, so pass it
+    // in; -1 means "no context" so the fallback is skipped.
+    const int trackedUnit = ctx ? ctx->selectedFunctionalUnit : -1;
+    brscan::ica::ScanRequest req = ReadScanRequest(pb->theDict, trackedUnit);
     brscan::ica::ScanLimits limits;  // default max_dpi = highest offer (600).
     brscan::Params params = brscan::ica::TranslateScanParams(req, limits);
     if (ctx) ctx->params = params;
 
     // Track the host's functional-unit selection so the next GetParameters
-    // advertises it (0=flatbed, 3=feeder). On the unit-switch round-trip the
-    // host sends ONLY selectedFunctionalUnitType (no resolution/pixeltype), so
-    // update the tracked unit whenever the request carries it and leave it
-    // unchanged otherwise. Answering GetParameters with this value is what stops
-    // the feeder-selection loop.
-    if (ctx && req.has_functional_unit) {
+    // advertises it (0=flatbed, 3=feeder). Update only on an EXPLICIT unit or a
+    // CAP_FEEDERENABLED signal -- a source resolved from the tracked value would
+    // just rewrite the same value, and logging it every scan would be noise. On
+    // the unit-switch round-trip the host sends ONLY selectedFunctionalUnitType
+    // (no resolution/pixeltype); answering GetParameters with this tracked value
+    // is what stops the feeder-selection loop.
+    if (ctx &&
+        (req.source_signal == brscan::ica::SourceSignal::kExplicitUnit ||
+         req.source_signal == brscan::ica::SourceSignal::kFeederEnabled)) {
       ctx->selectedFunctionalUnit = req.functional_unit;
       os_log(Log(),
-             "SetParameters: tracked selectedFunctionalUnitType=%d (%{public}s)",
+             "SetParameters: tracked selectedFunctionalUnitType=%d (%{public}s) "
+             "via %{public}s",
              req.functional_unit,
-             req.functional_unit == 3 ? "feeder" : "flatbed");
+             req.functional_unit == 3 ? "feeder" : "flatbed",
+             SourceSignalName(req.source_signal));
     }
 
     // Detect file-based vs overview/memory transfer for this scan.

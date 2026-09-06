@@ -93,6 +93,17 @@ inline constexpr int kMeasureInvalid = -2147483647;  // INT_MIN + 1.
 // Pure.
 int PixelsFromMeasure(double value, int unit, int dpi);
 
+// Which of the source-selection signals decided the scan source. The host can
+// indicate the document feeder three different ways (an explicit functional
+// unit, CAP_FEEDERENABLED == 1, or the unit tracked from an earlier unit-switch
+// SetParameters); this records which one won so the decision can be logged.
+enum class SourceSignal {
+  kNone,          // No signal present -> flatbed default.
+  kExplicitUnit,  // functionalUnit / selectedFunctionalUnitType in the request.
+  kFeederEnabled,  // CAP_FEEDERENABLED == 1 in the request.
+  kTrackedUnit,   // The DeviceContext.selectedFunctionalUnit fallback.
+};
+
 // The host's scan selection, extracted from the SetParameters CFDictionary into
 // a plain, framework-free struct. Each optional field carries a `has_*` flag so
 // that an absent selection falls back to the design defaults rather than to a
@@ -107,6 +118,11 @@ struct ScanRequest {
 
   bool has_functional_unit = false;
   int functional_unit = 0;  // ICScannerFunctionalUnitType: 0=Flatbed, 3=Feeder.
+
+  // Which signal decided `functional_unit` (set by ScanRequestFromIcap). Purely
+  // diagnostic: module_main.mm logs it so a feeder scan that still ran as flatbed
+  // can be traced to the missing signal. Does not affect TranslateScanParams.
+  SourceSignal source_signal = SourceSignal::kNone;
 
   bool duplex = false;  // Only honoured for the document feeder.
 
@@ -160,7 +176,33 @@ struct IcapScanSelection {
   bool has_functional_unit = false;
   int functional_unit = 0;  // 0=Flatbed, 3=DocumentFeeder.
 
-  bool duplex = false;
+  // CAP_FEEDERENABLED as echoed in the scan request. When the user picks the
+  // feeder and scans, the host sends CAP_FEEDERENABLED == 1 but (per the live
+  // trace) NO functional unit, so this is the signal that a feeder scan is
+  // wanted when `has_functional_unit` is false. 0 = disabled, 1 = enabled.
+  bool has_feeder_enabled = false;
+  int feeder_enabled = 0;
+
+  // The functional unit the module tracked from an earlier unit-switch
+  // SetParameters (DeviceContext.selectedFunctionalUnit). Used as the source
+  // fallback when the current request carries neither an explicit unit nor
+  // CAP_FEEDERENABLED. Absent (has_* false) when there is no device context.
+  bool has_tracked_functional_unit = false;
+  int tracked_functional_unit = 0;  // 0=Flatbed, 3=DocumentFeeder.
+
+  bool duplex = false;  // Legacy plain `duplex` bool key, if the host sends it.
+
+  // The TWAIN duplex capabilities the host may echo back for the feeder. The
+  // exact key that carries the 2-sided toggle is not yet observed live (the
+  // control did not render before this task advertised it), so ScanRequestFromIcap
+  // treats any of these as "duplex on": CAP_DUPLEX (TWAIN duplexer type; 0=none,
+  // 1=1-pass, 2=2-pass) and CAP_DUPLEXENABLED (the read/write enable toggle,
+  // 0/1). module_main.mm logs the full request dict so the actual key can be
+  // confirmed and this narrowed in a follow-up.
+  bool has_cap_duplex = false;
+  int cap_duplex = 0;
+  bool has_cap_duplex_enabled = false;
+  int cap_duplex_enabled = 0;
 
   // Scan rectangle in ICAP_UNITS (offset + extent), as doubles because a
   // non-pixel unit (inches) carries fractional values like 8.5. Presence-aware
@@ -178,8 +220,16 @@ struct IcapScanSelection {
 };
 
 // Turns the raw nested ICAP selection into a ScanRequest. Pure. Resolution
-// prefers ICAP_XRESOLUTION and falls back to ICAP_YRESOLUTION; pixel type and
-// functional unit map straight through. The offset+extent become the scan area
+// prefers ICAP_XRESOLUTION and falls back to ICAP_YRESOLUTION; pixel type maps
+// straight through. The scan SOURCE is resolved by precedence (recorded in
+// ScanRequest.source_signal): an explicit functionalUnit /
+// selectedFunctionalUnitType wins, else CAP_FEEDERENABLED == 1 selects the
+// document feeder, else the tracked_functional_unit fallback, else absent (so
+// TranslateScanParams defaults to the flatbed). This is the fix for a feeder
+// scan that carried only CAP_FEEDERENABLED and therefore ran as flatbed. Duplex
+// is set from any observed duplex key (the legacy `duplex` bool, CAP_DUPLEX != 0,
+// or CAP_DUPLEXENABLED != 0) and is honoured only for the feeder downstream. The
+// offset+extent become the scan area
 // only when the full rectangle is present, the unit converts to pixels
 // (inches/cm/pixels, via PixelsFromMeasure at the request's dpi -- default 300
 // when the host sends no resolution; an unspecified unit is treated as pixels),
