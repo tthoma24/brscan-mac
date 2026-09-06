@@ -1,92 +1,101 @@
-// Plan 2 Task 2 — scanner parameter enumeration for the ICA module.
+// Plan 2 Task 8 — scanner capability enumeration for the ICA module.
 // See scan_parameters.h for the contract and the clean-room note on keys.
 
 #import "scan_parameters.h"
 
 #import <Foundation/Foundation.h>
 
+#include <algorithm>
 #include <optional>
 #include <string>
-#include <vector>
 
-#include "paper_size.h"     // daemon/ — reused ground-truth paper geometry.
-#include "brscan/types.h"   // brscan::Area.
+#include "brscan/types.h"    // brscan::Area.
+#include "paper_size.h"      // daemon/ — reused ground-truth paper geometry.
+#include "scan_translate.h"  // DocumentTypeForPaperToken + the doc-type values.
 
 namespace brscan::ica {
 
 namespace {
 
-// Reference resolution the advertised paper extents are reported at. The host
-// scales its own picker; the geometry table is captured at 300 dpi
-// (daemon/paper_size.cpp), so report the extents there to avoid rounding.
+// Reference resolution the advertised paper extents are reported at. ICAP_UNITS
+// is advertised as pixels (below), and pixel extents depend on dpi, so the
+// PHYSICALWIDTH/HEIGHT extents are captured at 300 dpi to match the ground-truth
+// geometry table (daemon/paper_size.cpp) exactly.
 constexpr int kReferenceDpi = 300;
 
-// Resolutions the Brother MFC-J6920DW offers over the raw-scan protocol. These
-// are device black-box facts (the ESC I offer), advertised statically here so
-// the panel can show a picker without a live query; the scan-execution task
-// will clamp the chosen value to the live ESC I offer per PLAN-2-DESIGN.md.
+// Resolutions the Brother MFC-J6920DW offers over the raw-scan protocol (device
+// black-box facts; the scan-execution path clamps the chosen value to the live
+// ESC I offer per PLAN-2-DESIGN.md). Advertised as ICAP_XRESOLUTION /
+// ICAP_YRESOLUTION.
 constexpr int kResolutions[] = {100, 150, 200, 300, 400, 600};
+constexpr int kDefaultResolution = 300;
 
-// Client-side enum values (ImageCaptureCore, public headers):
-//   ICScannerPixelDataTypeBW=0, Gray=1, RGB=2
-//   ICScannerBitDepth1Bit=1, 8Bits=8
-//   ICScannerFunctionalUnitTypeFlatbed=0, DocumentFeeder=3
-constexpr int kPixelTypeBW = 0;
-constexpr int kPixelTypeGray = 1;
-constexpr int kPixelTypeRGB = 2;
+// ICScannerBitDepth values (SDK ICScannerFunctionalUnits.h): 1-bit for
+// black-and-white, 8-bit otherwise. The raw value equals the bit count. The
+// colour choice rides on ICAP_BITDEPTH plus the pixel type at scan time; we do
+// NOT advertise a separate pixel-data-type list (no client mirror).
+constexpr int kBitDepth1 = 1;
+constexpr int kBitDepth8 = 8;
+constexpr int kDefaultBitDepth = 8;
+
+// ICScannerMeasurementUnit value for pixels (SDK: inches=0, cm=1, picas=2,
+// points=3, twips=4, pixels=5). Advertised as ICAP_UNITS so the host's scan-area
+// geometry stays in the same pixel space the module already scans in.
+constexpr int kMeasurementUnitPixels = 5;
+
+// ICScannerFunctionalUnitType values (SDK): flatbed=0, documentFeeder=3.
 constexpr int kFunctionalUnitFlatbed = 0;
 constexpr int kFunctionalUnitFeeder = 3;
 
-// A standard paper size we expose, keyed by the daemon table's P= token.
-struct PaperChoice {
-  const char* token;       // exact daemon/paper_size.cpp token.
-  const char* displayName;
-  bool flatbedOnly;        // corner-registered flatbed sizes vs feeder sizes.
-};
+// TWAIN container value-type tags (TWON_*), the TWAIN Specification vocabulary
+// that Image Capture's TWAIN-derived capability dictionaries use. INTERFACE
+// FACTS; see the clean-room note in scan_parameters.h.
+NSString* const kTwonEnumeration = @"TWON_ENUMERATION";
+NSString* const kTwonOneValue = @"TWON_ONEVALUE";
 
-// The nine captured sizes, split flatbed-only vs feeder-capable exactly as
-// daemon/paper_size.cpp documents (LETTER/LEGAL/A4/LEDGER/A3 center-register in
-// the ADF; A5/EXECUTIVE/PHOTO/BCARD corner-register on the flatbed only).
+// Keys of the TWAIN-style capability container. These four are our own
+// descriptive names; the load-bearing facts are the ICAP_* capability keys and
+// the TWON_* type tags they carry.
+NSString* const kKeyType = @"type";
+NSString* const kKeyValue = @"value";
+NSString* const kKeyCurrent = @"current";
+NSString* const kKeyDefault = @"default";
+
+// The nine standard sizes we know geometry for, split by whether the document
+// feeder can take them. daemon/paper_size.cpp documents that
+// LETTER/LEGAL/A4/LEDGER/A3 feed through the ADF, while A5/EXECUTIVE/PHOTO/BCARD
+// register on the flatbed only.
+struct PaperChoice {
+  const char* token;  // Exact daemon/paper_size.cpp token.
+  bool flatbedOnly;
+};
 constexpr PaperChoice kPaperChoices[] = {
-    {"LETTER", "US Letter", false},
-    {"LEGAL", "US Legal", false},
-    {"A4", "A4", false},
-    {"LEDGER", "US Ledger", false},
-    {"A3", "A3", false},
-    {"A5", "A5", true},
-    {"EXECUTIVE", "Executive", true},
-    {"PHOTO", "4x6 Photo", true},
-    {"BCARD", "Business Card", true},
+    {"LETTER", false}, {"LEGAL", false},    {"A4", false},
+    {"LEDGER", false}, {"A3", false},       {"A5", true},
+    {"EXECUTIVE", true}, {"PHOTO", true},   {"BCARD", true},
 };
 
 NSNumber* Int(int v) { return [NSNumber numberWithInt:v]; }
 
-// Builds the array of standard paper sizes, each a dict of name + max scannable
-// pixel extent at kReferenceDpi + physical size in points (1/72") + a
-// flatbed-only flag. Geometry comes straight from brscan::scand::AreaForPaper.
-NSArray* PaperSizeArray() {
-  NSMutableArray* sizes = [NSMutableArray array];
-  for (const PaperChoice& choice : kPaperChoices) {
-    std::optional<brscan::Area> area =
-        brscan::scand::AreaForPaper(choice.token, kReferenceDpi);
-    if (!area) continue;  // Should not happen: tokens are from the same table.
-    const int widthPx = area->x1 - area->x0;
-    const int heightPx = area->y1 - area->y0;
-    // Points at 1/72" = pixels / dpi * 72.
-    const int widthPt = (widthPx * 72) / kReferenceDpi;
-    const int heightPt = (heightPx * 72) / kReferenceDpi;
-    [sizes addObject:@{
-      @"name" : [NSString stringWithUTF8String:choice.displayName],
-      @"token" : [NSString stringWithUTF8String:choice.token],
-      @"widthPixels" : Int(widthPx),
-      @"heightPixels" : Int(heightPx),
-      @"widthPoints" : Int(widthPt),
-      @"heightPoints" : Int(heightPt),
-      @"referenceDPI" : Int(kReferenceDpi),
-      @"flatbedOnly" : @(choice.flatbedOnly),
-    }];
-  }
-  return sizes;
+// A TWON_ENUMERATION capability: the full set of allowed values plus the current
+// and default selections.
+NSDictionary* Enumeration(NSArray* values, int current, int def) {
+  return @{
+    kKeyType : kTwonEnumeration,
+    kKeyValue : values,
+    kKeyCurrent : Int(current),
+    kKeyDefault : Int(def),
+  };
+}
+
+// A TWON_ONEVALUE capability: a single fixed scalar.
+NSDictionary* OneValue(int value) {
+  return @{
+    kKeyType : kTwonOneValue,
+    kKeyValue : Int(value),
+    kKeyCurrent : Int(value),
+    kKeyDefault : Int(value),
+  };
 }
 
 NSArray* ResolutionArray() {
@@ -95,39 +104,72 @@ NSArray* ResolutionArray() {
   return r;
 }
 
+// Builds the capability sub-dictionary for one functional unit. Capabilities are
+// scoped per unit because the flatbed and feeder differ: the flatbed exposes the
+// platten (ICScannerDocumentTypeDefault) and the flatbed-only sizes and has the
+// larger maximum extent, while the feeder omits the platten and the flatbed-only
+// sizes.
+NSDictionary* BuildUnit(bool feeder) {
+  NSMutableArray* supportedSizes = [NSMutableArray array];
+  // The platten "default" size is meaningful only for the flatbed.
+  if (!feeder) [supportedSizes addObject:Int(kDocumentTypeDefault)];
+
+  int maxWidthPx = 0;
+  int maxHeightPx = 0;
+  for (const PaperChoice& choice : kPaperChoices) {
+    if (feeder && choice.flatbedOnly) continue;
+    std::optional<brscan::Area> area =
+        brscan::scand::AreaForPaper(choice.token, kReferenceDpi);
+    if (area) {
+      maxWidthPx = std::max(maxWidthPx, area->x1 - area->x0);
+      maxHeightPx = std::max(maxHeightPx, area->y1 - area->y0);
+    }
+    const int docType = DocumentTypeForPaperToken(choice.token);
+    if (docType != kDocumentTypeNone) [supportedSizes addObject:Int(docType)];
+  }
+
+  // Current/default supported size: the platten for the flatbed, else the first
+  // feeder size (US Letter). Both are guaranteed present in supportedSizes.
+  const int defaultSize =
+      supportedSizes.count > 0
+          ? [(NSNumber*)supportedSizes.firstObject intValue]
+          : kDocumentTypeDefault;
+
+  return @{
+    @"ICAP_XRESOLUTION" :
+        Enumeration(ResolutionArray(), kDefaultResolution, kDefaultResolution),
+    @"ICAP_YRESOLUTION" :
+        Enumeration(ResolutionArray(), kDefaultResolution, kDefaultResolution),
+    @"ICAP_BITDEPTH" : Enumeration(@[ Int(kBitDepth1), Int(kBitDepth8) ],
+                                   kDefaultBitDepth, kDefaultBitDepth),
+    @"ICAP_PHYSICALWIDTH" : OneValue(maxWidthPx),
+    @"ICAP_PHYSICALHEIGHT" : OneValue(maxHeightPx),
+    @"ICAP_SUPPORTEDSIZES" :
+        Enumeration(supportedSizes, defaultSize, defaultSize),
+    @"ICAP_UNITS" : OneValue(kMeasurementUnitPixels),
+  };
+}
+
 }  // namespace
 
 void BuildScannerParameters(CFMutableDictionaryRef dict) {
   if (dict == nullptr) return;
   NSMutableDictionary* d = (__bridge NSMutableDictionary*)dict;
 
-  // Resolutions.
-  d[@"supportedResolutions"] = ResolutionArray();
-  d[@"resolution"] = Int(300);  // default.
-
-  // Colour / pixel-data types (values are ICScannerPixelDataType).
-  d[@"supportedPixelDataTypes"] =
-      @[ Int(kPixelTypeBW), Int(kPixelTypeGray), Int(kPixelTypeRGB) ];
-  d[@"pixelDataType"] = Int(kPixelTypeRGB);  // default: colour.
-
-  // Bit depths (values are ICScannerBitDepth): 1-bit for BW, 8-bit otherwise.
-  d[@"supportedBitDepths"] = @[ Int(1), Int(8) ];
-  d[@"bitDepth"] = Int(8);
-
-  // Functional units / sources (values are ICScannerFunctionalUnitType).
-  d[@"supportedFunctionalUnits"] =
+  // The capabilities are scoped per functional unit inside a top-level
+  // functionalUnits dict. Alongside the available/selected type keys, each
+  // unit's capability sub-dict is keyed by its ICScannerFunctionalUnitType value
+  // rendered as a string ("0" flatbed, "3" feeder).
+  NSMutableDictionary* functionalUnits = [NSMutableDictionary dictionary];
+  functionalUnits[@"availableFunctionalUnitTypes"] =
       @[ Int(kFunctionalUnitFlatbed), Int(kFunctionalUnitFeeder) ];
-  d[@"functionalUnit"] = Int(kFunctionalUnitFlatbed);  // default: flatbed.
-  d[@"supportsDuplex"] = @YES;  // feeder duplex; only meaningful for the feeder.
+  functionalUnits[@"selectedFunctionalUnitType"] = Int(kFunctionalUnitFlatbed);
+  functionalUnits[[@(kFunctionalUnitFlatbed) stringValue]] =
+      BuildUnit(/*feeder=*/false);
+  functionalUnits[[@(kFunctionalUnitFeeder) stringValue]] =
+      BuildUnit(/*feeder=*/true);
 
-  // Brightness / contrast ranges (brscan::Params uses 0..100, default 50).
-  d[@"brightness"] = Int(50);
-  d[@"contrast"] = Int(50);
-  d[@"brightnessRange"] = @{ @"min" : Int(0), @"max" : Int(100) };
-  d[@"contrastRange"] = @{ @"min" : Int(0), @"max" : Int(100) };
-
-  // Standard paper sizes within the device maximum.
-  d[@"paperSizes"] = PaperSizeArray();
+  d[@"functionalUnits"] = functionalUnits;
 }
 
 }  // namespace brscan::ica

@@ -21,9 +21,43 @@
 
 #pragma once
 
+#include <string>
+
 #include "brscan/types.h"
 
 namespace brscan::ica {
+
+// ICScannerDocumentType raw enum values (ImageCaptureCore), used as the members
+// of the ICAP_SUPPORTEDSIZES capability the module advertises. The enum is
+// NON-contiguous, so each value below was verified individually against the
+// macOS SDK header
+// System/Library/Frameworks/ImageCaptureCore.framework/Headers/
+// ICScannerFunctionalUnits.h. kDocumentTypeNone is a module-internal sentinel
+// (not an SDK value) meaning "no standard document type for this paper".
+inline constexpr int kDocumentTypeNone = -1;
+inline constexpr int kDocumentTypeDefault = 0;      // Platten; flatbed only.
+inline constexpr int kDocumentTypeA4 = 1;
+inline constexpr int kDocumentTypeUSLetter = 3;
+inline constexpr int kDocumentTypeUSLegal = 4;
+inline constexpr int kDocumentTypeA5 = 5;
+inline constexpr int kDocumentTypeUSLedger = 9;
+inline constexpr int kDocumentTypeUSExecutive = 10;
+inline constexpr int kDocumentTypeA3 = 11;
+
+// Maps a daemon/paper_size.cpp paper token to its ICScannerDocumentType value,
+// or kDocumentTypeNone for tokens with no clean standard case (PHOTO, BCARD --
+// exposed as a custom scan area only) and for unknown tokens. Pure; the single
+// source of truth shared by the capability advertisement (scan_parameters.mm)
+// and any reverse lookup, so the two never diverge.
+int DocumentTypeForPaperToken(const std::string& token);
+
+// Converts a host userScanArea (offset + extent, in ICAP_UNITS = pixels) to the
+// corner-bounded Area{x0,y0,x1,y1} brscan uses (x0=offX, y0=offY, x1=offX+width,
+// y1=offY+height). Returns true and fills `out` only for a positive rectangle
+// (width > 0 && height > 0); otherwise returns false and leaves `out` untouched
+// so the caller falls back to the full-area default. Pure.
+bool CornersFromUserScanArea(int offset_x, int offset_y, int width, int height,
+                             Area* out);
 
 // The host's scan selection, extracted from the SetParameters CFDictionary into
 // a plain, framework-free struct. Each optional field carries a `has_*` flag so

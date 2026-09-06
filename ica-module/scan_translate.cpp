@@ -4,10 +4,35 @@
 #include "scan_translate.h"
 
 #include <algorithm>
+#include <string>
 
 #include "brscan/types.h"
 
 namespace brscan::ica {
+
+int DocumentTypeForPaperToken(const std::string& token) {
+  // Tokens are the exact, upper-case daemon/paper_size.cpp names. PHOTO and
+  // BCARD have no clean ICScannerDocumentType case, so they map to "none" and
+  // are offered only as a custom scan area, per PLAN-2-DESIGN.md.
+  if (token == "LETTER") return kDocumentTypeUSLetter;
+  if (token == "LEGAL") return kDocumentTypeUSLegal;
+  if (token == "A4") return kDocumentTypeA4;
+  if (token == "LEDGER") return kDocumentTypeUSLedger;
+  if (token == "A3") return kDocumentTypeA3;
+  if (token == "A5") return kDocumentTypeA5;
+  if (token == "EXECUTIVE") return kDocumentTypeUSExecutive;
+  return kDocumentTypeNone;
+}
+
+bool CornersFromUserScanArea(int offset_x, int offset_y, int width, int height,
+                             Area* out) {
+  if (out == nullptr || width <= 0 || height <= 0) return false;
+  out->x0 = offset_x;
+  out->y0 = offset_y;
+  out->x1 = offset_x + width;
+  out->y1 = offset_y + height;
+  return true;
+}
 
 namespace {
 
