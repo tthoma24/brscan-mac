@@ -113,3 +113,38 @@ unlike the button-notification fixtures above.
 | `F=` (FILE\|IMAGE\|OCR\|EMAIL), `D=` (SIN\|DUP), `E=` (LON\|SHO), `R=<n>`, `M=` (CGRAY\|TEXT), `P=` (LETTER\|LEGAL\|A4\|LEDGER\|A3\|A5\|EXECUTIVE\|PHOTO\|BCARD), `A=0`, `T=` (PDF(Image)\|MULTI-TIFF\|JPEG\|TXT\|HTML\|RTF), `W=` (0\|1), `G=` (0\|1, omitted entirely on OCR routes), `L=` (64\|128\|192, present only when `G=1`), `X=` (0\|1) | The config command's field vocabulary; decoded into `daemon/button_config.h`'s `ButtonConfig` (paper/output-type tokens kept raw -- mapping to a scan area / `OutputFormat` is a later task) | Capture, `reference/brscan-button-options.pcap`; see `docs/BUTTON.md`'s "Config command" section for the full field table |
 | Per-`P=`-token scan area at 300 dpi (`{x0,0,x1,y1}`): `LETTER {478,2990,3253}`, `LEGAL {478,2990,4153}`, `A4 {513,2961,3461}`, `LEDGER {103,3367,5053}`, `A3 {0,3472,4913}`, `A5 {0,1712,2433}`, `EXECUTIVE {0,2128,3103}`, `PHOTO {0,1168,1753}`, `BCARD {0,1024,661}` (Task 1d.2) | The physical scan area the printer actually uses for each paper size the LCD panel offers, at the config command's captured 300 dpi; `daemon/paper_size.h`'s `AreaForPaper` stores these 9 tuples verbatim and scales them linearly to other dpi rather than deriving them from each paper's public nominal dimensions plus a margin formula | Black-box network observation, `reference/brscan-button-options.pcap` (same capture as the row above, re-examined for the scan-area bytes the printer sent for each paper size on the scan connection, TCP 54921). These tuples carry no device identity or scan-image content, so they're committed verbatim as test fixtures in `tests/paper_size_test.cpp` |
 | Scan-button wire flow (Task 1d.3): `ESC K` opener `1b 4b 0a 80` (in place of `ESC Q`, with NO `ESC S`/`ESC D` source-select); `ESC I` carries `S=NORMAL_SCAN` for color too; `ESC X` uses the RLENGTH-style field order (`R,M,C,J,B,N,A,D,S=NORMAL_SCAN,P=0,E=0,G,L`) with `C=JPEG` for color (`C=RLENGTH` for BW) and `G`/`L` from remove-background. Example (color Letter@300 simplex): `R=300,300\nM=CGRAY\nC=JPEG\nJ=MID\nB=50\nN=50\nA=478,0,2990,3253\nD=SIN\nS=NORMAL_SCAN\nP=0\nE=0\nG=0\nL=0\n` | The host->device command bytes the scan-button session sends; encoded by `EncodeButtonQuery`/`EncodeInfo(button_flow=true)`/`EncodeExecute(button_flow)` and driven by `RunButtonScan` (`libbrscan/scanner.cpp`). From `ESC X` onward the block/payload readout is identical to `RunScan` (shared `RunReadout`) | Black-box network observation, `reference/brscan-button-options.pcap` (same capture as the config-command rows above, re-examined for the host->device `ESC K`/`ESC I`/`ESC X` bytes on TCP 54921); decoded in `reference/protocol-notes-button-options.md`. These command byte strings carry no device identity or scan-image content, so they're asserted as literal fixtures in `tests/command_test.cpp` and `tests/scanner_test.cpp` |
+
+## Image Capture (ICA) host-interface facts
+
+The Plan 2 Image Capture device module (`ica-module/`) talks to macOS's Image
+Capture, not to the printer, so its constants are not Brother protocol bytes but
+facts about **Apple's** ICA device-module interface. These were reconstructed
+clean-room from three permitted kinds of source, and are documented in
+[docs/ICA-PROTOCOL.md](docs/ICA-PROTOCOL.md):
+
+1. The **public SDK headers** shipped with macOS —
+   `ICADevices.framework/Headers/*` and `ImageCaptureCore.framework/Headers/*`
+   (Apple SDK, reference only) — for callback signatures, constant/key names
+   (`kICANotification*`, `ICAP_*`, `TWON_*`, `ICScanner*` enum values), and
+   struct layouts.
+2. **Black-box observation** of the running system — this module's own `os_log`
+   traces of what `icdd` sends it, and `dns-sd` for the device's advertised
+   Bonjour TXT record.
+3. For the required **call sequence** only (which notification types, in what
+   order, with which keys), cross-checking against Apple's `VirtualScanner`
+   sample and two shipping open-source modules. These were read for interface
+   facts, not copied.
+
+No Apple source, sample-code body, or proprietary text enters this repository;
+no decompilation was performed. The `ICAP_*` / `TWON_*` names are the TWAIN
+Working Group's capability vocabulary, which Apple's interface reuses.
+
+| Constant / fact | Meaning | Source |
+|---|---|---|
+| `_scanner._tcp.` + `ICABonjourTXTRecordKey {mdl=MFC-J6920DW; mfg=Brother}` in `DeviceMatchingInfo.plist` | Bonjour match that binds the device to this module (via icdd's `compareBonjourDeviceModuleDictionary:withBonjourTXTRecord:`) | SDK header symbols; device's own `dns-sd -L` TXT; match interface shape from Apple's `AirScanScanner.app` plist (public plugin interface, not source) |
+| `gICDScannerCallbackFunctions` / `ICD_Scanner*` table (`OpenTCPIPDevice`, `GetObjectInfo`, `OpenSession`, `GetParameters`, `SetParameters`, `Start`, …) | The callbacks icdd drives | `ICADevices.framework/Headers/ICD_ScannerCalls.h` |
+| `theDict["device"]` capability schema: `ICAP_XRESOLUTION/YRESOLUTION/BITDEPTH/PIXELTYPE/PHYSICALWIDTH/PHYSICALHEIGHT/SUPPORTEDSIZES/UNITS` + `CAP_FEEDERENABLED/CAP_DUPLEX`, each a `{type:TWON_ENUMERATION\|TWON_ONEVALUE,value,current,default}` container, plus `functionalUnits{availableFunctionalUnitTypes,selectedFunctionalUnitType}` | What `ICD_ScannerGetParameters` must fill so Image Capture renders scan controls | SDK header constant names; the `device`-wrapper + flat-caps *shape* confirmed as an interface fact against `VirtualScanner`/`SaneNetScanner`/`scansnaps1500m` (facts only); the empty-incoming-`theDict` behavior observed live |
+| `ICScannerFunctionalUnitType` flatbed=0/documentFeeder=3; `ICScannerPixelDataType` BW=0/gray=1/RGB=2; `ICScannerMeasurementUnit` inches=0…pixels=5; `ICScannerDocumentType` USLetter=3/USLegal=4/A5=5/USLedger=9/USExecutive=10/A3=11 | Enum values used in the capability dict / scan request | `ImageCaptureCore/Headers/ICScannerFunctionalUnits.h` |
+| SetParameters `userScanArea` keys: `ICAP_*` selection, `offsetX/offsetY/width/height` (in `ICAP_UNITS`), `document folder/name/extension/format`, `ICSecurityScopedWrappedURL` (an `NSSecurityScopedURLWrapper`, unwrapped via `-url`), `progressNotificationWithData`, `"scan mode"=overview` | The scan request the host sends; drives file-vs-memory transfer and the scan rectangle | Live `os_log` of the incoming `theDict` (black-box); key names cross-checked against the reference modules |
+| Notification sequence: `kICANotificationTypeDeviceStatusInfo`(`kICANotificationSubTypeWarmUpStarted`/`WarmUpDone`) → `kICANotificationTypeScanProgressStatus` (`ICDAddImageInfoToNotificationDictionary` whole image / `ICDAddBandInfoToNotificationDictionary` bands, `ICDSendNotificationAndWaitForReply`) → `kICANotificationTypeScannerPageDone` → `kICANotificationTypeScannerScanDone`, each carrying `kICANotificationICAObjectKey` = the device object (`deviceObjectInfo->icaObject`); file transfer adds `kICANotificationScannerDocumentNameKey` = the written path | How a scanned page / overview image and completion are handed back to the host | SDK header symbols (`ICAApplication.h`, `ICADevices.h`); required order + key placement confirmed as interface facts against `VirtualScanner`/`SaneNetScanner`/`scansnaps1500m` |
+| `ICDNewObject` returns `unimpErr` (-4) for a scanner/TCP-IP module; object registration for the in-memory case is `ICDScannerNewObjectInfoCreated` (not used for local file transfer) | Object-registration behavior | `ICADevice.h` / `ICD_ScannerCalls.h` signatures + live return code (black-box) |
