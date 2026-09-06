@@ -121,6 +121,14 @@ struct DeviceContext {
   // brscan::Params, is stored here so ICD_ScannerStart can run RunScan with it.
   brscan::Params params;  // Defaults (kColor/flatbed/300) until SetParameters.
 
+  // The ICScannerFunctionalUnitType the host has currently selected (0=flatbed,
+  // 3=document feeder). Selecting the feeder makes the host send SetParameters
+  // with selectedFunctionalUnitType=3 and then re-call GetParameters; unless
+  // GetParameters answers with the SELECTED unit the host re-selects it forever
+  // ("Waiting for Scanner"). SetParameters records the choice here and
+  // GetParameters advertises it via BuildScannerParameters. Defaults to flatbed.
+  int selectedFunctionalUnit = 0;
+
   // Task 12/13 transfer mode. A FINAL scan carries a destination (a
   // security-scoped folder URL and/or a "document folder" path) plus document
   // name/format/extension keys -> file-based transfer: encode the page and WRITE
@@ -606,10 +614,15 @@ ICAError Initialize(const ScannerObjectInfo* /*deviceObjectInfo*/,
 // ---------------------------------------------------------------------------
 // Parameters / status / start.
 
-ICAError GetParameters(const ScannerObjectInfo* /*deviceObjectInfo*/,
+ICAError GetParameters(const ScannerObjectInfo* deviceObjectInfo,
                        ICD_ScannerGetParametersPB* pb) {
   os_log(Log(), "callback: ICD_ScannerGetParameters");
   if (pb == nullptr) return kICADeviceInvalidParamErr;
+  DeviceContext* ctx = ContextOf(deviceObjectInfo);
+  // Advertise the currently SELECTED functional unit (default flatbed). This is
+  // what stops the feeder-selection loop: after the host selects the feeder via
+  // SetParameters, it re-reads parameters here and must see its choice reflected.
+  const int selectedUnit = ctx ? ctx->selectedFunctionalUnit : 0;
   if (pb->theDict != nullptr) {
     // DIAGNOSTIC (Task 8): dump the INCOMING dict BEFORE we populate it. This
     // reveals whether icdd pre-seeds the capability keys it expects (in which
@@ -619,9 +632,11 @@ ICAError GetParameters(const ScannerObjectInfo* /*deviceObjectInfo*/,
            "GetParameters: INCOMING theDict (%ld keys) BEFORE populate: %{public}@",
            CFDictionaryGetCount(pb->theDict),
            (__bridge NSDictionary*)pb->theDict);
-    brscan::ica::BuildScannerParameters(pb->theDict);
-    os_log(Log(), "GetParameters: described %ld parameter keys",
-           CFDictionaryGetCount(pb->theDict));
+    brscan::ica::BuildScannerParameters(pb->theDict, selectedUnit);
+    os_log(Log(),
+           "GetParameters: described %ld parameter keys "
+           "(selectedFunctionalUnitType=%d)",
+           CFDictionaryGetCount(pb->theDict), selectedUnit);
   } else {
     os_log_error(Log(), "GetParameters: theDict is null");
   }
@@ -846,6 +861,20 @@ ICAError SetParameters(const ScannerObjectInfo* deviceObjectInfo,
     brscan::ica::ScanLimits limits;  // default max_dpi = highest offer (600).
     brscan::Params params = brscan::ica::TranslateScanParams(req, limits);
     if (ctx) ctx->params = params;
+
+    // Track the host's functional-unit selection so the next GetParameters
+    // advertises it (0=flatbed, 3=feeder). On the unit-switch round-trip the
+    // host sends ONLY selectedFunctionalUnitType (no resolution/pixeltype), so
+    // update the tracked unit whenever the request carries it and leave it
+    // unchanged otherwise. Answering GetParameters with this value is what stops
+    // the feeder-selection loop.
+    if (ctx && req.has_functional_unit) {
+      ctx->selectedFunctionalUnit = req.functional_unit;
+      os_log(Log(),
+             "SetParameters: tracked selectedFunctionalUnitType=%d (%{public}s)",
+             req.functional_unit,
+             req.functional_unit == 3 ? "feeder" : "flatbed");
+    }
 
     // Detect file-based vs overview/memory transfer for this scan.
     DetectTransferMode(ctx, pb->theDict);

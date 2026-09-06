@@ -37,12 +37,21 @@ namespace brscan::ica {
 inline constexpr int kDocumentTypeNone = -1;
 inline constexpr int kDocumentTypeDefault = 0;      // Platten; flatbed only.
 inline constexpr int kDocumentTypeA4 = 1;
+// JIS B5 is the SDK's base ICScannerDocumentTypeB5 = 2, documented "B5/JIS B5,
+// 182.00 mm x 257.00 mm" (ICScannerFunctionalUnits.h enum line 204, doc comment
+// line 125). The JIS B-series enum (JISB4=38, JISB6=39, ...) deliberately skips
+// B5 because this base value already denotes JIS B5, which is what the Brother
+// driver lists.
+inline constexpr int kDocumentTypeJISB5 = 2;
 inline constexpr int kDocumentTypeUSLetter = 3;
 inline constexpr int kDocumentTypeUSLegal = 4;
 inline constexpr int kDocumentTypeA5 = 5;
 inline constexpr int kDocumentTypeUSLedger = 9;
 inline constexpr int kDocumentTypeUSExecutive = 10;
 inline constexpr int kDocumentTypeA3 = 11;
+// JIS B4 = ICScannerDocumentTypeJISB4 = 38, documented "JIS B4, 257.00 mm x
+// 364.00 mm" (ICScannerFunctionalUnits.h enum line 239, doc comment line 160).
+inline constexpr int kDocumentTypeJISB4 = 38;
 
 // Maps a daemon/paper_size.cpp paper token to its ICScannerDocumentType value,
 // or kDocumentTypeNone for tokens with no clean standard case (PHOTO, BCARD --

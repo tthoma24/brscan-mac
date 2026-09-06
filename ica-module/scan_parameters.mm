@@ -63,15 +63,13 @@ constexpr int kMeasurementUnitPixels = 5;
 constexpr int kFunctionalUnitFlatbed = 0;
 constexpr int kFunctionalUnitFeeder = 3;
 
-// The functional unit whose capabilities are advertised flat inside `device`
-// (see BuildScannerParameters). The flatbed is the default selection.
-constexpr int kSelectedFunctionalUnit = kFunctionalUnitFlatbed;
-
 // TWAIN CAP_DUPLEX value for "no duplex" (TWDX_NONE). CAP_FEEDERENABLED /
-// CAP_DUPLEX are advertised so the source and duplex controls appear; for the
-// selected flatbed unit both are off.
+// CAP_DUPLEX are advertised so the source and duplex controls appear.
+// CAP_FEEDERENABLED reflects the SELECTED unit: on when the feeder is selected,
+// off for the flatbed. Duplex stays off for both (single-sided this task).
 constexpr int kDuplexNone = 0;
 constexpr int kFeederDisabled = 0;
+constexpr int kFeederEnabled = 1;
 
 // TWAIN container value-type tags (TWON_*), the TWAIN Specification vocabulary
 // that Image Capture's TWAIN-derived capability dictionaries use. INTERFACE
@@ -170,6 +168,19 @@ NSDictionary* BuildUnit(bool feeder) {
     if (docType != kDocumentTypeNone) [supportedSizes addObject:Int(docType)];
   }
 
+  // JIS B5 and JIS B4 round out the Brother driver's flatbed size list (A4, JIS
+  // B5, US Letter, US Legal, A5, US Ledger, US Executive, A3, JIS B4). They have
+  // no daemon/paper_size.cpp geometry tuple and none is needed: for ICA the host
+  // supplies the scan rectangle (userScanArea) for the selected document type,
+  // so advertising the ICScannerDocumentType value alone makes the size
+  // selectable and scannable. Both fit inside the advertised platen extent (JIS
+  // B4 is 257x364 mm, smaller than A3/Ledger), so the physical bounds computed
+  // above from the paper tokens do not regress. Flatbed only, matching Brother.
+  if (!feeder) {
+    [supportedSizes addObject:Int(kDocumentTypeJISB5)];
+    [supportedSizes addObject:Int(kDocumentTypeJISB4)];
+  }
+
   // Current/default supported size: the platten for the flatbed, else the first
   // feeder size (US Letter). Both are guaranteed present in supportedSizes.
   const int defaultSize =
@@ -219,9 +230,19 @@ NSDictionary* BuildUnit(bool feeder) {
 
 }  // namespace
 
-void BuildScannerParameters(CFMutableDictionaryRef dict) {
+void BuildScannerParameters(CFMutableDictionaryRef dict,
+                            int selectedFunctionalUnitType) {
   if (dict == nullptr) return;
   NSMutableDictionary* d = (__bridge NSMutableDictionary*)dict;
+
+  // The selected unit drives everything below. The host selects the feeder by
+  // sending SetParameters with selectedFunctionalUnitType=3 and then re-calling
+  // GetParameters; if we always answered with the flatbed the host would keep
+  // re-selecting the feeder in a loop ("Waiting for Scanner"). Honour the
+  // tracked selection: advertise that unit's caps flat and echo it back below.
+  // Only the document feeder is treated as the feeder; any other value (default
+  // 0) is the flatbed.
+  const bool feeder = selectedFunctionalUnitType == kFunctionalUnitFeeder;
 
   // Everything the host reads lives under a single top-level `device` dict. The
   // ICAP_*/CAP_* capability entries for the SELECTED functional unit sit FLAT
@@ -231,20 +252,21 @@ void BuildScannerParameters(CFMutableDictionaryRef dict) {
   // rendered no controls from it. This flat-under-`device` layout is the shape
   // its scanner modules actually consume.)
   NSMutableDictionary* deviceDict =
-      [NSMutableDictionary dictionaryWithDictionary:
-                               BuildUnit(/*feeder=*/kSelectedFunctionalUnit ==
-                                         kFunctionalUnitFeeder)];
+      [NSMutableDictionary dictionaryWithDictionary:BuildUnit(feeder)];
 
   // Source (flatbed vs feeder) and duplex controls. TWON_ONEVALUE scalars for
-  // the selected unit: the flatbed uses no feeder and no duplex.
-  deviceDict[@"CAP_FEEDERENABLED"] = OneValue(kFeederDisabled);
+  // the selected unit: CAP_FEEDERENABLED tracks the selection; duplex stays off.
+  deviceDict[@"CAP_FEEDERENABLED"] =
+      OneValue(feeder ? kFeederEnabled : kFeederDisabled);
   deviceDict[@"CAP_DUPLEX"] = OneValue(kDuplexNone);
 
-  // Which functional units exist and which is selected -- nothing else.
+  // Which functional units exist and which is selected -- nothing else. The
+  // selected type echoes the tracked value so the host's choice sticks.
   deviceDict[@"functionalUnits"] = @{
     @"availableFunctionalUnitTypes" :
         @[ Int(kFunctionalUnitFlatbed), Int(kFunctionalUnitFeeder) ],
-    @"selectedFunctionalUnitType" : Int(kSelectedFunctionalUnit),
+    @"selectedFunctionalUnitType" :
+        Int(feeder ? kFunctionalUnitFeeder : kFunctionalUnitFlatbed),
   };
 
   d[@"device"] = deviceDict;
