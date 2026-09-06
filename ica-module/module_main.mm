@@ -38,11 +38,21 @@
 #import <os/log.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <string>
+#include <thread>
+#include <vector>
 
+#include "brscan/scanner.h"
+#include "brscan/transport_tcp.h"
+#include "brscan/types.h"
+#include "buffer_descriptor.h"
+#include "decode_jpeg.h"  // libbrscan private header (on the libbrscan inc dir).
 #include "scan_parameters.h"
+#include "scan_translate.h"
 
 namespace {
 
@@ -88,6 +98,28 @@ struct DeviceContext {
   int port = kDefaultScanPort;
   ICAScannerSessionID sessionID = 0;
   bool sessionOpen = false;
+
+  // Task 7 scan state. The host's last SetParameters selection, translated to a
+  // brscan::Params, is stored here so ICD_ScannerStart can run RunScan with it.
+  brscan::Params params;  // Defaults (kColor/flatbed/300) until SetParameters.
+
+  // The scan runs on a background thread so it never blocks icdd's callback
+  // thread (PLAN-2-DESIGN.md decision D). Only the device object owns this
+  // DeviceContext, so the thread is always joined before the context is freed
+  // (StopScan, called from CloseSession / CloseDevice / Cleanup) -- the thread
+  // can therefore hold a raw ctx pointer for its whole life without a
+  // use-after-free.
+  std::thread scanThread;
+  std::atomic<bool> cancelRequested{false};
+
+  // Cancel handshake: the worker publishes its live transport here (under
+  // scanMutex) so a host cancel can close the socket out from under a blocked
+  // RunScan read, which surfaces as Status::kTimeout/kIoError and unwinds the
+  // worker cleanly. The transport object itself is owned by the worker's stack
+  // frame and outlives every guarded access (the worker clears this pointer
+  // under the lock before the transport is destroyed).
+  std::mutex scanMutex;
+  brscan::TcpTransport* activeTransport = nullptr;
 };
 
 DeviceContext* ContextOf(const ScannerObjectInfo* info) {
@@ -118,6 +150,95 @@ void CopyIntParam(CFDictionaryRef params, CFStringRef key, int* out) {
   } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
     *out = (int)CFStringGetIntValue((CFStringRef)value);
   }
+}
+
+// Reads a boolean-valued param. Sets `*out` and returns true only if the key is
+// present (CFBoolean, or a CFNumber treated as nonzero == true).
+bool CopyBoolParam(CFDictionaryRef params, CFStringRef key, bool* out) {
+  if (!params || !out) return false;
+  const void* value = CFDictionaryGetValue(params, key);
+  if (!value) return false;
+  if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+    *out = CFBooleanGetValue((CFBooleanRef)value);
+    return true;
+  }
+  if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+    int n = 0;
+    if (CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &n)) {
+      *out = (n != 0);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Reads the host's SetParameters CFDictionary into a framework-free ScanRequest.
+// The key vocabulary mirrors what scan_parameters.mm advertises in
+// GetParameters (the module's own descriptive names); a live icdd trace may show
+// the host echoing different keys, in which case a missing key simply falls back
+// to the design default in TranslateScanParams (CLEAN-ROOM: the module-side
+// SetParameters key contract is undocumented -- see the task report).
+brscan::ica::ScanRequest ReadScanRequest(CFDictionaryRef dict) {
+  brscan::ica::ScanRequest req;
+  // Presence-aware reads: probe with a sentinel, then check whether it changed
+  // (CopyIntParam writes only when the key exists).
+  auto readInt = [&](CFStringRef key, bool* has, int* dst) {
+    int probe = INT32_MIN;
+    CopyIntParam(dict, key, &probe);
+    if (probe != INT32_MIN) {
+      *has = true;
+      *dst = probe;
+    }
+  };
+  readInt(CFSTR("resolution"), &req.has_resolution, &req.resolution);
+  readInt(CFSTR("pixelDataType"), &req.has_pixel_type, &req.pixel_type);
+  readInt(CFSTR("functionalUnit"), &req.has_functional_unit,
+          &req.functional_unit);
+  readInt(CFSTR("brightness"), &req.has_brightness, &req.brightness);
+  readInt(CFSTR("contrast"), &req.has_contrast, &req.contrast);
+  CopyBoolParam(dict, CFSTR("duplex"), &req.duplex);
+
+  // Scan area: all four bounds must be present for an explicit rectangle.
+  bool hx0 = false, hy0 = false, hx1 = false, hy1 = false;
+  readInt(CFSTR("areaX0"), &hx0, &req.area_x0);
+  readInt(CFSTR("areaY0"), &hy0, &req.area_y0);
+  readInt(CFSTR("areaX1"), &hx1, &req.area_x1);
+  readInt(CFSTR("areaY1"), &hy1, &req.area_y1);
+  req.has_area = hx0 && hy0 && hx1 && hy1;
+  return req;
+}
+
+// Human-readable names for os_log tracing of the translated params.
+const char* ModeName(brscan::ScanMode mode) {
+  switch (mode) {
+    case brscan::ScanMode::kColor:
+      return "color";
+    case brscan::ScanMode::kGray:
+      return "gray";
+    case brscan::ScanMode::kBlackWhite:
+      return "blackwhite";
+    case brscan::ScanMode::kErrorDiffusion:
+      return "errdif";
+    case brscan::ScanMode::kTrueGray:
+      return "truegray";
+  }
+  return "?";
+}
+
+const char* SourceName(brscan::Source source) {
+  return source == brscan::Source::kAdf ? "adf" : "flatbed";
+}
+
+const char* PixelFormatName(brscan::PixelFormat format) {
+  switch (format) {
+    case brscan::PixelFormat::kRgb:
+      return "rgb";
+    case brscan::PixelFormat::kGray:
+      return "gray";
+    case brscan::PixelFormat::kBitonal:
+      return "bitonal";
+  }
+  return "?";
 }
 
 // ---------------------------------------------------------------------------
@@ -184,10 +305,29 @@ ICAError OpenTCPIPDevice(CFDictionaryRef params, ScannerObjectInfo* objectInfo) 
   return noErr;
 }
 
+// Stops any in-flight scan and joins the worker thread. Called before the
+// DeviceContext is freed and on a host cancel (CloseSession). Sets the cancel
+// flag, then closes the live socket out from under a blocked RunScan read so it
+// returns promptly (Status::kTimeout/kIoError), then joins. Idempotent and safe
+// to call when no scan is running: the join on a non-joinable thread is skipped
+// and the transport pointer is null. Because the worker holds a raw ctx pointer,
+// this join MUST complete before the context is deleted -- otherwise the worker
+// would touch freed memory.
+void StopScan(DeviceContext* ctx) {
+  if (ctx == nullptr) return;
+  ctx->cancelRequested.store(true);
+  {
+    std::lock_guard<std::mutex> lock(ctx->scanMutex);
+    if (ctx->activeTransport != nullptr) ctx->activeTransport->Disconnect();
+  }
+  if (ctx->scanThread.joinable()) ctx->scanThread.join();
+}
+
 ICAError CloseDevice(ScannerObjectInfo* objectInfo) {
   os_log(Log(), "callback: ICD_ScannerCloseDevice");
   DeviceContext* ctx = ContextOf(objectInfo);
   if (ctx) {
+    StopScan(ctx);  // Join the worker before freeing the context it points at.
     delete ctx;
     objectInfo->privateData = nullptr;
   }
@@ -199,6 +339,7 @@ ICAError Cleanup(ScannerObjectInfo* objectInfo) {
   // Defensive: free any context still attached (CloseDevice normally does).
   DeviceContext* ctx = ContextOf(objectInfo);
   if (ctx) {
+    StopScan(ctx);  // Same ordering guarantee as CloseDevice.
     delete ctx;
     objectInfo->privateData = nullptr;
   }
@@ -316,7 +457,13 @@ ICAError CloseSession(const ScannerObjectInfo* deviceObjectInfo,
                       ICD_ScannerCloseSessionPB* pb) {
   os_log(Log(), "callback: ICD_ScannerCloseSession");
   DeviceContext* ctx = ContextOf(deviceObjectInfo);
-  if (ctx) ctx->sessionOpen = false;
+  if (ctx) {
+    // A session close mid-scan is the host's cancel path (there is no dedicated
+    // ICD_ScannerCancel callback in the SDK table): stop and join the worker
+    // here. After a completed scan this simply joins the finished thread.
+    StopScan(ctx);
+    ctx->sessionOpen = false;
+  }
   if (pb) pb->header.err = noErr;
   return noErr;
 }
@@ -346,16 +493,31 @@ ICAError GetParameters(const ScannerObjectInfo* /*deviceObjectInfo*/,
   return noErr;
 }
 
-ICAError SetParameters(const ScannerObjectInfo* /*deviceObjectInfo*/,
+ICAError SetParameters(const ScannerObjectInfo* deviceObjectInfo,
                        ICD_ScannerSetParametersPB* pb) {
   os_log(Log(), "callback: ICD_ScannerSetParameters");
-  if (pb && pb->theDict) {
+  if (pb == nullptr) return kICADeviceInvalidParamErr;
+  DeviceContext* ctx = ContextOf(deviceObjectInfo);
+  if (pb->theDict) {
     os_log(Log(), "SetParameters: host set %ld keys: %{public}@",
-           CFDictionaryGetCount(pb->theDict), (__bridge NSDictionary*)pb->theDict);
+           CFDictionaryGetCount(pb->theDict),
+           (__bridge NSDictionary*)pb->theDict);
+
+    // Translate the host's selection to a brscan::Params and stash it on the
+    // device context for ICD_ScannerStart to scan with.
+    brscan::ica::ScanRequest req = ReadScanRequest(pb->theDict);
+    brscan::ica::ScanLimits limits;  // default max_dpi = highest offer (600).
+    brscan::Params params = brscan::ica::TranslateScanParams(req, limits);
+    if (ctx) ctx->params = params;
+
+    os_log(Log(),
+           "SetParameters: translated -> mode=%{public}s dpi=%d source=%{public}s "
+           "duplex=%d area=(%d,%d,%d,%d) brightness=%d contrast=%d",
+           ModeName(params.mode), params.x_dpi, SourceName(params.source),
+           params.duplex, params.area.x0, params.area.y0, params.area.x1,
+           params.area.y1, params.brightness, params.contrast);
   }
-  // Accept the selection; the values are translated to brscan::Params when the
-  // scan-execution task wires ICD_ScannerStart to RunScan.
-  if (pb) pb->header.err = noErr;
+  pb->header.err = noErr;
   return noErr;
 }
 
@@ -374,13 +536,253 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
   return noErr;
 }
 
-ICAError Start(const ScannerObjectInfo* /*deviceObjectInfo*/,
-               ICD_ScannerStartPB* pb) {
+// ---------------------------------------------------------------------------
+// Scan execution and data hand-back (Task 7).
+//
+// HAND-BACK MECHANISM (chosen from the public SDK headers): in-memory band
+// hand-back via the notification dictionary API -- design decision G option (b),
+// NOT a file/ReadFileData pull. The evidence, all public:
+//   - ICD_ScannerStartPB (ICD_ScannerCalls.h) carries NO output destination,
+//     file name, folder, transfer mode, or data type -- it is purely a trigger
+//     (header/object/objectInfo/connectionID/sessionID). So the pixels are not
+//     handed back through Start's parameter block; they are pushed afterwards.
+//   - ICDAddBandInfoToNotificationDictionary(dict, width, height, bitsPerPixel,
+//     bitsPerComponent, numComponents, endianness, pixelDataType, bytesPerRow,
+//     dataStartRow, dataNumberOfRows, dataSize, dataBuffer) (ICADevices.h) is
+//     the band packer -- its arguments are exactly the descriptor
+//     brscan::ica::DescribeBuffer computes.
+//   - ICASendNotificationPB { header; notificationDictionary; replyCode; }
+//     (ICAApplication.h) + ICDSendNotification / ICDSendNotificationAndWaitForReply
+//     (ICADevices.h) push it to icdd.
+//   - kICANotificationTypeScannerPageDone / kICANotificationTypeScannerScanDone,
+//     keyed by kICANotificationTypeKey, with kICANotificationDeviceICAObjectKey
+//     (ICAApplication.h), are the scanner page/complete signals.
+// All of these symbols are exported by ICADevices.tbd, so the module links.
+//
+// CLEAN-ROOM / DEVICE-IN-THE-LOOP UNKNOWNS (public headers do not pin these
+// down; only a live icdd trace can, see the task report): the exact
+// orchestration -- whether the host also needs a freshly created image ICAObject
+// (ICDNewObject) referenced in kICANotificationICAObjectKey, whether it pulls
+// via ICD_ScannerReadFileData after a page notification instead of consuming the
+// band inline, the meaning of replyCode, and the host's 1-bit polarity
+// expectation. We push the most-evidenced path (one full-height band per page in
+// a ScannerPageDone, then a final ScannerScanDone) defensively; if a re-test
+// shows the host ignores the bands, that orchestration is the task-7b spike.
+
+// Sets the keys common to every scanner notification and pushes it to the host,
+// waiting for the reply so the page buffer stays alive until icdd has consumed
+// it. Returns the framework's ICAError.
+ICAError SendScannerNotification(CFMutableDictionaryRef dict,
+                                 ICAObject deviceObject, CFStringRef type) {
+  if (dict == nullptr) return kICADeviceInvalidParamErr;
+  CFDictionarySetValue(dict, kICANotificationTypeKey, type);
+  CFNumberRef devNum =
+      CFNumberCreate(nullptr, kCFNumberSInt32Type, &deviceObject);
+  if (devNum) {
+    CFDictionarySetValue(dict, kICANotificationDeviceICAObjectKey, devNum);
+    CFRelease(devNum);
+  }
+  ICASendNotificationPB pb = {};
+  pb.notificationDictionary = dict;
+  return ICDSendNotificationAndWaitForReply(&pb);
+}
+
+// Hands one decoded page back as a single full-height band. `bytes` must point
+// at `byteCount` host-ready bytes: interleaved 24-bit RGB (post-DecodeJpeg) for
+// kRgb, raw 8-bit gray for kGray, packed 1-bpp for kBitonal. Returns true if the
+// framework accepted the band and the notification.
+bool PostPage(ICAObject deviceObject, brscan::PixelFormat format,
+              const uint8_t* bytes, size_t byteCount, int width, int height,
+              int pageIndex) {
+  std::optional<brscan::ica::BufferDescriptor> d =
+      brscan::ica::DescribeBuffer(format, width, height);
+  if (!d) {
+    os_log_error(Log(), "PostPage[%d]: invalid geometry %dx%d", pageIndex,
+                 width, height);
+    return false;
+  }
+
+  // Map the framework-free descriptor onto the band-info arguments. pixelDataType
+  // is the ImageCaptureCore client enum (0=BW, 1=Gray, 2=RGB).
+  UInt32 pixelDataType = 2;
+  UInt32 bitsPerComponent = 8;
+  switch (format) {
+    case brscan::PixelFormat::kRgb:
+      pixelDataType = 2;
+      bitsPerComponent = 8;
+      break;
+    case brscan::PixelFormat::kGray:
+      pixelDataType = 1;
+      bitsPerComponent = 8;
+      break;
+    case brscan::PixelFormat::kBitonal:
+      pixelDataType = 0;
+      bitsPerComponent = 1;
+      break;
+  }
+
+  CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  if (dict == nullptr) return false;
+
+  ICAError addErr = ICDAddBandInfoToNotificationDictionary(
+      dict, static_cast<UInt32>(width), static_cast<UInt32>(height),
+      static_cast<UInt32>(d->bits_per_pixel), bitsPerComponent,
+      static_cast<UInt32>(d->samples_per_pixel), /*endianness=*/0,
+      pixelDataType, static_cast<UInt32>(d->bytes_per_row),
+      /*dataStartRow=*/0, /*dataNumberOfRows=*/static_cast<UInt32>(height),
+      static_cast<UInt32>(byteCount), const_cast<uint8_t*>(bytes));
+
+  ICAError sendErr =
+      SendScannerNotification(dict, deviceObject,
+                              kICANotificationTypeScannerPageDone);
+  CFRelease(dict);
+
   os_log(Log(),
-         "callback: ICD_ScannerStart -> not implemented this task "
-         "(returning kICADeviceUnsupportedErr; RunScan wiring is PLAN-2 task 7)");
-  if (pb) pb->header.err = kICADeviceUnsupportedErr;
-  return kICADeviceUnsupportedErr;
+         "PostPage[%d]: %dx%d bpp=%d spp=%lld stride=%lld bytes=%zu "
+         "addBandInfo=%d sendPageDone=%d",
+         pageIndex, width, height, d->bits_per_pixel,
+         (long long)d->samples_per_pixel, (long long)d->bytes_per_row,
+         byteCount, addErr, sendErr);
+  return addErr == noErr && sendErr == noErr;
+}
+
+// The background scan worker. Owns its TcpTransport on the stack; publishes it to
+// ctx->activeTransport (under scanMutex) only for the cancel path. Runs the
+// normal host-initiated RunScan (button_flow == false), then hands each page
+// back and finishes with a ScannerScanDone. Holds a raw ctx pointer, kept valid
+// by StopScan joining this thread before the context is freed.
+void RunScanWorker(DeviceContext* ctx, brscan::Params params,
+                   ICAObject deviceObject) {
+  os_log(Log(),
+         "ScanWorker: begin ip='%{public}s' port=%d mode=%{public}s dpi=%d "
+         "source=%{public}s duplex=%d",
+         ctx->ipAddress.c_str(), ctx->port, ModeName(params.mode), params.x_dpi,
+         SourceName(params.source), params.duplex);
+
+  brscan::TcpTransport transport(ctx->ipAddress,
+                                 static_cast<uint16_t>(ctx->port));
+  {
+    std::lock_guard<std::mutex> lock(ctx->scanMutex);
+    ctx->activeTransport = &transport;
+  }
+
+  ICAError finalErr = noErr;
+  const brscan::Status connectStatus = transport.Connect();
+  os_log(Log(), "ScanWorker: transport connect -> %d", (int)connectStatus);
+
+  if (connectStatus != brscan::Status::kOk) {
+    finalErr = kICADeviceInternalErr;
+  } else {
+    std::vector<brscan::ScanResult> pages;
+    const brscan::Status scanStatus =
+        brscan::RunScan(transport, params, &pages);
+    os_log(Log(), "ScanWorker: RunScan -> status=%d pages=%zu",
+           (int)scanStatus, pages.size());
+
+    if (scanStatus != brscan::Status::kOk) {
+      // A mid-scan cancel surfaces as kTimeout once StopScan closes the socket;
+      // treat a requested cancel as a clean stop, anything else as an error.
+      finalErr = ctx->cancelRequested.load() ? noErr : kICADeviceInternalErr;
+    } else {
+      int idx = 0;
+      for (const brscan::ScanResult& page : pages) {
+        if (ctx->cancelRequested.load()) {
+          os_log(Log(), "ScanWorker: cancel observed, stopping at page %d", idx);
+          break;
+        }
+        os_log(Log(), "ScanWorker: page %d %dx%d format=%{public}s payload=%zu",
+               idx, page.width, page.height, PixelFormatName(page.format),
+               page.data.size());
+
+        if (page.format == brscan::PixelFormat::kRgb) {
+          // Color pages arrive as baseline JPEG; decode to interleaved RGB.
+          brscan::Image img;
+          const brscan::Status dec =
+              brscan::DecodeJpeg(page.data.data(), page.data.size(), &img);
+          if (dec != brscan::Status::kOk) {
+            os_log_error(Log(), "ScanWorker: page %d JPEG decode failed (%d)",
+                         idx, (int)dec);
+            finalErr = kICADeviceInternalErr;
+          } else {
+            PostPage(deviceObject, brscan::PixelFormat::kRgb, img.pixels.data(),
+                     img.pixels.size(), img.width, img.height, idx);
+          }
+        } else {
+          // Gray / bitonal already carry host-ready bytes.
+          PostPage(deviceObject, page.format, page.data.data(),
+                   page.data.size(), page.width, page.height, idx);
+        }
+        ++idx;
+      }
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(ctx->scanMutex);
+    ctx->activeTransport = nullptr;
+  }
+  transport.Disconnect();
+
+  // Completion: always tell the host the scan is done, carrying an error code
+  // when one occurred so the scan UI does not hang waiting for more pages.
+  CFMutableDictionaryRef done = CFDictionaryCreateMutable(
+      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  if (done) {
+    if (finalErr != noErr) {
+      CFNumberRef errNum =
+          CFNumberCreate(nullptr, kCFNumberSInt32Type, &finalErr);
+      if (errNum) {
+        CFDictionarySetValue(done, kICAErrorKey, errNum);
+        CFRelease(errNum);
+      }
+    }
+    ICAError sendErr = SendScannerNotification(
+        done, deviceObject, kICANotificationTypeScannerScanDone);
+    CFRelease(done);
+    os_log(Log(), "ScanWorker: ScannerScanDone sent err=%d (finalErr=%d)",
+           sendErr, finalErr);
+  }
+  os_log(Log(), "ScanWorker: end");
+}
+
+ICAError Start(const ScannerObjectInfo* deviceObjectInfo,
+               ICD_ScannerStartPB* pb) {
+  os_log(Log(), "callback: ICD_ScannerStart");
+  if (pb == nullptr) return kICADeviceInvalidParamErr;
+  DeviceContext* ctx = ContextOf(deviceObjectInfo);
+  if (ctx == nullptr) {
+    os_log_error(Log(), "Start: no device context");
+    pb->header.err = kICADeviceInternalErr;
+    return kICADeviceInternalErr;
+  }
+  if (ctx->ipAddress.empty()) {
+    os_log_error(Log(), "Start: no device endpoint (empty ipAddress)");
+    pb->header.err = kICADeviceInternalErr;
+    return kICADeviceInternalErr;
+  }
+
+  // Reap any prior worker (e.g. a scan that already finished) before starting a
+  // new one, and clear the cancel flag for this run.
+  if (ctx->scanThread.joinable()) ctx->scanThread.join();
+  ctx->cancelRequested.store(false);
+
+  const brscan::Params params = ctx->params;
+  const ICAObject deviceObject = pb->object;
+  os_log(Log(),
+         "Start: launching scan worker mode=%{public}s dpi=%d source=%{public}s "
+         "duplex=%d area=(%d,%d,%d,%d)",
+         ModeName(params.mode), params.x_dpi, SourceName(params.source),
+         params.duplex, params.area.x0, params.area.y0, params.area.x1,
+         params.area.y1);
+
+  // Run off icdd's callback thread; completion is posted via ScannerScanDone.
+  ctx->scanThread = std::thread(RunScanWorker, ctx, params, deviceObject);
+
+  pb->header.err = noErr;
+  return noErr;
 }
 
 // Registers the callbacks icdd drives to open, describe, and (attempt to) scan

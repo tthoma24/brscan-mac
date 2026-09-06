@@ -145,26 +145,42 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
   # truth (PLAN-2-DESIGN.md decision E). paper_size.cpp is self-contained
   # (brscan::Area is a header POD in libbrscan/include), so it compiles into the
   # module with only the include dirs below — no libbrscan link needed here.
+  # Plan 2 Task 7 adds scan execution: module_main.mm now wires ICD_ScannerStart
+  # to brscan::RunScan (over TcpTransport), decodes each page (buffer_descriptor
+  # + brscan::DecodeJpeg), and hands the pixels back via the ICADevices band
+  # notification API. That pulls in libbrscan (RunScan / TcpTransport /
+  # DecodeJpeg) and the pure params/buffer helpers, so the bundle now links
+  # libbrscan (and, transitively, libturbojpeg) -- the load spike did not.
   add_executable(brscan-ica-loadspike MACOSX_BUNDLE
     ica-module/module_main.mm
     ica-module/scan_parameters.mm
+    ica-module/scan_translate.cpp
+    ica-module/buffer_descriptor.cpp
     daemon/paper_size.cpp)
   set_target_properties(brscan-ica-loadspike PROPERTIES
     OUTPUT_NAME ${MODULE_NAME}
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_BINARY_DIR}/ica-module/Info.plist)
   target_include_directories(brscan-ica-loadspike PRIVATE
     ${CMAKE_SOURCE_DIR}/libbrscan/include
+    ${CMAKE_SOURCE_DIR}/libbrscan
+    ${CMAKE_SOURCE_DIR}/ica-module
     ${CMAKE_SOURCE_DIR}/daemon)
 
-  # ICADevices supplies ICD_ScannerMain + gICDScannerCallbackFunctions;
-  # Foundation/CoreGraphics are pulled in by the umbrella header.
+  # ICADevices supplies ICD_ScannerMain + gICDScannerCallbackFunctions and the
+  # band/notification hand-back API; Foundation/CoreGraphics are pulled in by the
+  # umbrella header. libbrscan supplies the scan protocol; libturbojpeg is its
+  # private dependency but must be on the final link line since libbrscan is a
+  # static library.
   find_library(ICADEVICES_FRAMEWORK ICADevices REQUIRED)
   find_library(ICA_FOUNDATION_FRAMEWORK Foundation REQUIRED)
   find_library(ICA_COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
   target_link_libraries(brscan-ica-loadspike PRIVATE
+    brscan
     ${ICADEVICES_FRAMEWORK}
     ${ICA_FOUNDATION_FRAMEWORK}
-    ${ICA_COREGRAPHICS_FRAMEWORK})
+    ${ICA_COREGRAPHICS_FRAMEWORK}
+    ${TURBOJPEG_LIBRARIES})
+  target_link_directories(brscan-ica-loadspike PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
   # icdd reads Contents/Resources/DeviceMatchingInfo.plist for the Bonjour
   # match and DeviceInfo.plist for the matched device's presentation metadata;
@@ -253,6 +269,8 @@ if(BUILD_TESTING)
     tests/option_sets_test.cpp
     ica-module/buffer_descriptor.cpp
     tests/buffer_descriptor_test.cpp
+    ica-module/scan_translate.cpp
+    tests/scan_translate_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests daemon tools
