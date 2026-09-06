@@ -1,8 +1,15 @@
 #include "brscan/scanner.h"
 
+#include <jpeglib.h>
+
 #include <algorithm>
+#include <csetjmp>
+#include <cstddef>
+#include <functional>
 #include <map>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "brscan/session.h"
 #include "command.h"
@@ -47,6 +54,245 @@ constexpr int kDrainIdleTimeoutMs = 800;
 // comment above ReadChunkedJpeg). A length strictly below 0xfff4 is an
 // honest final-chunk length.
 constexpr int kMaxChunkBytes = 0xfff4;
+
+// How many rows a streaming band carries at most, for the row-incremental
+// (gray/bitonal) paths and the color decoder below. Small enough for a
+// smooth progress bar, large enough not to flood the callback (an MCU row is
+// 8-16 px, so 16 rows is one to two MCU rows -- see the task brief's band
+// granularity note).
+constexpr int kBandRows = 16;
+
+// Fires one ScanBand through `on_band` (a no-op when it's empty). Returns
+// Status::kOk to keep scanning, Status::kCancelled if the callback returned
+// false (the caller then stops reading and unwinds).
+Status EmitBand(const BandCallback& on_band, int page_index, PixelFormat format,
+                int full_width, int full_height, int start_row, int num_rows,
+                const uint8_t* data, size_t size) {
+  if (!on_band) return Status::kOk;
+  ScanBand band;
+  band.page_index = page_index;
+  band.format = format;
+  band.full_width = full_width;
+  band.full_height = full_height;
+  band.start_row = start_row;
+  band.num_rows = num_rows;
+  band.data = data;
+  band.size = size;
+  return on_band(band) ? Status::kOk : Status::kCancelled;
+}
+
+// --- Incremental (streaming) color JPEG decode ----------------------------
+//
+// The non-streaming color path accumulates a page's whole JPEG and calls
+// DecodeJpeg once at EOI. For live preview we instead decode as the device's
+// chunks arrive, through a libjpeg-turbo SUSPENDING data source: its
+// fill_input_buffer returns FALSE ("no more data right now") instead of
+// blocking, so jpeg_read_header / jpeg_start_decompress / jpeg_read_scanlines
+// return a suspension indication and we resume them once the next chunk has
+// been fed (IncrementalJpegDecoder::Feed). Each resume drains whatever
+// scanlines are now decodable and emits them as bands.
+//
+// Pixels are produced with the SAME settings DecodeJpeg's tjDecompress2 uses
+// -- JCS_RGB output and the accurate (islow) IDCT that TJFLAG_ACCURATEDCT
+// selects -- so a band's rows are byte-identical to the corresponding rows of
+// the whole-page decode (proved by the streaming invariant tests). Recoverable
+// warnings are swallowed exactly as DecodeJpeg tolerates TJERR_WARNING: real
+// MFC-J6920DW ADF pages end a few MCUs short of their SOF height and libjpeg
+// recovers by filling the tail. Only a fatal error_exit aborts the decode.
+
+struct JpegErrorMgr {
+  struct jpeg_error_mgr pub;
+  jmp_buf jump;
+};
+
+void JpegErrorExit(j_common_ptr cinfo) {
+  std::longjmp(reinterpret_cast<JpegErrorMgr*>(cinfo->err)->jump, 1);
+}
+
+// Swallow libjpeg's warning/trace output (its default prints to stderr).
+void JpegEmitMessage(j_common_ptr, int) {}
+
+class IncrementalJpegDecoder;
+
+// Suspending source manager. `owner` links back to the decoder so a skip that
+// runs past the currently-buffered bytes can be deferred to the next Feed.
+struct SuspendSource {
+  struct jpeg_source_mgr pub;
+  IncrementalJpegDecoder* owner;
+};
+
+class IncrementalJpegDecoder {
+ public:
+  // Emits one band of decoded RGB scanlines: `rows` points at `num_rows`
+  // scanlines of `full_width * 3` bytes each. Returns false to cancel.
+  using EmitFn = std::function<bool(int start_row, int num_rows,
+                                    const uint8_t* rows, size_t size,
+                                    int full_width, int full_height)>;
+
+  explicit IncrementalJpegDecoder(EmitFn emit) : emit_(std::move(emit)) {
+    cinfo_.err = jpeg_std_error(&err_.pub);
+    err_.pub.error_exit = &JpegErrorExit;
+    err_.pub.emit_message = &JpegEmitMessage;
+    if (setjmp(err_.jump)) {
+      fatal_ = true;
+      return;
+    }
+    jpeg_create_decompress(&cinfo_);
+    created_ = true;
+    src_.pub.init_source = [](j_decompress_ptr) {};
+    src_.pub.fill_input_buffer = [](j_decompress_ptr) -> boolean {
+      return FALSE;  // Suspend: the caller feeds more via Feed().
+    };
+    src_.pub.skip_input_data = &SkipInputData;
+    src_.pub.resync_to_restart = jpeg_resync_to_restart;
+    src_.pub.term_source = [](j_decompress_ptr) {};
+    src_.pub.next_input_byte = nullptr;
+    src_.pub.bytes_in_buffer = 0;
+    src_.owner = this;
+    cinfo_.src = &src_.pub;
+  }
+
+  ~IncrementalJpegDecoder() {
+    if (created_) jpeg_destroy_decompress(&cinfo_);
+  }
+
+  IncrementalJpegDecoder(const IncrementalJpegDecoder&) = delete;
+  IncrementalJpegDecoder& operator=(const IncrementalJpegDecoder&) = delete;
+
+  bool fatal() const { return fatal_; }
+  int width() const { return width_; }
+  int height() const { return height_; }
+
+  // Feeds `len` more JPEG bytes and decodes whatever is now available.
+  // Returns kOk (progress made / awaiting more), kCancelled (the emit
+  // callback asked to stop), or kProtocolError (fatal decode error).
+  Status Feed(const uint8_t* data, size_t len) {
+    buf_.insert(buf_.end(), data, data + len);
+    return Pump(/*finishing=*/false);
+  }
+
+  // Called once the page's whole JPEG (through EOI) has been fed: drains any
+  // remaining scanlines (libjpeg fills a short tail via a synthesized EOI)
+  // and finishes.
+  Status Finish() { return Pump(/*finishing=*/true); }
+
+ private:
+  static void SkipInputData(j_decompress_ptr cinfo, long num_bytes) {
+    auto* src = reinterpret_cast<SuspendSource*>(cinfo->src);
+    if (num_bytes <= 0) return;
+    const size_t n = static_cast<size_t>(num_bytes);
+    if (n <= src->pub.bytes_in_buffer) {
+      src->pub.next_input_byte += n;
+      src->pub.bytes_in_buffer -= n;
+    } else {
+      // The segment to skip isn't all buffered yet: consume what we have and
+      // defer the rest to the next Feed (applied before the pointers are
+      // re-armed).
+      src->owner->skip_pending_ += n - src->pub.bytes_in_buffer;
+      src->pub.next_input_byte += src->pub.bytes_in_buffer;
+      src->pub.bytes_in_buffer = 0;
+    }
+  }
+
+  // Records how much of buf_ libjpeg consumed so the next Pump can drop it.
+  void Save() { consumed_ = buf_.size() - src_.pub.bytes_in_buffer; }
+
+  Status Pump(bool finishing) {
+    if (fatal_) return Status::kProtocolError;
+    if (cancelled_) return Status::kCancelled;
+    if (done_) return Status::kOk;
+
+    if (setjmp(err_.jump)) {
+      fatal_ = true;
+      return Status::kProtocolError;
+    }
+
+    // Drop already-consumed bytes, apply any deferred skip, then arm the
+    // source pointers at the unconsumed remainder.
+    if (consumed_ > 0) {
+      buf_.erase(buf_.begin(), buf_.begin() + consumed_);
+      consumed_ = 0;
+    }
+    if (skip_pending_ > 0) {
+      const size_t drop = std::min(skip_pending_, buf_.size());
+      buf_.erase(buf_.begin(), buf_.begin() + drop);
+      skip_pending_ -= drop;
+      if (skip_pending_ > 0) return Status::kOk;  // Need more before skipping.
+    }
+    src_.pub.next_input_byte = buf_.data();
+    src_.pub.bytes_in_buffer = buf_.size();
+
+    if (!header_done_) {
+      if (jpeg_read_header(&cinfo_, TRUE) == JPEG_SUSPENDED) {
+        Save();
+        return Status::kOk;
+      }
+      header_done_ = true;
+      cinfo_.out_color_space = JCS_RGB;
+      cinfo_.dct_method = JDCT_ISLOW;  // Match DecodeJpeg's TJFLAG_ACCURATEDCT.
+    }
+    if (!started_) {
+      if (!jpeg_start_decompress(&cinfo_)) {
+        Save();
+        return Status::kOk;
+      }
+      started_ = true;
+      width_ = static_cast<int>(cinfo_.output_width);
+      height_ = static_cast<int>(cinfo_.output_height);
+      stride_ = static_cast<size_t>(width_) *
+                static_cast<size_t>(cinfo_.output_components);
+      rows_.assign(stride_ * kBandRows, 0);
+    }
+
+    // Drain scanlines in row-groups, emitting a band each.
+    while (cinfo_.output_scanline < cinfo_.output_height) {
+      const int want = std::min<int>(
+          kBandRows, static_cast<int>(cinfo_.output_height -
+                                      cinfo_.output_scanline));
+      JSAMPROW ptrs[kBandRows];
+      for (int i = 0; i < want; ++i) ptrs[i] = rows_.data() + i * stride_;
+      const int start = static_cast<int>(cinfo_.output_scanline);
+      const JDIMENSION got =
+          jpeg_read_scanlines(&cinfo_, ptrs, static_cast<JDIMENSION>(want));
+      if (got == 0) {  // Suspended: no full scanline available yet.
+        Save();
+        return Status::kOk;
+      }
+      if (emit_ &&
+          !emit_(start, static_cast<int>(got), rows_.data(),
+                 static_cast<size_t>(got) * stride_, width_, height_)) {
+        cancelled_ = true;
+        return Status::kCancelled;
+      }
+    }
+
+    // Every scanline produced. Finish (still needs the trailing EOI byte).
+    if (!jpeg_finish_decompress(&cinfo_) && !finishing) {
+      Save();
+      return Status::kOk;
+    }
+    done_ = true;
+    return Status::kOk;
+  }
+
+  EmitFn emit_;
+  struct jpeg_decompress_struct cinfo_ {};
+  JpegErrorMgr err_{};
+  SuspendSource src_{};
+  std::vector<uint8_t> buf_;   // Unconsumed JPEG bytes fed so far.
+  std::vector<uint8_t> rows_;  // Scratch for one band's decoded scanlines.
+  size_t consumed_ = 0;
+  size_t skip_pending_ = 0;
+  size_t stride_ = 0;
+  int width_ = 0;
+  int height_ = 0;
+  bool created_ = false;
+  bool header_done_ = false;
+  bool started_ = false;
+  bool done_ = false;
+  bool fatal_ = false;
+  bool cancelled_ = false;
+};
 
 // Buffers reads from a Transport and consumes them structurally: exact
 // byte counts or "peek ahead without consuming". A real TCP stream can
@@ -368,9 +614,13 @@ Status ReadOneChunkBody(Framer* framer, const BlockHeader& header,
 // the header parser, which would misframe it.
 constexpr int kBlockTypeColor = 0x64;
 
-Status RunColorScan(Framer* framer, int timeout_ms,
+Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
                     std::vector<ScanResult>* out) {
   std::map<int, std::vector<uint8_t>> in_progress;  // page index -> JPEG bytes.
+  // Per-page suspending decoders, live only when streaming. A duplex feed
+  // interleaves two pages' chunks, so each page index keeps its own decoder
+  // state (matching the per-page JPEG accumulators above).
+  std::map<int, std::unique_ptr<IncrementalJpegDecoder>> decoders;
   for (;;) {
     std::vector<uint8_t> lead;
     Status s = framer->Peek(2, timeout_ms, &lead);
@@ -397,14 +647,35 @@ Status RunColorScan(Framer* framer, int timeout_ms,
           jpeg[jpeg.size() - 1] != 0xd9) {
         return Status::kProtocolError;
       }
-      Image image;
-      const Status decode_status = DecodeJpeg(jpeg.data(), jpeg.size(), &image);
-      if (decode_status != Status::kOk) return decode_status;
+
+      int page_width = 0;
+      int page_height = 0;
+      if (on_band) {
+        // Streaming: the incremental decoder already produced every band; it
+        // also carries the page's SOF dimensions (identical to what DecodeJpeg
+        // reads). Draining it here also emits any trailing rows the device
+        // left a few MCUs short of the SOF height.
+        auto dit = decoders.find(pidx);
+        if (dit == decoders.end()) return Status::kProtocolError;
+        const Status fs = dit->second->Finish();
+        if (fs != Status::kOk) return fs;  // kCancelled / kProtocolError.
+        if (dit->second->fatal()) return Status::kProtocolError;
+        page_width = dit->second->width();
+        page_height = dit->second->height();
+        decoders.erase(dit);
+      } else {
+        Image image;
+        const Status decode_status =
+            DecodeJpeg(jpeg.data(), jpeg.size(), &image);
+        if (decode_status != Status::kOk) return decode_status;
+        page_width = image.width;
+        page_height = image.height;
+      }
 
       ScanResult page;
       page.format = PixelFormat::kRgb;
-      page.width = image.width;
-      page.height = image.height;
+      page.width = page_width;
+      page.height = page_height;
       page.data = std::move(jpeg);
       out->push_back(std::move(page));
       in_progress.erase(it);
@@ -435,28 +706,31 @@ Status RunColorScan(Framer* framer, int timeout_ms,
     BlockHeader header;
     s = ReadBlockHeader(framer, timeout_ms, &header);
     if (s != Status::kOk) return s;
-    s = ReadOneChunkBody(framer, header, timeout_ms,
-                         &in_progress[header.page_index]);
-    if (s != Status::kOk) return s;
-  }
-}
 
-// Reads a full raw gray payload: exactly `total_bytes`, with no embedded
-// headers to skip.
-//
-// This is NOT symmetric with ReadChunkedJpeg, which was the working
-// assumption until a live probe against the real device disproved it: a
-// gray scan large enough to cross the same kMaxChunkBytes boundary a
-// color scan chunks at (a 300x300-pixel-area gray scan, 90000 bytes) read
-// straight through with no header spliced in -- the bytes at that offset
-// were plain 0xff pixel data (blank glass), not an anchor match. The
-// mid-stream headers seen for color are apparently tied to how the
-// device's JPEG encoder flushes its output in bounded bursts, not a
-// general network-layer framing; raw (GRAY64/C=NONE) mode has no encoder
-// in the loop and is just one continuous byte stream.
-Status ReadRawGray(Framer* framer, size_t total_bytes, int timeout_ms,
-                    std::vector<uint8_t>* raw) {
-  return framer->ReadExact(total_bytes, timeout_ms, raw);
+    std::vector<uint8_t>& jpeg = in_progress[header.page_index];
+    const size_t before = jpeg.size();
+    s = ReadOneChunkBody(framer, header, timeout_ms, &jpeg);
+    if (s != Status::kOk) return s;
+
+    if (on_band) {
+      // Feed only this chunk's fresh bytes into the page's decoder, emitting
+      // whatever scanlines they complete. page_index is the 0-based device
+      // page index (pidx - 1).
+      auto& decoder = decoders[header.page_index];
+      if (!decoder) {
+        const int pidx = header.page_index;
+        decoder = std::make_unique<IncrementalJpegDecoder>(
+            [&on_band, pidx](int start_row, int num_rows, const uint8_t* rows,
+                             size_t size, int full_width, int full_height) {
+              return EmitBand(on_band, pidx - 1, PixelFormat::kRgb, full_width,
+                              full_height, start_row, num_rows, rows,
+                              size) == Status::kOk;
+            });
+      }
+      s = decoder->Feed(jpeg.data() + before, jpeg.size() - before);
+      if (s != Status::kOk) return s;  // kCancelled / kProtocolError.
+    }
+  }
 }
 
 // BlockHeader::type values relevant to a C=RLENGTH scan (TEXT, ERRDIF,
@@ -496,11 +770,17 @@ constexpr int kBlockTypeRlength = 0x42;
 // that isn't at the expected offset, not silent corruption.
 Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
                         int height, size_t row_bytes, int timeout_ms,
+                        const BandCallback& on_band, int page_index,
+                        PixelFormat format, int width_px,
                         std::vector<uint8_t>* pixels) {
   pixels->clear();
+  // Reserve the whole page up front so appending a row never reallocates: the
+  // streaming bands below point directly into `pixels`, so their data must
+  // stay put until the callback returns.
   pixels->reserve(row_bytes * static_cast<size_t>(height));
 
   BlockHeader header = first_header;
+  int band_start = 0;  // First row of the band currently accumulating.
   for (int row = 0; row < height; ++row) {
     if (row > 0) {
       const Status s = ReadBlockHeader(framer, timeout_ms, &header);
@@ -526,6 +806,54 @@ Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
                                           row_out.data(), row_out.size());
       if (ds != Status::kOk) return ds;
       pixels->insert(pixels->end(), row_out.begin(), row_out.end());
+    }
+
+    // Flush a band every kBandRows decoded rows (and at the last row).
+    if (on_band && ((row + 1) % kBandRows == 0 || row + 1 == height)) {
+      const int num_rows = row + 1 - band_start;
+      const Status es = EmitBand(
+          on_band, page_index, format, width_px, height, band_start, num_rows,
+          pixels->data() + static_cast<size_t>(band_start) * row_bytes,
+          static_cast<size_t>(num_rows) * row_bytes);
+      if (es != Status::kOk) return es;
+      band_start = row + 1;
+    }
+  }
+  return Status::kOk;
+}
+
+// Reads a raw gray (GRAY64/C=NONE) payload (width * height bytes, no embedded
+// headers) in row-group increments, appending to *raw and emitting a band per
+// group when streaming. Reserving the whole page keeps a band's bytes valid
+// for the callback (see ReadRlengthRows). Reading in groups is byte-for-byte
+// identical to a single ReadExact of the whole payload -- ReadExact loops
+// internally either way.
+//
+// Unlike color, raw gray is NOT chunked with embedded block headers: a live
+// probe found a 90000-byte gray scan read straight through with no header
+// spliced in at the kMaxChunkBytes boundary (plain pixel data there, not an
+// anchor). The mid-stream headers color uses are tied to the JPEG encoder's
+// bounded output bursts; raw gray has no encoder and is one continuous byte
+// stream, so the row-group split here is purely for band granularity.
+Status ReadRawGrayStreaming(Framer* framer, int width, int height,
+                            int timeout_ms, const BandCallback& on_band,
+                            int page_index, std::vector<uint8_t>* raw) {
+  raw->clear();
+  raw->reserve(static_cast<size_t>(width) * static_cast<size_t>(height));
+  const size_t row_bytes = static_cast<size_t>(width);
+  for (int row = 0; row < height; row += kBandRows) {
+    const int num_rows = std::min(kBandRows, height - row);
+    std::vector<uint8_t> chunk;
+    const Status s = framer->ReadExact(row_bytes * static_cast<size_t>(num_rows),
+                                       timeout_ms, &chunk);
+    if (s != Status::kOk) return s;
+    raw->insert(raw->end(), chunk.begin(), chunk.end());
+    if (on_band) {
+      const Status es = EmitBand(
+          on_band, page_index, PixelFormat::kGray, width, height, row, num_rows,
+          raw->data() + static_cast<size_t>(row) * row_bytes,
+          row_bytes * static_cast<size_t>(num_rows));
+      if (es != Status::kOk) return es;
     }
   }
   return Status::kOk;
@@ -586,13 +914,13 @@ void ApplyOfferAreaFallback(const Offer& offer, Params* exec_params) {
 // caller owns the "out is empty on any non-kOk Status" contract and clears it
 // before returning.
 Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
-                  std::vector<ScanResult>* out) {
+                  const BandCallback& on_band, std::vector<ScanResult>* out) {
   // Color (CGRAY/C=JPEG) has its own de-interleaving readout: a duplex feed
   // multiplexes the two sides' chunks by page index, so it cannot use the
   // one-whole-page-at-a-time sequential loop below. RunColorScan handles
   // simplex, duplex, and single-page flatbed alike.
   if (exec_params.mode == ScanMode::kColor) {
-    return RunColorScan(framer, timeout_ms, out);
+    return RunColorScan(framer, timeout_ms, on_band, out);
   }
 
   // TODO(duplex gray/RLENGTH): the gray (GRAY64/C=NONE) and RLENGTH
@@ -611,6 +939,10 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
     if (status != Status::kOk) return status;
 
     ScanResult page;
+    // 0-based page position; for the sequential (gray/RLENGTH) readout this
+    // is also the index the finished page takes in `out` (see the duplex TODO
+    // above -- these modes are simplex-only here).
+    const int page_index = static_cast<int>(out->size());
 
     if (exec_params.mode == ScanMode::kBlackWhite ||
         exec_params.mode == ScanMode::kErrorDiffusion ||
@@ -620,10 +952,12 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
       const int height = exec_params.area.y1 - exec_params.area.y0;
       if (width <= 0 || height <= 0) return Status::kProtocolError;
       const size_t row_bytes = RlengthRowBytes(width, bitonal);
+      const PixelFormat format =
+          bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
 
       std::vector<uint8_t> pixels;
       status = ReadRlengthRows(framer, header, height, row_bytes, timeout_ms,
-                               &pixels);
+                               on_band, page_index, format, width, &pixels);
       if (status != Status::kOk) return status;
 
       Image image;
@@ -639,8 +973,8 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
       page.data = std::move(pixels);
     } else {
       // Gray: raw payload, exactly width * height bytes, no embedded
-      // headers (see ReadRawGray). Width comes from this block's header
-      // (confirmed reliable for a gray payload); height comes from the
+      // headers (see ReadRawGrayStreaming). Width comes from this block's
+      // header (confirmed reliable for a gray payload); height comes from the
       // requested area, since gray has no length field analogous to the
       // JPEG case to confirm it against.
       //
@@ -650,18 +984,17 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
       // device ever auto-crops a gray scan's delivered height short of
       // the requested area (as Task 6's report notes it does for some
       // same-offer color scans, trimming to detected paper edges),
-      // ReadRawGray would block waiting for bytes that never arrive
+      // ReadRawGrayStreaming would block waiting for bytes that never arrive
       // rather than returning the shorter image, surfacing as
       // Status::kTimeout. Not observed in this task's live gray scans,
       // but not independently ruled out either.
       const int width = header.width;
       const int height = exec_params.area.y1 - exec_params.area.y0;
       if (width <= 0 || height <= 0) return Status::kProtocolError;
-      const size_t expected =
-          static_cast<size_t>(width) * static_cast<size_t>(height);
 
       std::vector<uint8_t> raw;
-      status = ReadRawGray(framer, expected, timeout_ms, &raw);
+      status = ReadRawGrayStreaming(framer, width, height, timeout_ms, on_band,
+                                    page_index, &raw);
       if (status != Status::kOk) return status;
 
       Image image;
@@ -717,6 +1050,11 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
 
 Status RunScan(Transport& transport, const Params& params,
                 std::vector<ScanResult>* out) {
+  return RunScan(transport, params, out, BandCallback{});
+}
+
+Status RunScan(Transport& transport, const Params& params,
+                std::vector<ScanResult>* out, const BandCallback& on_band) {
   if (out == nullptr) return Status::kProtocolError;
   out->clear();
 
@@ -798,8 +1136,11 @@ Status RunScan(Transport& transport, const Params& params,
   // From ESC X onward the readout is identical to the button flow's, so it
   // lives in RunReadout. On any failure, `out` must not be left holding a
   // partial page list (see scanner.h's doc comment on RunScan) -- clear it
-  // before returning whatever error status was found.
-  status = RunReadout(&framer, exec_params, kScanTimeoutMs, out);
+  // before returning whatever error status was found. The one exception is
+  // kCancelled (a caller's on_band returned false): keep the pages that
+  // completed before the cancel, as the streaming overload's contract states.
+  status = RunReadout(&framer, exec_params, kScanTimeoutMs, on_band, out);
+  if (status == Status::kCancelled) return status;
   if (status != Status::kOk) {
     out->clear();
     return status;
@@ -877,7 +1218,9 @@ Status RunButtonScan(Transport& transport,
   if (status != Status::kOk) return status;
 
   // The block/payload readout is identical to RunScan's from ESC X onward.
-  status = RunReadout(&framer, exec_params, kScanTimeoutMs, out);
+  // The scan-button flow has no band callback (its ICA/preview wiring is
+  // separate), so it reads whole pages only.
+  status = RunReadout(&framer, exec_params, kScanTimeoutMs, BandCallback{}, out);
   if (status != Status::kOk) {
     out->clear();
     return status;
