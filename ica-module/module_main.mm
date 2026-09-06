@@ -228,6 +228,28 @@ void CopyIntParam(CFDictionaryRef params, CFStringRef key, int* out) {
   }
 }
 
+// Reads a real-valued param (CFNumber, or a CFString holding a number). Sets
+// `*out` and returns true only when a numeric payload is found. Used for the
+// scan-rectangle offset/extent, which the host reports in ICAP_UNITS -- inches
+// carries fractional values (e.g. 8.5), so these must be read as doubles, not
+// truncated to ints.
+bool CopyDoubleParam(CFDictionaryRef params, CFStringRef key, double* out) {
+  if (!params || !out) return false;
+  const void* value = CFDictionaryGetValue(params, key);
+  if (!value) return false;
+  if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+    double d = 0.0;
+    if (CFNumberGetValue((CFNumberRef)value, kCFNumberDoubleType, &d)) {
+      *out = d;
+      return true;
+    }
+  } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
+    *out = CFStringGetDoubleValue((CFStringRef)value);
+    return true;
+  }
+  return false;
+}
+
 // Reads a boolean-valued param. Sets `*out` and returns true only if the key is
 // present (CFBoolean, or a CFNumber treated as nonzero == true).
 bool CopyBoolParam(CFDictionaryRef params, CFStringRef key, bool* out) {
@@ -278,6 +300,30 @@ void ReadIcapEntry(CFDictionaryRef parent, CFStringRef key, bool* has,
   if (probe != INT32_MIN) {
     *has = true;
     *out = probe;
+  }
+}
+
+// Real-valued counterpart of ReadIcapEntry for the scan-rectangle offset/extent.
+// A working ICA scanner module reports these as plain top-level numbers in
+// ICAP_UNITS (offsetX/offsetY/width/height); this reads that flat form first and
+// also tolerates a nested {value[, current]} sub-dict. Sets *has and *out only
+// when a numeric payload is found; leaves them untouched otherwise.
+void ReadIcapDouble(CFDictionaryRef parent, CFStringRef key, bool* has,
+                    double* out) {
+  if (!parent || !has || !out) return;
+  double probe = 0.0;
+  if (CopyDoubleParam(parent, key, &probe)) {
+    *has = true;
+    *out = probe;
+    return;
+  }
+  CFDictionaryRef entry = GetSubDict(parent, key);
+  if (entry) {
+    if (CopyDoubleParam(entry, CFSTR("value"), &probe) ||
+        CopyDoubleParam(entry, CFSTR("current"), &probe)) {
+      *has = true;
+      *out = probe;
+    }
   }
 }
 
@@ -332,10 +378,10 @@ brscan::ica::ScanRequest ReadScanRequest(CFDictionaryRef dict) {
   // Scan rectangle offset/extent. The exact key spellings are device-in-the-loop
   // (the live log truncated before them); probe the likeliest names. The full
   // dump above is the ground truth that confirms them for a follow-up.
-  ReadIcapEntry(src, CFSTR("offsetX"), &sel.has_offset_x, &sel.offset_x);
-  ReadIcapEntry(src, CFSTR("offsetY"), &sel.has_offset_y, &sel.offset_y);
-  ReadIcapEntry(src, CFSTR("width"), &sel.has_width, &sel.width);
-  ReadIcapEntry(src, CFSTR("height"), &sel.has_height, &sel.height);
+  ReadIcapDouble(src, CFSTR("offsetX"), &sel.has_offset_x, &sel.offset_x);
+  ReadIcapDouble(src, CFSTR("offsetY"), &sel.has_offset_y, &sel.offset_y);
+  ReadIcapDouble(src, CFSTR("width"), &sel.has_width, &sel.width);
+  ReadIcapDouble(src, CFSTR("height"), &sel.has_height, &sel.height);
 
   brscan::ica::ScanRequest req = brscan::ica::ScanRequestFromIcap(sel);
 
@@ -926,43 +972,42 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 //     note below for which notification carries the pixels.
 // All of these symbols are exported by ICADevices.tbd, so the module links.
 //
-// HAND-BACK ORCHESTRATION (Task 11, corrected against the ICADevices reference
-// modules -- interface facts only, clean-room):
-//   - The pixels are delivered INLINE as one full-height band in a
-//     kICANotificationTypeScanProgressStatus notification (via
-//     ICDAddBandInfoToNotificationDictionary), NOT in the page-done notification.
-//     Confirmed by Apple's VirtualScanner (Sources/VirtualScanner.m): its
-//     "scan data" transfer mode packs the band into a ScanProgressStatus and
-//     sends it with ICDSendNotificationAndWaitForReply (the replyCode carries a
-//     user cancel); page-done in that mode carries no data.
+// HAND-BACK ORCHESTRATION (Task 14, corrected against a working ICA scanner
+// module's convention -- interface facts only, clean-room, no source copied):
+//   - The in-memory (overview/preview) pixels are delivered INLINE in a
+//     kICANotificationTypeScanProgressStatus notification packed with
+//     ICDAddImageInfoToNotificationDictionary -- the IMAGE-info packer, NOT the
+//     BAND-info packer. A working module (SANE-backed ICA scanner) sends every
+//     data-bearing progress chunk this way: it populates the notification's
+//     kICANotificationImage* keys (image data + width/height/bytesPerRow/
+//     startRow/numberOfRows, documented in ICAApplication.h) that the host
+//     accumulates into the overview/preview image (ICScannerFunctionalUnit's
+//     overviewImage). Task 11 used ICDAddBandInfoToNotificationDictionary
+//     instead; the host accepted the notification (replyCode ok) but never
+//     rendered the overview, because its preview accumulator consumes the
+//     Image-info keys, not the Band-info keys -- THIS is Defect A.
+//   - We send the whole page as one Image-info chunk (dataStartRow=0,
+//     dataNumberOfRows=height); the packer accepts a single full-height chunk
+//     exactly as it accepts a running series (startRow advancing by chunk).
+//   - ICDSendNotificationAndWaitForReply keeps `bytes` alive until icdd copies
+//     it and surfaces a user cancel in replyCode.
 //   - EVERY scanner notification references the device/scanner object's
 //     framework-assigned ICAObject (ScannerObjectInfo::icaObject, which for a
 //     scan is ICD_ScannerStartPB::object) under kICANotificationICAObjectKey.
-//     VirtualScanner sets this on every ScanProgressStatus / ScannerPageDone /
+//     The reference sets this on every ScanProgressStatus / ScannerPageDone /
 //     ScannerScanDone; it does NOT use kICANotificationDeviceICAObjectKey here.
 //   - kICANotificationTypeScannerPageDone then signals the page is complete, and
 //     a final kICANotificationTypeScannerScanDone ends the job -- both carrying
 //     the same device ICAObject and no pixel payload.
 //
-// WHY THE TASK-7 BUILD SHOWED NOTHING (two defects, both fixed here):
-//   1. It sent the band inside a ScannerPageDone, not a ScanProgressStatus, so
-//      the host treated the page as complete-with-no-data and dropped the pixels.
-//   2. It never set kICANotificationICAObjectKey: it tried to mint a per-page
-//      object with ICDNewObject (ICADevice.h), which returns unimpErr (-4) in the
-//      scanner-module runtime -- ICDNewObject is the legacy generic object API
-//      and is not serviced for scanner modules. The scanner-specific creator is
-//      ICDScannerNewObjectInfoCreated (ICD_ScannerCalls.h), used by VirtualScanner
-//      ONLY for its file-based network-transfer mode (paired with a
-//      kICANotificationTypeObjectAdded and a kICANotificationScannerDocumentNameKey
-//      file path), NOT for the in-memory band path this module uses. So no object
-//      is minted here; the band path references the existing device ICAObject.
+// The FINAL (file-transfer) path is unchanged (Task 12): it writes each page to
+// the destination and posts ScannerPageDone with the file path under
+// kICANotificationScannerDocumentNameKey. Only the in-memory overview path uses
+// the Image-info notification above.
 //
-// CLEAN-ROOM: reimplemented from the ICADevices public headers and the observed
-// key/notification-type usage; no reference source copied. If a live re-test
-// shows the host still ignores the bands, the fallback is VirtualScanner's
-// file-based mode: write each page to a temp file, mint an object with
-// ICDScannerNewObjectInfoCreated, and reference the file via
-// kICANotificationScannerDocumentNameKey (see the task report).
+// DIAGNOSTIC: PostPage logs the full notification dictionary it sends so a
+// device-in-the-loop re-test can confirm the host consumes the Image-info keys
+// (the overview render is host-side and cannot be verified from the module).
 
 // Sets the type + the device/scanner ICAObject (under kICANotificationICAObjectKey,
 // the key every scanner notification carries) and pushes the dictionary to the
@@ -987,11 +1032,26 @@ ICAError SendScannerNotification(CFMutableDictionaryRef dict,
                       : ICDSendNotification(&pb);
 }
 
-// Hands one decoded page back as a single full-height band, then signals the page
+// Logs the notification dictionary's keys and the image geometry it carries,
+// WITHOUT dumping the raw pixel bytes (kICANotificationImageDataKey holds the
+// whole image). This is the Defect-A follow-up hook: a device-in-the-loop
+// re-test reads this line to confirm which Image-info keys the host received.
+void LogNotificationDict(const char* label, CFDictionaryRef dict) {
+  if (dict == nullptr) return;
+  NSMutableArray<NSString*>* keys = [NSMutableArray array];
+  for (NSString* k in (__bridge NSDictionary*)dict) {
+    [keys addObject:k];
+  }
+  os_log(Log(), "%{public}s: notification keys=[%{public}@]", label,
+         [keys componentsJoinedByString:@", "]);
+}
+
+// Hands one decoded page (overview/preview, in-memory) back as a single
+// full-height IMAGE-info chunk in a ScanProgressStatus, then signals the page
 // complete. `bytes` must point at `byteCount` host-ready bytes: interleaved
 // 24-bit RGB (post-DecodeJpeg) for kRgb, raw 8-bit gray for kGray, packed 1-bpp
 // for kBitonal. `icaObject` is the device/scanner object (ICD_ScannerStartPB::
-// object). Returns true if the band was accepted and both notifications sent.
+// object). Returns true if the image was accepted and both notifications sent.
 bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
               const uint8_t* bytes, size_t byteCount, int width, int height,
               int pageIndex) {
@@ -1003,44 +1063,27 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
     return false;
   }
 
-  // Map the framework-free descriptor onto the band-info arguments. pixelDataType
-  // is the ImageCaptureCore client enum (0=BW, 1=Gray, 2=RGB).
-  UInt32 pixelDataType = 2;
-  UInt32 bitsPerComponent = 8;
-  switch (format) {
-    case brscan::PixelFormat::kRgb:
-      pixelDataType = 2;
-      bitsPerComponent = 8;
-      break;
-    case brscan::PixelFormat::kGray:
-      pixelDataType = 1;
-      bitsPerComponent = 8;
-      break;
-    case brscan::PixelFormat::kBitonal:
-      pixelDataType = 0;
-      bitsPerComponent = 1;
-      break;
-  }
-
-  // 1) Deliver the pixels: one full-height band in a ScanProgressStatus, waiting
-  //    for the reply so `bytes` outlives the copy and a cancel is observed.
-  CFMutableDictionaryRef bandDict = CFDictionaryCreateMutable(
+  // 1) Deliver the pixels via the IMAGE-info packer (Defect A): populate the
+  //    kICANotificationImage* keys the host's overview/preview accumulator
+  //    consumes -- one full-height chunk (dataStartRow=0, rows=height). Wait for
+  //    the reply so `bytes` outlives the copy and a user cancel is observed.
+  CFMutableDictionaryRef imageDict = CFDictionaryCreateMutable(
       nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
-  if (bandDict == nullptr) return false;
+  if (imageDict == nullptr) return false;
 
-  ICAError addErr = ICDAddBandInfoToNotificationDictionary(
-      bandDict, static_cast<UInt32>(width), static_cast<UInt32>(height),
-      static_cast<UInt32>(d->bits_per_pixel), bitsPerComponent,
-      static_cast<UInt32>(d->samples_per_pixel), /*endianness=*/0,
-      pixelDataType, static_cast<UInt32>(d->bytes_per_row),
+  ICAError addErr = ICDAddImageInfoToNotificationDictionary(
+      imageDict, static_cast<UInt32>(width), static_cast<UInt32>(height),
+      static_cast<UInt32>(d->bytes_per_row),
       /*dataStartRow=*/0, /*dataNumberOfRows=*/static_cast<UInt32>(height),
       static_cast<UInt32>(byteCount), const_cast<uint8_t*>(bytes));
 
-  ICAError bandErr = SendScannerNotification(
-      bandDict, icaObject, kICANotificationTypeScanProgressStatus,
+  LogNotificationDict("PostPage.progress", imageDict);
+
+  ICAError imageErr = SendScannerNotification(
+      imageDict, icaObject, kICANotificationTypeScanProgressStatus,
       /*waitForReply=*/true);
-  CFRelease(bandDict);
+  CFRelease(imageDict);
 
   // 2) Signal the page complete (no payload).
   CFMutableDictionaryRef pageDict = CFDictionaryCreateMutable(
@@ -1055,12 +1098,12 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
   }
 
   os_log(Log(),
-         "PostPage[%d]: %dx%d bpp=%d spp=%lld stride=%lld bytes=%zu "
-         "icaObject=0x%08x addBandInfo=%d sendProgressBand=%d sendPageDone=%d",
-         pageIndex, width, height, d->bits_per_pixel,
-         (long long)d->samples_per_pixel, (long long)d->bytes_per_row,
-         byteCount, icaObject, addErr, bandErr, pageErr);
-  return addErr == noErr && bandErr == noErr && pageErr == noErr;
+         "PostPage[%d]: %dx%d format=%{public}s bpp=%d stride=%lld bytes=%zu "
+         "icaObject=0x%08x addImageInfo=%d sendProgressImage=%d sendPageDone=%d",
+         pageIndex, width, height, PixelFormatName(format), d->bits_per_pixel,
+         (long long)d->bytes_per_row, byteCount, icaObject, addErr, imageErr,
+         pageErr);
+  return addErr == noErr && imageErr == noErr && pageErr == noErr;
 }
 
 // ---------------------------------------------------------------------------

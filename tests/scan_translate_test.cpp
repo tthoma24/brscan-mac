@@ -241,6 +241,35 @@ TEST(CornersFromUserScanAreaTest, NullOutRejected) {
   EXPECT_FALSE(CornersFromUserScanArea(0, 0, 100, 100, nullptr));
 }
 
+// ---------------------------------------------------------------------------
+// Measurement-unit -> pixel conversion (PixelsFromMeasure).
+TEST(PixelsFromMeasureTest, InchesScaleByDpi) {
+  EXPECT_EQ(PixelsFromMeasure(8.5, kIcapUnitsInches, 300), 2550);
+  EXPECT_EQ(PixelsFromMeasure(11.0, kIcapUnitsInches, 300), 3300);
+  EXPECT_EQ(PixelsFromMeasure(1.0, kIcapUnitsInches, 600), 600);
+}
+
+TEST(PixelsFromMeasureTest, PixelsPassThrough) {
+  EXPECT_EQ(PixelsFromMeasure(2550.0, kIcapUnitsPixels, 300), 2550);
+  EXPECT_EQ(PixelsFromMeasure(0.0, kIcapUnitsPixels, 300), 0);
+}
+
+TEST(PixelsFromMeasureTest, CentimetersScaleByDpiOver254) {
+  EXPECT_EQ(PixelsFromMeasure(2.54, kIcapUnitsCentimeters, 300), 300);
+  EXPECT_EQ(PixelsFromMeasure(25.4, kIcapUnitsCentimeters, 300), 3000);
+}
+
+TEST(PixelsFromMeasureTest, RoundsToNearestPixel) {
+  // 8.505 in * 300 = 2551.5 -> rounds to 2552 (half rounds away from zero).
+  EXPECT_EQ(PixelsFromMeasure(8.505, kIcapUnitsInches, 300), 2552);
+}
+
+TEST(PixelsFromMeasureTest, UnsupportedUnitAndBadDpiAreInvalid) {
+  EXPECT_EQ(PixelsFromMeasure(8.5, /*points=*/3, 300), kMeasureInvalid);
+  EXPECT_EQ(PixelsFromMeasure(8.5, kIcapUnitsInches, 0), kMeasureInvalid);
+  EXPECT_EQ(PixelsFromMeasure(8.5, kIcapUnitsInches, -300), kMeasureInvalid);
+}
+
 // The corner output feeds TranslateScanParams unchanged: a converted positive
 // rect flows through as the scan area.
 TEST(CornersFromUserScanAreaTest, FeedsTranslateScanParams) {
@@ -362,10 +391,79 @@ TEST(ScanRequestFromIcapTest, AreaHonouredWhenUnitsUnspecified) {
   EXPECT_TRUE(ScanRequestFromIcap(sel).has_area);
 }
 
-TEST(ScanRequestFromIcapTest, NonPixelUnitsRejectArea) {
+// A US Letter selection in INCHES at 300 dpi converts to the canonical
+// 2550x3300 pixel rectangle -- the geometry the final file scan must still
+// produce after the platen is advertised in inches (Task 14).
+TEST(ScanRequestFromIcapTest, LetterInchesAt300ConvertsTo2550x3300) {
+  IcapScanSelection sel;
+  sel.has_x_resolution = true;
+  sel.x_resolution = 300;
+  sel.has_units = true;
+  sel.units = kIcapUnitsInches;
+  sel.has_offset_x = true;
+  sel.offset_x = 0.0;
+  sel.has_offset_y = true;
+  sel.offset_y = 0.0;
+  sel.has_width = true;
+  sel.width = 8.5;
+  sel.has_height = true;
+  sel.height = 11.0;
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  ASSERT_TRUE(r.has_area);
+  EXPECT_EQ(r.area_x0, 0);
+  EXPECT_EQ(r.area_y0, 0);
+  EXPECT_EQ(r.area_x1, 2550);
+  EXPECT_EQ(r.area_y1, 3300);
+}
+
+// Inches convert at the request's dpi; with no resolution the default (300)
+// applies, and a non-zero inch offset is converted too.
+TEST(ScanRequestFromIcapTest, InchesUseDefaultDpiAndConvertOffset) {
+  IcapScanSelection sel;  // no resolution -> kDefaultDpi (300).
+  sel.has_units = true;
+  sel.units = kIcapUnitsInches;
+  sel.has_offset_x = true;
+  sel.offset_x = 1.0;
+  sel.has_offset_y = true;
+  sel.offset_y = 0.5;
+  sel.has_width = true;
+  sel.width = 2.0;
+  sel.has_height = true;
+  sel.height = 3.0;
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  ASSERT_TRUE(r.has_area);
+  EXPECT_EQ(r.area_x0, 300);
+  EXPECT_EQ(r.area_y0, 150);
+  EXPECT_EQ(r.area_x1, 900);   // (1 + 2) in * 300.
+  EXPECT_EQ(r.area_y1, 1050);  // (0.5 + 3) in * 300.
+}
+
+// Centimeters convert to pixels at dpi / 2.54.
+TEST(ScanRequestFromIcapTest, CentimetersConvertAtDpiOver254) {
+  IcapScanSelection sel;
+  sel.has_x_resolution = true;
+  sel.x_resolution = 300;
+  sel.has_units = true;
+  sel.units = kIcapUnitsCentimeters;
+  sel.has_offset_x = true;
+  sel.offset_x = 0.0;
+  sel.has_offset_y = true;
+  sel.offset_y = 0.0;
+  sel.has_width = true;
+  sel.width = 2.54;  // 1 inch -> 300 px.
+  sel.has_height = true;
+  sel.height = 5.08;  // 2 inches -> 600 px.
+  const ScanRequest r = ScanRequestFromIcap(sel);
+  ASSERT_TRUE(r.has_area);
+  EXPECT_EQ(r.area_x1, 300);
+  EXPECT_EQ(r.area_y1, 600);
+}
+
+// An unsupported unit (e.g. points = 3) leaves the area absent -> full area.
+TEST(ScanRequestFromIcapTest, UnsupportedUnitRejectsArea) {
   IcapScanSelection sel;
   sel.has_units = true;
-  sel.units = 1;  // e.g. inches -- not pixels; area geometry is unknown.
+  sel.units = 3;  // points -- not offered by this module.
   sel.has_offset_x = true;
   sel.has_offset_y = true;
   sel.has_width = true;

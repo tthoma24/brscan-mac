@@ -291,9 +291,9 @@ Each capability is a TWAIN-style container
 | `ICAP_XRESOLUTION`, `ICAP_YRESOLUTION` | `TWON_ENUMERATION` | DPI `{100,150,200,300,400,600}`, current/default 300 | `x_dpi`, `y_dpi` (clamped to the `ESC I` `Offer` max) |
 | `ICAP_BITDEPTH` | `TWON_ENUMERATION` | `ICScannerBitDepth` `{1, 8}`, default 8 | `mode` (paired with `ICAP_PIXELTYPE`) |
 | `ICAP_PIXELTYPE` | `TWON_ENUMERATION` | `ICScannerPixelDataType` `{0 BW, 1 Gray, 2 RGB}`, current/default RGB (2) | `mode` (drives the colour-mode picker: RGB → `kColor`, Gray → `kGray`, BW → `kBlackWhite`) |
-| `ICAP_PHYSICALWIDTH`, `ICAP_PHYSICALHEIGHT` | `TWON_ONEVALUE` | the unit's max extent in `ICAP_UNITS` (pixels at 300 dpi, from `daemon/paper_size.cpp`) | bounds `area` |
+| `ICAP_PHYSICALWIDTH`, `ICAP_PHYSICALHEIGHT` | `TWON_ONEVALUE` | the platen's real extent in **inches** (a `double`): width = widest sheet (A3, 3472 px@300 ÷ 300 = 11.57 in), height = longest sheet (Ledger, 5053 px@300 ÷ 300 = 16.84 in), from `daemon/paper_size.cpp` | bounds `area`; drives the overview platen the host draws |
 | `ICAP_SUPPORTEDSIZES` | `TWON_ENUMERATION` | array of `ICScannerDocumentType` values (see paper mapping) | `area` (via the size picker) |
-| `ICAP_UNITS` | `TWON_ONEVALUE` | `ICScannerMeasurementUnit` pixels = `5` | keeps host geometry in the module's pixel space |
+| `ICAP_UNITS` | `TWON_ENUMERATION` | `ICScannerMeasurementUnit` `{0 inches, 1 cm, 5 pixels}`, current/default **inches (0)** | the host renders the platen from the inch physical extents and echoes the scan rectangle in this unit; `PixelsFromMeasure` converts it back to the module's pixel space |
 | `CAP_FEEDERENABLED` | `TWON_ONEVALUE` | `0` (flatbed selected) | source picker; feeder selection maps to `Source::kAdf` |
 | `CAP_DUPLEX` | `TWON_ONEVALUE` | `0` (`TWDX_NONE`) | duplex control (feeder only) |
 
@@ -331,19 +331,27 @@ prefers the nested `userScanArea`, falls back to the top-level dict, and probes 
 | `ICAP_PIXELTYPE.value` (0/1/2) | `mode` | `0 → kBlackWhite`, `1 → kGray`, `2 → kColor`. (The old `"scan mode"` string heuristic is retired — the host sends the numeric pixel type.) |
 | `selectedFunctionalUnitType.value` | `source` | Flatbed `0` → `Source::kFlatbed`; feeder `3` → `Source::kAdf`. Probed nested then top-level. |
 | `duplex` (bool) | `duplex` | Only honoured for `kAdf`. |
-| scan-rectangle offset + extent (in `ICAP_UNITS`) | `area` (`Area{x0,y0,x1,y1}`) | `x0=offsetX`, `y0=offsetY`, `x1=offsetX+width`, `y1=offsetY+height`, via the pure `CornersFromUserScanArea`; honoured only with a full positive rect and pixel units (`ICAP_UNITS == 5`) or unspecified units. A degenerate/absent rect means `{0,0,0,0}` = "full offered area." **The exact offset/extent key names are still device-in-the-loop** (the live log truncated before them); `ReadScanRequest` probes the likeliest spellings and logs the FULL `userScanArea` dict so a re-test confirms them. |
-| `ICAP_BITDEPTH.value`, `ICAP_UNITS.value` | — | Captured for the trace; `ICAP_UNITS` gates the area, bit depth follows from the mode. |
+| scan-rectangle offset + extent (in `ICAP_UNITS`) | `area` (`Area{x0,y0,x1,y1}`) | The host reports `offsetX`/`offsetY`/`width`/`height` as top-level numbers in `ICAP_UNITS` (read as **doubles**, since inches carry fractions like 8.5). `ScanRequestFromIcap` converts each to pixels at the request's dpi via the pure `PixelsFromMeasure` (inches × dpi; cm × dpi ÷ 2.54; pixels pass through; anything else → full area), then `CornersFromUserScanArea` builds `x1=x0+w`, `y1=y0+h`. A US Letter selection in inches at 300 dpi → `2550×3300`. A degenerate/absent rect or unconvertible unit means `{0,0,0,0}` = "full offered area." `ReadScanRequest` still logs the FULL `userScanArea` dict for a re-test. |
+| `ICAP_BITDEPTH.value`, `ICAP_UNITS.value` | — | Captured for the trace; `ICAP_UNITS` selects the offset/extent conversion, bit depth follows from the mode. |
 | — (no ICA control) | `ScanMode::kTrueGray`, `kErrorDiffusion` | Not exposed; the panel has no natural control for them. |
 
 Reverse direction (device → host), per page: `RunScan` fills a `ScanResult`
 with `format`, `width`, `height`, and native `data`; decision G turns that into
-one full-height band via `ICDAddBandInfoToNotificationDictionary`. Task 11
-corrected the notification orchestration against the ICADevices reference modules
-(interface facts only): the band is carried in a
-`kICANotificationTypeScanProgressStatus` notification (**not** the page-done),
-and **every** scanner notification (progress / `ScannerPageDone` /
-`ScannerScanDone`) references the device/scanner object's framework-assigned
-`ICAObject` (`ICD_ScannerStartPB::object`) under `kICANotificationICAObjectKey`.
+one full-height image chunk. **Task 14 corrected the in-memory (overview) packer**:
+the chunk is packed with `ICDAddImageInfoToNotificationDictionary` — the
+**IMAGE-info** packer that populates the `kICANotificationImage*` keys the host's
+overview/preview accumulator consumes — **not** `ICDAddBandInfoToNotification­Dictionary`.
+This is Defect A: Task 11 used the band packer, and the host accepted the
+notification (`sendProgressBand=0`, `ScannerScanDone err=0`) but never rendered
+the overview because its preview accumulator reads the Image-info keys, not the
+Band-info keys. Convention confirmed against a working SANE-backed ICA scanner
+module's `ScanProgressStatus` hand-back (interface facts only, no source copied).
+The chunk is carried in a `kICANotificationTypeScanProgressStatus` notification
+(**not** the page-done), and **every** scanner notification (progress /
+`ScannerPageDone` / `ScannerScanDone`) references the device/scanner object's
+framework-assigned `ICAObject` (`ICD_ScannerStartPB::object`) under
+`kICANotificationICAObjectKey`. `PostPage` logs the full notification key set so a
+device-in-the-loop re-test can confirm the host consumes the Image-info keys.
 The Task-7 build did neither — it packed the band into a `ScannerPageDone` and
 tried to mint a per-page object with `ICDNewObject`, which returns `unimpErr`
 (-4) in the scanner-module runtime (it is the legacy generic object API and is
@@ -362,11 +370,12 @@ one it asks for or the client hangs. The two modes are distinguished by the keys
 the SetParameters request carries (confirmed from the live trace and Apple's
 public `VirtualScanner` sample module, interface facts only):
 
-- **Overview / preview → in-memory bands.** The request carries
+- **Overview / preview → in-memory image.** The request carries
   `"scan mode" = overview`, `progressNotificationWithData = 1`, and **no**
-  destination. The module keeps the Task-11 path: push the decoded page as one
-  full-height band in a `kICANotificationTypeScanProgressStatus`, then
-  `ScannerPageDone`, then `ScannerScanDone`.
+  destination. The module pushes the decoded page as one full-height chunk via
+  `ICDAddImageInfoToNotificationDictionary` (the Task-14 Defect-A fix; see the
+  reverse-direction note above) in a `kICANotificationTypeScanProgressStatus`,
+  then `ScannerPageDone`, then `ScannerScanDone`.
 
 - **Final scan → file-based transfer.** The request carries a security-scoped
   destination folder under `ICSecurityScopedWrappedURL` (a modern icdd key not
