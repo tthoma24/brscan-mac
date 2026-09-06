@@ -37,6 +37,7 @@
 #import <ICADevices/ICADevices.h>
 #import <os/log.h>
 
+#include <atomic>
 #include <cstring>
 #include <new>
 #include <string>
@@ -44,6 +45,21 @@
 #include "scan_parameters.h"
 
 namespace {
+
+// Rate-limited tracing for callbacks icdd may POLL. A polled callback that
+// os_log()s on every invocation floods the unified log (Plan 2 Task 2 shipped a
+// per-call os_log on ICD_ScannerGetObjectInfo, which spewed hundreds of lines a
+// millisecond once icdd started walking the object tree). LOG_ONCE fires a given
+// call site's message exactly once for the life of the process, so the
+// open/session/parameter path stays traceable while the polled paths go quiet
+// after their first line. Each expansion gets its own private static flag.
+#define LOG_ONCE(fmt, ...)                                       \
+  do {                                                           \
+    static std::atomic<bool> _brscan_logged{false};             \
+    if (!_brscan_logged.exchange(true)) {                        \
+      os_log(Log(), fmt, ##__VA_ARGS__);                         \
+    }                                                            \
+  } while (0)
 
 // os_log tracing. Keep the subsystem the runbook already streams
 // (me.tthoma24.brscan.ica); the "session" category marks this task's callbacks
@@ -190,23 +206,86 @@ ICAError Cleanup(ScannerObjectInfo* objectInfo) {
 }
 
 ICAError PeriodicTask(ScannerObjectInfo* /*objectInfo*/) {
-  // Fires repeatedly while the device is open; log at debug to avoid flooding.
-  os_log_debug(Log(), "callback: ICD_ScannerPeriodicTask");
+  // Fires repeatedly while the device is open; log once so it can never flood.
+  LOG_ONCE("callback: ICD_ScannerPeriodicTask (fires repeatedly; logged once)");
   return noErr;
 }
 
-// A scanner has no child objects to enumerate before a scan; report the end of
-// the (empty) child list with kICAIndexOutOfRangeErr for every index.
-ICAError GetObjectInfo(const ScannerObjectInfo* /*parentInfo*/, UInt32 index,
-                       ScannerObjectInfo* /*newInfo*/) {
-  os_log(Log(), "callback: ICD_ScannerGetObjectInfo index=%u -> none", index);
-  return kICAIndexOutOfRangeErr;
+// Object-tree enumeration. icdd builds the host-visible object tree by calling
+// this for index 0, 1, 2, … under a parent and stopping at kICAIndexOutOfRangeErr
+// (the callback's `/* index is zero based */` contract in ICD_ScannerCalls.h).
+//
+// The Task-2 build returned kICAIndexOutOfRangeErr for EVERY index — i.e. it
+// reported the device object as having zero children. That did not terminate
+// icdd's walk: it re-drove ICD_ScannerGetObjectInfo in a tight, unbounded loop
+// (hundreds of calls a millisecond) and never reached a ready state, because a
+// scanner device object is a container icdd expects to hold its one scan object,
+// and an empty container is treated as "not built yet → walk again". (The
+// earlier load-spike had the mirror-image bug: it returned noErr for every
+// index, i.e. an endless supply of children — an infinite walk the other way.)
+//
+// The fix is a correct, finite tree: the device object (kICADevice) reports
+// exactly ONE child at index 0 — the scan object the host binds the scan panel
+// to — and kICAIndexOutOfRangeErr at index >= 1. That scan object is a leaf: any
+// parent that is not the device object (the scan object itself, or none) reports
+// no children, so the walk terminates at a two-node tree and can never recurse.
+//
+// CLEAN-ROOM / UNVERIFIED (see docs report): the requirement that the device
+// expose exactly one child (rather than zero) is the diagnosis most consistent
+// with BOTH observed loops above; it is inferred from the public callback
+// contract and the device's black-box behaviour, not confirmed against a live
+// icdd trace. If a re-test shows the walk still loops OR a phantom object
+// appears, the alternative to try is zero children delivered as a leaf device
+// object (mark the device non-container in ICD_ScannerOpenTCPIPDevice).
+ICAError GetObjectInfo(const ScannerObjectInfo* parentInfo, UInt32 index,
+                       ScannerObjectInfo* newInfo) {
+  // Only the device object holds a child; every other parent is a leaf. This is
+  // what bounds the tree and prevents any recursion.
+  const bool parentIsDevice =
+      parentInfo != nullptr &&
+      parentInfo->icaObjectInfo.objectType == kICADevice;
+
+  if (!parentIsDevice) {
+    LOG_ONCE("callback: ICD_ScannerGetObjectInfo (leaf parent) -> end-of-list");
+    return kICAIndexOutOfRangeErr;
+  }
+
+  if (index > 0) {
+    LOG_ONCE("callback: ICD_ScannerGetObjectInfo device child list ended "
+             "(one child)");
+    return kICAIndexOutOfRangeErr;
+  }
+
+  if (newInfo == nullptr) return kICADeviceInvalidParamErr;
+
+  // The single scan object. A leaf (objectType != kICADevice, so its own
+  // enumeration returns end-of-list above), carrying no data yet — a real page
+  // object is created when a scan runs (PLAN-2 task 7). privateData stays null:
+  // only the device object owns a DeviceContext, so CloseDevice / Cleanup on
+  // this object are safe no-ops and never double-free the device context.
+  newInfo->icaObjectInfo.objectType = kICAFile;
+  newInfo->icaObjectInfo.objectSubtype = kICAFileImage;
+  newInfo->uniqueID = parentInfo->uniqueID ^ 0x5343414eu;  // 'SCAN'; stable.
+  newInfo->thumbnailSize = 0;
+  newInfo->dataSize = 0;
+  newInfo->dataWidth = 0;
+  newInfo->dataHeight = 0;
+  newInfo->flags = 0;
+  newInfo->privateData = nullptr;
+  std::memset(newInfo->name, 0, sizeof(newInfo->name));
+  std::strncpy(reinterpret_cast<char*>(newInfo->name), "Scan",
+               sizeof(newInfo->name) - 1);
+
+  LOG_ONCE("callback: ICD_ScannerGetObjectInfo -> scan object (index 0), "
+           "child list terminates at index 1");
+  return noErr;
 }
 
 // Standard object properties: defer to the framework helper, which supplies the
 // common property set from the object info we filled at open.
 ICAError GetPropertyData(const ScannerObjectInfo* objectInfo, void* pb) {
-  os_log(Log(), "callback: ICD_ScannerGetPropertyData");
+  // icdd polls property data repeatedly while the panel is open; log once.
+  LOG_ONCE("callback: ICD_ScannerGetPropertyData");
   return ICDScannerGetStandardPropertyData(objectInfo, pb);
 }
 
@@ -282,15 +361,16 @@ ICAError SetParameters(const ScannerObjectInfo* /*deviceObjectInfo*/,
 
 ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
                 ICD_ScannerStatusPB* pb) {
-  os_log(Log(), "callback: ICD_ScannerStatus");
+  // icdd polls status; log once so a poll can never spew.
+  LOG_ONCE("callback: ICD_ScannerStatus");
   if (pb == nullptr) return kICADeviceInvalidParamErr;
   DeviceContext* ctx = ContextOf(deviceObjectInfo);
   // 0 = ready/available. We do not (yet) probe the live device here; a real
   // reachability/busy check belongs with the scan-execution task.
   pb->status = 0;
   pb->header.err = noErr;
-  os_log(Log(), "Status: reporting 0 (ready), sessionOpen=%d",
-         ctx ? ctx->sessionOpen : 0);
+  LOG_ONCE("Status: reporting 0 (ready), sessionOpen=%d",
+           ctx ? ctx->sessionOpen : 0);
   return noErr;
 }
 
