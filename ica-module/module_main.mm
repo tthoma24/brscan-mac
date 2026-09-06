@@ -37,6 +37,8 @@
 #import <Foundation/Foundation.h>
 #import <ICADevices/ICADevices.h>
 #import <ImageIO/ImageIO.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 #import <os/log.h>
 
 #include <atomic>
@@ -49,6 +51,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "brscan/scanner.h"
@@ -109,13 +112,19 @@ struct DeviceContext {
   // brscan::Params, is stored here so ICD_ScannerStart can run RunScan with it.
   brscan::Params params;  // Defaults (kColor/flatbed/300) until SetParameters.
 
-  // Task 12 transfer mode. A FINAL scan carries a destination (a security-scoped
-  // folder URL and/or a "document folder" path) plus document name/format/
-  // extension keys -> file-based transfer: encode the page and WRITE it there.
-  // An overview/preview scan carries none of these -> the in-memory band path
-  // below. SetParameters detects the mode and fills these; the worker consumes
-  // them. `securityScopedURL` is a retained CFURLRef (or null); it is released
-  // in SetParameters (before being overwritten) and in CloseDevice/Cleanup.
+  // Task 12/13 transfer mode. A FINAL scan carries a destination (a
+  // security-scoped folder URL and/or a "document folder" path) plus document
+  // name/format/extension keys -> file-based transfer: encode the page and WRITE
+  // it there. An overview/preview scan carries none of these -> the in-memory
+  // band path below. SetParameters detects the mode and STAGES it in these
+  // fields; because SetParameters mutates them per scan, the worker never reads
+  // them -- Start snapshots them into a per-job ScanJob (below) that the worker
+  // holds by value (Task 13, fixing a cross-scan hand-back race where a
+  // still-running overview worker picked up a later final scan's destination).
+  // `securityScopedURL` is a retained CFURLRef (or null); it is released/replaced
+  // in SetParameters, MOVED into the ScanJob at Start (so its access token
+  // lifetime is per-job), and released in CloseDevice/Cleanup if no scan claimed
+  // it.
   bool fileTransfer = false;
   brscan::ica::TransferPlan transferPlan;
   std::string documentFolderPath;   // Plain-path fallback ("document folder").
@@ -143,6 +152,55 @@ struct DeviceContext {
 DeviceContext* ContextOf(const ScannerObjectInfo* info) {
   return info ? reinterpret_cast<DeviceContext*>(info->privateData) : nullptr;
 }
+
+// A per-scan snapshot of everything the worker needs to hand a page back,
+// captured at Start time and passed BY VALUE to RunScanWorker (Task 13). The
+// transfer settings live on the mutable DeviceContext and are rewritten by
+// SetParameters for every scan; a worker that re-read them at hand-back time
+// could pick up a LATER scan's destination (the live bug: a still-connecting
+// overview worker wrote a partial overview into the final scan's file). Holding
+// them in this value object -- as `params` already were -- guarantees each
+// worker hands back using only its own snapshot. The snapshot OWNS its
+// security-scoped URL: it takes a +1 (moved off ctx, or retained) at
+// construction and releases it in the destructor, so the scoped-access lifetime
+// is per-job with no double-free. Move-only so the ownership is unambiguous.
+struct ScanJob {
+  brscan::Params params;
+  ICAObject deviceObject = 0;
+  bool fileTransfer = false;
+  brscan::ica::TransferPlan transferPlan;
+  std::string documentFolderPath;
+  CFURLRef securityScopedURL = nullptr;  // Owned +1; released in ~ScanJob.
+
+  ScanJob() = default;
+  ~ScanJob() {
+    if (securityScopedURL) CFRelease(securityScopedURL);
+  }
+  ScanJob(ScanJob&& o) noexcept
+      : params(std::move(o.params)),
+        deviceObject(o.deviceObject),
+        fileTransfer(o.fileTransfer),
+        transferPlan(std::move(o.transferPlan)),
+        documentFolderPath(std::move(o.documentFolderPath)),
+        securityScopedURL(o.securityScopedURL) {
+    o.securityScopedURL = nullptr;  // Steal the +1; leave the source empty.
+  }
+  ScanJob& operator=(ScanJob&& o) noexcept {
+    if (this != &o) {
+      if (securityScopedURL) CFRelease(securityScopedURL);
+      params = std::move(o.params);
+      deviceObject = o.deviceObject;
+      fileTransfer = o.fileTransfer;
+      transferPlan = std::move(o.transferPlan);
+      documentFolderPath = std::move(o.documentFolderPath);
+      securityScopedURL = o.securityScopedURL;
+      o.securityScopedURL = nullptr;
+    }
+    return *this;
+  }
+  ScanJob(const ScanJob&) = delete;
+  ScanJob& operator=(const ScanJob&) = delete;
+};
 
 // Reads a CFString value from the host's TCP/IP param dict into `out`.
 void CopyStringParam(CFDictionaryRef params, CFStringRef key, std::string* out) {
@@ -406,9 +464,10 @@ void StopScan(DeviceContext* ctx) {
   if (ctx->scanThread.joinable()) ctx->scanThread.join();
 }
 
-// Releases the retained security-scoped destination URL, if any. Safe to call
-// when none is held. Callers must not hold a scan worker that still borrows it
-// (SetParameters and the close paths call this only when no scan is running).
+// Releases the retained security-scoped destination URL staged on the context,
+// if any. Safe to call when none is held. A running worker holds its OWN retained
+// copy in its ScanJob snapshot (Task 13), so this only ever frees ctx's staged
+// +1 -- it never races a worker's borrow.
 void ReleaseScopedURL(DeviceContext* ctx) {
   if (ctx && ctx->securityScopedURL) {
     CFRelease(ctx->securityScopedURL);
@@ -649,12 +708,81 @@ std::string LookupStringParam(CFDictionaryRef dict, NSString* key) {
   return std::string();
 }
 
+// Unwraps an NSSecurityScopedURLWrapper to the real security-scoped NSURL it
+// carries (Task 13). The wrapper is a modern icdd type with NO public header, so
+// the destination arrived under ICSecurityScopedWrappedURL as this opaque object
+// and the Task-12 build logged "unexpected value class" and fell back to the
+// plain path. Clean-room: rather than assume one accessor, probe the object's
+// runtime interface -- the public-looking, zero-argument, object-returning
+// selectors a URL wrapper would plausibly expose -- and, failing those, KVC.
+// Each dynamic call is guarded so an unexpected shape can never throw into the
+// callback, and if nothing yields an NSURL the wrapper's full method list is
+// logged so a follow-up can pin the exact accessor. Returns an autoreleased
+// NSURL (or nil); the caller retains what it keeps.
+NSURL* UnwrapSecurityScopedURL(id wrapper) {
+  if (wrapper == nil) return nil;
+
+  // Zero-arg, object-returning accessors a scoped-URL wrapper plausibly exposes.
+  static const char* const kSelectorNames[] = {
+      "URL", "url", "fileURL", "securityScopedURL", "scopedURL",
+      "nsURL", "wrappedURL"};
+  for (const char* name : kSelectorNames) {
+    SEL sel = sel_getUid(name);
+    if (![wrapper respondsToSelector:sel]) continue;
+    @try {
+      // Call through a typed objc_msgSend cast so the object return uses the
+      // right calling convention; the result is an autoreleased NSURL by naming
+      // convention (no alloc/new/copy family), which the caller retains to keep.
+      id result = ((id (*)(id, SEL))objc_msgSend)(wrapper, sel);
+      if ([result isKindOfClass:[NSURL class]]) {
+        os_log(Log(), "UnwrapSecurityScopedURL: unwrapped via -%{public}s", name);
+        return (NSURL*)result;
+      }
+    } @catch (NSException* e) {
+      os_log_error(Log(),
+                   "UnwrapSecurityScopedURL: -%{public}s threw %{public}@", name,
+                   e.reason);
+    }
+  }
+
+  // KVC fallback for a backing property not exposed as a callable selector.
+  for (NSString* key in @[ @"URL", @"url", @"fileURL" ]) {
+    @try {
+      id result = [wrapper valueForKey:key];
+      if ([result isKindOfClass:[NSURL class]]) {
+        os_log(Log(), "UnwrapSecurityScopedURL: unwrapped via KVC '%{public}@'",
+               key);
+        return (NSURL*)result;
+      }
+    } @catch (NSException* e) {
+      // valueForKey: throws for an unknown key; try the next candidate.
+    }
+  }
+
+  // Nothing worked: dump the class's methods so the accessor can be pinned.
+  NSMutableArray<NSString*>* methods = [NSMutableArray array];
+  unsigned int count = 0;
+  Method* list = class_copyMethodList([wrapper class], &count);
+  if (list) {
+    for (unsigned int i = 0; i < count; ++i) {
+      [methods addObject:NSStringFromSelector(method_getName(list[i]))];
+    }
+    free(list);
+  }
+  os_log_error(Log(),
+               "UnwrapSecurityScopedURL: no accessor yielded an NSURL; "
+               "class=%{public}@ methods=%{public}@",
+               [wrapper class], methods);
+  return nil;
+}
+
 // Resolves the host's security-scoped destination folder to a retained CFURLRef
 // (caller owns the +1; ReleaseScopedURL frees it), or null if absent/unusable.
 // The value under ICSecurityScopedWrappedURL is NOT declared in any public SDK
 // header -- it is a modern icdd key observed only in our own live logs -- so its
 // concrete type is handled defensively: an NSURL is used as-is; NSData is
-// resolved as a security-scoped bookmark; an NSString is treated as a file path.
+// resolved as a security-scoped bookmark; an NSString is treated as a file path;
+// and the observed NSSecurityScopedURLWrapper is unwrapped clean-room (Task 13).
 CFURLRef ResolveSecurityScopedURL(CFDictionaryRef dict) {
   id value = LookupParamValue(dict, @"ICSecurityScopedWrappedURL");
   if (value == nil) return nullptr;
@@ -676,10 +804,17 @@ CFURLRef ResolveSecurityScopedURL(CFDictionaryRef dict) {
   } else if ([value isKindOfClass:[NSString class]]) {
     url = [NSURL fileURLWithPath:(NSString*)value];
   } else {
-    os_log_error(Log(),
-                 "ResolveSecurityScopedURL: unexpected value class %{public}@",
-                 [value class]);
-    return nullptr;
+    // Not a public type -- the observed NSSecurityScopedURLWrapper. Unwrap it to
+    // the real scoped NSURL clean-room; if that fails, DetectTransferMode still
+    // keeps the plain "document folder" path as the primary destination.
+    url = UnwrapSecurityScopedURL(value);
+    if (url == nil) {
+      os_log_error(Log(),
+                   "ResolveSecurityScopedURL: could not unwrap value class "
+                   "%{public}@ (falling back to plain path)",
+                   [value class]);
+      return nullptr;
+    }
   }
   if (url == nil) return nullptr;
   return static_cast<CFURLRef>(CFRetain((__bridge CFTypeRef)url));
@@ -689,11 +824,12 @@ CFURLRef ResolveSecurityScopedURL(CFDictionaryRef dict) {
 // device context: a FINAL scan carries a security-scoped destination URL and/or
 // a "document folder" path plus document name/format/extension keys -> file
 // based transfer; an overview/preview scan carries none of these -> the
-// in-memory band path. Must run only when no worker is in flight (SetParameters
-// precedes Start), since it releases/replaces the borrowed scoped URL.
+// in-memory band path. It stages the result on ctx for the next Start to
+// snapshot; a still-running worker is unaffected because it already holds its own
+// per-job snapshot (Task 13), so releasing ctx's staged scoped URL here is safe.
 void DetectTransferMode(DeviceContext* ctx, CFDictionaryRef dict) {
   if (ctx == nullptr) return;
-  ReleaseScopedURL(ctx);  // Drop any prior request's scoped URL.
+  ReleaseScopedURL(ctx);  // Drop any prior request's staged scoped URL.
   ctx->fileTransfer = false;
   ctx->documentFolderPath.clear();
 
@@ -1012,7 +1148,7 @@ bool WriteImageToURL(CGImageRef image, NSURL* fileURL, CFStringRef uti) {
 // around the write, encodes via ImageIO, then posts a ScannerPageDone carrying
 // the written file path under kICANotificationScannerDocumentNameKey. Returns
 // true if the file was written.
-bool PostFilePage(DeviceContext* ctx, ICAObject icaObject,
+bool PostFilePage(const ScanJob& job, ICAObject icaObject,
                   brscan::PixelFormat format, const uint8_t* bytes,
                   size_t byteCount, int width, int height, int pageIndex) {
   bool wrote = false;
@@ -1020,22 +1156,30 @@ bool PostFilePage(DeviceContext* ctx, ICAObject icaObject,
   @autoreleasepool {
     NSURL* folderURL = nil;
     BOOL accessing = NO;
-    if (ctx->securityScopedURL != nullptr) {
-      folderURL = (__bridge NSURL*)ctx->securityScopedURL;
+    const char* pathKind = "none";
+    if (job.securityScopedURL != nullptr) {
+      // Scoped destination: start accessing the security-scoped resource for the
+      // duration of the write, then stop below (per-job token from the snapshot).
+      folderURL = (__bridge NSURL*)job.securityScopedURL;
       accessing = [folderURL startAccessingSecurityScopedResource];
-    } else if (!ctx->documentFolderPath.empty()) {
+      pathKind = "scoped";
+    } else if (!job.documentFolderPath.empty()) {
       NSString* p =
-          [[NSString stringWithUTF8String:ctx->documentFolderPath.c_str()]
+          [[NSString stringWithUTF8String:job.documentFolderPath.c_str()]
               stringByExpandingTildeInPath];
       folderURL = [NSURL fileURLWithPath:p isDirectory:YES];
+      pathKind = "plain";
     }
     if (folderURL == nil) {
       os_log_error(Log(), "PostFilePage[%d]: no destination folder", pageIndex);
       return false;
     }
+    os_log(Log(),
+           "PostFilePage[%d]: destination path=%{public}s scopedAccess=%d",
+           pageIndex, pathKind, accessing);
 
     const std::string filename =
-        brscan::ica::TransferFilenameForPage(ctx->transferPlan, pageIndex);
+        brscan::ica::TransferFilenameForPage(job.transferPlan, pageIndex);
     NSURL* fileURL = [folderURL
         URLByAppendingPathComponent:[NSString
                                         stringWithUTF8String:filename.c_str()]];
@@ -1043,10 +1187,10 @@ bool PostFilePage(DeviceContext* ctx, ICAObject icaObject,
     CGImageRef image = CreatePageImage(format, bytes, byteCount, width, height);
     if (image != nullptr) {
       NSString* utiStr =
-          [NSString stringWithUTF8String:ctx->transferPlan.uti.c_str()];
+          [NSString stringWithUTF8String:job.transferPlan.uti.c_str()];
       os_log(Log(),
              "file transfer: writing %{public}@ format=%{public}s %dx%d",
-             fileURL.path, ctx->transferPlan.uti.c_str(), width, height);
+             fileURL.path, job.transferPlan.uti.c_str(), width, height);
       wrote = WriteImageToURL(image, fileURL, (__bridge CFStringRef)utiStr);
       CGImageRelease(image);
     } else {
@@ -1099,13 +1243,14 @@ bool PostFilePage(DeviceContext* ctx, ICAObject icaObject,
 // normal host-initiated RunScan (button_flow == false), then hands each page
 // back and finishes with a ScannerScanDone. Holds a raw ctx pointer, kept valid
 // by StopScan joining this thread before the context is freed.
-void RunScanWorker(DeviceContext* ctx, brscan::Params params,
-                   ICAObject deviceObject) {
+void RunScanWorker(DeviceContext* ctx, ScanJob job) {
+  const brscan::Params& params = job.params;
+  const ICAObject deviceObject = job.deviceObject;
   os_log(Log(),
          "ScanWorker: begin ip='%{public}s' port=%d mode=%{public}s dpi=%d "
-         "source=%{public}s duplex=%d",
+         "source=%{public}s duplex=%d fileTransfer=%d",
          ctx->ipAddress.c_str(), ctx->port, ModeName(params.mode), params.x_dpi,
-         SourceName(params.source), params.duplex);
+         SourceName(params.source), params.duplex, job.fileTransfer);
 
   brscan::TcpTransport transport(ctx->ipAddress,
                                  static_cast<uint16_t>(ctx->port));
@@ -1189,8 +1334,10 @@ void RunScanWorker(DeviceContext* ctx, brscan::Params params,
         if (ready) {
           // Task 12: a FINAL scan writes the page to the host's destination
           // file; an overview/preview scan pushes it back as an in-memory band.
-          if (ctx->fileTransfer) {
-            PostFilePage(ctx, deviceObject, outFormat, bytes, byteCount,
+          // The mode + destination come from this worker's own snapshot, never
+          // the mutable ctx (Task 13).
+          if (job.fileTransfer) {
+            PostFilePage(job, deviceObject, outFormat, bytes, byteCount,
                          outWidth, outHeight, idx);
           } else {
             PostPage(deviceObject, outFormat, bytes, byteCount, outWidth,
@@ -1248,22 +1395,39 @@ ICAError Start(const ScannerObjectInfo* deviceObjectInfo,
     return kICADeviceInternalErr;
   }
 
-  // Reap any prior worker (e.g. a scan that already finished) before starting a
-  // new one, and clear the cancel flag for this run.
-  if (ctx->scanThread.joinable()) ctx->scanThread.join();
+  // Cancel any in-flight scan before starting a new one (Task 13). StopScan sets
+  // the cancel flag, disconnects the live socket so a blocked RunScan unwinds,
+  // and JOINS the stale worker -- so a superseded overview/scan cannot linger or
+  // hand a page back into this new scan's destination. (This replaces a bare
+  // join that only reaped an already-finished worker and would have let a still
+  // running one overlap.) Then clear the cancel flag for this run.
+  StopScan(ctx);
   ctx->cancelRequested.store(false);
 
-  const brscan::Params params = ctx->params;
-  const ICAObject deviceObject = pb->object;
+  // Snapshot the transfer settings + params into a per-job value object so the
+  // worker hands back using ONLY its own copy, immune to a later SetParameters
+  // rewriting the mutable ctx fields. Ownership of the resolved security-scoped
+  // URL MOVES from ctx into the job (its access-token lifetime is now per-job,
+  // released when the job is destroyed), leaving ctx with nothing to double-free.
+  ScanJob job;
+  job.params = ctx->params;
+  job.deviceObject = pb->object;
+  job.fileTransfer = ctx->fileTransfer;
+  job.transferPlan = ctx->transferPlan;
+  job.documentFolderPath = ctx->documentFolderPath;
+  job.securityScopedURL = ctx->securityScopedURL;  // Move the +1.
+  ctx->securityScopedURL = nullptr;
+
+  const brscan::Params& params = job.params;
   os_log(Log(),
          "Start: launching scan worker mode=%{public}s dpi=%d source=%{public}s "
-         "duplex=%d area=(%d,%d,%d,%d)",
+         "duplex=%d area=(%d,%d,%d,%d) fileTransfer=%d",
          ModeName(params.mode), params.x_dpi, SourceName(params.source),
          params.duplex, params.area.x0, params.area.y0, params.area.x1,
-         params.area.y1);
+         params.area.y1, job.fileTransfer);
 
   // Run off icdd's callback thread; completion is posted via ScannerScanDone.
-  ctx->scanThread = std::thread(RunScanWorker, ctx, params, deviceObject);
+  ctx->scanThread = std::thread(RunScanWorker, ctx, std::move(job));
 
   pb->header.err = noErr;
   return noErr;
