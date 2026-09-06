@@ -4,6 +4,7 @@
 #include "scan_translate.h"
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 #include "brscan/types.h"
@@ -34,6 +35,25 @@ bool CornersFromUserScanArea(int offset_x, int offset_y, int width, int height,
   return true;
 }
 
+int PixelsFromMeasure(double value, int unit, int dpi) {
+  if (dpi <= 0) return kMeasureInvalid;
+  double pixels;
+  switch (unit) {
+    case kIcapUnitsInches:
+      pixels = value * dpi;
+      break;
+    case kIcapUnitsCentimeters:
+      pixels = value * dpi / 2.54;
+      break;
+    case kIcapUnitsPixels:
+      pixels = value;
+      break;
+    default:
+      return kMeasureInvalid;
+  }
+  return static_cast<int>(std::lround(pixels));
+}
+
 ScanRequest ScanRequestFromIcap(const IcapScanSelection& sel) {
   ScanRequest req;
 
@@ -58,15 +78,26 @@ ScanRequest ScanRequestFromIcap(const IcapScanSelection& sel) {
   }
   req.duplex = sel.duplex;
 
-  // Scan area: honour the offset+extent only with a complete rectangle and
-  // pixel units (or unspecified units); CornersFromUserScanArea rejects a
-  // degenerate rect, leaving has_area false (full offered area).
-  const bool units_ok = !sel.has_units || sel.units == kIcapUnitsPixels;
-  if (units_ok && sel.has_offset_x && sel.has_offset_y && sel.has_width &&
-      sel.has_height) {
+  // Scan area: honour the offset+extent only with a complete rectangle whose
+  // unit converts to pixels. The host reports the rectangle in ICAP_UNITS; an
+  // unspecified unit is treated as pixels (legacy). PixelsFromMeasure brings each
+  // coordinate into the module's pixel space at the request's dpi (default 300
+  // when the host sends no resolution), and CornersFromUserScanArea then rejects
+  // a degenerate rect -- leaving has_area false (full offered area).
+  const int area_dpi = req.has_resolution && req.resolution > 0
+                           ? req.resolution
+                           : kDefaultDpi;
+  const int unit = sel.has_units ? sel.units : kIcapUnitsPixels;
+  if (sel.has_offset_x && sel.has_offset_y && sel.has_width && sel.has_height) {
+    const int px_off_x = PixelsFromMeasure(sel.offset_x, unit, area_dpi);
+    const int px_off_y = PixelsFromMeasure(sel.offset_y, unit, area_dpi);
+    const int px_width = PixelsFromMeasure(sel.width, unit, area_dpi);
+    const int px_height = PixelsFromMeasure(sel.height, unit, area_dpi);
     Area corners{};
-    if (CornersFromUserScanArea(sel.offset_x, sel.offset_y, sel.width,
-                                sel.height, &corners)) {
+    if (px_off_x != kMeasureInvalid && px_off_y != kMeasureInvalid &&
+        px_width != kMeasureInvalid && px_height != kMeasureInvalid &&
+        CornersFromUserScanArea(px_off_x, px_off_y, px_width, px_height,
+                                &corners)) {
       req.has_area = true;
       req.area_x0 = corners.x0;
       req.area_y0 = corners.y0;

@@ -17,10 +17,10 @@ namespace brscan::ica {
 
 namespace {
 
-// Reference resolution the advertised paper extents are reported at. ICAP_UNITS
-// is advertised as pixels (below), and pixel extents depend on dpi, so the
-// PHYSICALWIDTH/HEIGHT extents are captured at 300 dpi to match the ground-truth
-// geometry table (daemon/paper_size.cpp) exactly.
+// Reference dpi the ground-truth geometry table (daemon/paper_size.cpp) is
+// captured at. The platen's physical extents are advertised in INCHES (see
+// BuildUnit and PLAN-2-DESIGN.md), so the pixel extents read from the table at
+// this dpi are divided by it to yield inches (pixels@300 / 300 = inches).
 constexpr int kReferenceDpi = 300;
 
 // Resolutions the Brother MFC-J6920DW offers over the raw-scan protocol (device
@@ -47,9 +47,16 @@ constexpr int kPixelTypeGray = 1;
 constexpr int kPixelTypeRgb = 2;
 constexpr int kDefaultPixelType = kPixelTypeRgb;
 
-// ICScannerMeasurementUnit value for pixels (SDK: inches=0, cm=1, picas=2,
-// points=3, twips=4, pixels=5). Advertised as ICAP_UNITS so the host's scan-area
-// geometry stays in the same pixel space the module already scans in.
+// ICScannerMeasurementUnit values (SDK ICScannerFunctionalUnits.h: inches=0,
+// cm=1, picas=2, points=3, twips=4, pixels=5). Advertised as ICAP_UNITS. The
+// unit defaults to INCHES: ICScannerFunctionalUnit.physicalSize is documented as
+// "in current measurement unit", and a physical platen size has no meaning in
+// pixels (pixels depend on dpi), so the host renders the overview platen from a
+// real-world inch size. The host echoes the scan rectangle back in this unit and
+// scan_translate::PixelsFromMeasure converts it to pixels. Inches/cm/pixels are
+// all offered so the host may still request the rectangle in pixels.
+constexpr int kMeasurementUnitInches = 0;
+constexpr int kMeasurementUnitCentimeters = 1;
 constexpr int kMeasurementUnitPixels = 5;
 
 // ICScannerFunctionalUnitType values (SDK): flatbed=0, documentFeeder=3.
@@ -95,6 +102,19 @@ constexpr PaperChoice kPaperChoices[] = {
 };
 
 NSNumber* Int(int v) { return [NSNumber numberWithInt:v]; }
+NSNumber* Dbl(double v) { return [NSNumber numberWithDouble:v]; }
+
+// A TWON_ONEVALUE capability carrying a real-valued scalar (e.g. a physical
+// dimension in inches). The host reads floating-point physical extents as
+// doubles.
+NSDictionary* OneValueDouble(double value) {
+  return @{
+    kKeyType : kTwonOneValue,
+    kKeyValue : Dbl(value),
+    kKeyCurrent : Dbl(value),
+    kKeyDefault : Dbl(value),
+  };
+}
 
 // A TWON_ENUMERATION capability: the full set of allowed values plus the current
 // and default selections.
@@ -157,6 +177,22 @@ NSDictionary* BuildUnit(bool feeder) {
           ? [(NSNumber*)supportedSizes.firstObject intValue]
           : kDocumentTypeDefault;
 
+  // Physical platen extent in INCHES (ICAP_UNITS = inches, below). This is the
+  // real scannable rectangle: its width is the widest sheet (A3, 3472 px@300 =
+  // 11.57 in) and its height is the longest sheet (Ledger, 5053 px@300 = 16.84
+  // in). Both A3 (3472x4913) and Ledger (3264x5053) fit inside it, so neither
+  // regresses. It is NOT a phantom -- the J6920DW glass is A3-capable and the
+  // bounding rectangle is what a real overview platen occupies; the host draws
+  // the dashed platen and a paper-size selection at the correct proportion of it
+  // (e.g. US Letter 8.5x11 in renders ~73% wide x ~65% tall). Expressed in
+  // inches, not pixel counts, because a physical size in pixels is meaningless
+  // (pixels depend on dpi) and the host mis-scaled the platen when it was given
+  // pixel counts (Task 14 live defect).
+  const double physWidthInches =
+      static_cast<double>(maxWidthPx) / kReferenceDpi;
+  const double physHeightInches =
+      static_cast<double>(maxHeightPx) / kReferenceDpi;
+
   return @{
     @"ICAP_XRESOLUTION" :
         Enumeration(ResolutionArray(), kDefaultResolution, kDefaultResolution),
@@ -167,11 +203,17 @@ NSDictionary* BuildUnit(bool feeder) {
     @"ICAP_PIXELTYPE" : Enumeration(
         @[ Int(kPixelTypeBw), Int(kPixelTypeGray), Int(kPixelTypeRgb) ],
         kDefaultPixelType, kDefaultPixelType),
-    @"ICAP_PHYSICALWIDTH" : OneValue(maxWidthPx),
-    @"ICAP_PHYSICALHEIGHT" : OneValue(maxHeightPx),
+    @"ICAP_PHYSICALWIDTH" : OneValueDouble(physWidthInches),
+    @"ICAP_PHYSICALHEIGHT" : OneValueDouble(physHeightInches),
     @"ICAP_SUPPORTEDSIZES" :
         Enumeration(supportedSizes, defaultSize, defaultSize),
-    @"ICAP_UNITS" : OneValue(kMeasurementUnitPixels),
+    // Offer inches (default), centimeters, and pixels; the host renders the
+    // platen from the inch physical extents and may request the scan rectangle
+    // in any of these (scan_translate::PixelsFromMeasure converts it to pixels).
+    @"ICAP_UNITS" : Enumeration(@[ Int(kMeasurementUnitInches),
+                                   Int(kMeasurementUnitCentimeters),
+                                   Int(kMeasurementUnitPixels) ],
+                                kMeasurementUnitInches, kMeasurementUnitInches),
   };
 }
 
