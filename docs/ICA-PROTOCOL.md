@@ -178,12 +178,27 @@ for a scanner/TCP-IP module — a dead end; do not use it.
 Host-initiated scanning is the normal driver flow: build a `brscan::Params`
 from the request (`button_flow = false`; the driver flow's job-final terminator
 is `0x80 0x80`, unlike the button flow's single `0x80`), open a
-`brscan::TcpTransport(ip, 54921)`, and run `brscan::RunScan` on a background
-thread (never block icdd's callback thread). Per page: `kRgb` decodes via
-`brscan::DecodeJpeg` to RGB; `kGray`/`kBitonal` pass through; `DescribeBuffer`
-(`ica-module/buffer_descriptor.h`) computes bpp/stride/size/color space. The
-device allows one connection at a time — a new scan should cancel any in-flight
-one, and a bounded connect retry handles a lingering-socket race.
+`brscan::TcpTransport(ip, 54921)`, and run `brscan::RunScan`. Per page: `kRgb`
+decodes via `brscan::DecodeJpeg` to RGB; `kGray`/`kBitonal` pass through;
+`DescribeBuffer` (`ica-module/buffer_descriptor.h`) computes
+bpp/stride/size/color space. The device allows one connection at a time, and a
+bounded connect retry handles a lingering-socket race.
+
+**Scan execution runs SYNCHRONOUSLY on icdd's callback thread, not a background
+thread (Task 16).** `ICD_ScannerStart` performs the entire scan inline —
+transport connect, `RunScan`, per-page notifications, and the final
+`ScannerScanDone` — and returns only after `ScannerScanDone`. ICA notification
+delivery/reply is bound to the icdd connection runloop on the callback thread, so
+notifications posted from any other thread return `noErr` yet never reach the
+host: an earlier background-thread implementation is exactly why the overview
+never rendered, the UI stuck on "Scanner is warming up", and the scan never
+completed. Blocking `Start` for the whole scan is correct and expected by icdd
+(matching Apple `VirtualScanner` and the other reference modules). There is no
+worker thread, no join, and no cross-thread state (the transfer settings are
+locals in `Start`, since `SetParameters` and `Start` alternate on the one
+thread). Cancel is handled at a page boundary: a `ScanProgressStatus` reply of
+`userCanceledErr` stops further pages and finishes with a clean
+`ScannerScanDone`; there is no mid-`RunScan` cancel (`RunScan` is monolithic).
 
 ## Geometry (platen extent) — OPEN
 

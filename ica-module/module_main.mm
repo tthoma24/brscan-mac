@@ -46,11 +46,10 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
 #include <new>
 #include <optional>
 #include <string>
-#include <thread>
+#include <thread>  // std::this_thread::sleep_for for the connect backoff only.
 #include <utility>
 #include <vector>
 
@@ -115,7 +114,7 @@ struct DeviceContext {
   // device object, and posting notifications against Start's `object` left Image
   // Capture waiting forever ("Scanning document" hang) and never rendering the
   // overview. Captured in OpenSession and Start from deviceObjectInfo->icaObject
-  // and snapshotted into each ScanJob.
+  // and passed to the synchronous scan (Task 16).
   ICAObject deviceObject = 0;
 
   // Task 7 scan state. The host's last SetParameters selection, translated to a
@@ -126,91 +125,23 @@ struct DeviceContext {
   // security-scoped folder URL and/or a "document folder" path) plus document
   // name/format/extension keys -> file-based transfer: encode the page and WRITE
   // it there. An overview/preview scan carries none of these -> the in-memory
-  // band path below. SetParameters detects the mode and STAGES it in these
-  // fields; because SetParameters mutates them per scan, the worker never reads
-  // them -- Start snapshots them into a per-job ScanJob (below) that the worker
-  // holds by value (Task 13, fixing a cross-scan hand-back race where a
-  // still-running overview worker picked up a later final scan's destination).
-  // `securityScopedURL` is a retained CFURLRef (or null); it is released/replaced
-  // in SetParameters, MOVED into the ScanJob at Start (so its access token
-  // lifetime is per-job), and released in CloseDevice/Cleanup if no scan claimed
-  // it.
+  // image path. SetParameters detects the mode and STAGES it in these fields;
+  // ICD_ScannerStart then consumes them. Because Start runs the whole scan
+  // synchronously on icdd's callback thread (Plan 2 Task 16), SetParameters and
+  // Start never overlap -- they alternate on the one callback thread -- so these
+  // fields need no locking and no per-job snapshot. `securityScopedURL` is a
+  // retained CFURLRef (or null): SetParameters releases/replaces it, Start takes
+  // ownership for the scan and releases it after the write, and CloseDevice /
+  // Cleanup release it if no scan claimed it.
   bool fileTransfer = false;
   brscan::ica::TransferPlan transferPlan;
   std::string documentFolderPath;   // Plain-path fallback ("document folder").
   CFURLRef securityScopedURL = nullptr;  // Owned; resolved scoped folder URL.
-
-  // The scan runs on a background thread so it never blocks icdd's callback
-  // thread (PLAN-2-DESIGN.md decision D). Only the device object owns this
-  // DeviceContext, so the thread is always joined before the context is freed
-  // (StopScan, called from CloseSession / CloseDevice / Cleanup) -- the thread
-  // can therefore hold a raw ctx pointer for its whole life without a
-  // use-after-free.
-  std::thread scanThread;
-  std::atomic<bool> cancelRequested{false};
-
-  // Cancel handshake: the worker publishes its live transport here (under
-  // scanMutex) so a host cancel can close the socket out from under a blocked
-  // RunScan read, which surfaces as Status::kTimeout/kIoError and unwinds the
-  // worker cleanly. The transport object itself is owned by the worker's stack
-  // frame and outlives every guarded access (the worker clears this pointer
-  // under the lock before the transport is destroyed).
-  std::mutex scanMutex;
-  brscan::TcpTransport* activeTransport = nullptr;
 };
 
 DeviceContext* ContextOf(const ScannerObjectInfo* info) {
   return info ? reinterpret_cast<DeviceContext*>(info->privateData) : nullptr;
 }
-
-// A per-scan snapshot of everything the worker needs to hand a page back,
-// captured at Start time and passed BY VALUE to RunScanWorker (Task 13). The
-// transfer settings live on the mutable DeviceContext and are rewritten by
-// SetParameters for every scan; a worker that re-read them at hand-back time
-// could pick up a LATER scan's destination (the live bug: a still-connecting
-// overview worker wrote a partial overview into the final scan's file). Holding
-// them in this value object -- as `params` already were -- guarantees each
-// worker hands back using only its own snapshot. The snapshot OWNS its
-// security-scoped URL: it takes a +1 (moved off ctx, or retained) at
-// construction and releases it in the destructor, so the scoped-access lifetime
-// is per-job with no double-free. Move-only so the ownership is unambiguous.
-struct ScanJob {
-  brscan::Params params;
-  ICAObject deviceObject = 0;
-  bool fileTransfer = false;
-  brscan::ica::TransferPlan transferPlan;
-  std::string documentFolderPath;
-  CFURLRef securityScopedURL = nullptr;  // Owned +1; released in ~ScanJob.
-
-  ScanJob() = default;
-  ~ScanJob() {
-    if (securityScopedURL) CFRelease(securityScopedURL);
-  }
-  ScanJob(ScanJob&& o) noexcept
-      : params(std::move(o.params)),
-        deviceObject(o.deviceObject),
-        fileTransfer(o.fileTransfer),
-        transferPlan(std::move(o.transferPlan)),
-        documentFolderPath(std::move(o.documentFolderPath)),
-        securityScopedURL(o.securityScopedURL) {
-    o.securityScopedURL = nullptr;  // Steal the +1; leave the source empty.
-  }
-  ScanJob& operator=(ScanJob&& o) noexcept {
-    if (this != &o) {
-      if (securityScopedURL) CFRelease(securityScopedURL);
-      params = std::move(o.params);
-      deviceObject = o.deviceObject;
-      fileTransfer = o.fileTransfer;
-      transferPlan = std::move(o.transferPlan);
-      documentFolderPath = std::move(o.documentFolderPath);
-      securityScopedURL = o.securityScopedURL;
-      o.securityScopedURL = nullptr;
-    }
-    return *this;
-  }
-  ScanJob(const ScanJob&) = delete;
-  ScanJob& operator=(const ScanJob&) = delete;
-};
 
 // Reads a CFString value from the host's TCP/IP param dict into `out`.
 void CopyStringParam(CFDictionaryRef params, CFStringRef key, std::string* out) {
@@ -502,28 +433,11 @@ ICAError OpenTCPIPDevice(CFDictionaryRef params, ScannerObjectInfo* objectInfo) 
   return noErr;
 }
 
-// Stops any in-flight scan and joins the worker thread. Called before the
-// DeviceContext is freed and on a host cancel (CloseSession). Sets the cancel
-// flag, then closes the live socket out from under a blocked RunScan read so it
-// returns promptly (Status::kTimeout/kIoError), then joins. Idempotent and safe
-// to call when no scan is running: the join on a non-joinable thread is skipped
-// and the transport pointer is null. Because the worker holds a raw ctx pointer,
-// this join MUST complete before the context is deleted -- otherwise the worker
-// would touch freed memory.
-void StopScan(DeviceContext* ctx) {
-  if (ctx == nullptr) return;
-  ctx->cancelRequested.store(true);
-  {
-    std::lock_guard<std::mutex> lock(ctx->scanMutex);
-    if (ctx->activeTransport != nullptr) ctx->activeTransport->Disconnect();
-  }
-  if (ctx->scanThread.joinable()) ctx->scanThread.join();
-}
-
 // Releases the retained security-scoped destination URL staged on the context,
-// if any. Safe to call when none is held. A running worker holds its OWN retained
-// copy in its ScanJob snapshot (Task 13), so this only ever frees ctx's staged
-// +1 -- it never races a worker's borrow.
+// if any. Safe to call when none is held. Because the scan runs synchronously on
+// the callback thread (Task 16), there is no worker to race: SetParameters,
+// Start, and Close* all execute on the one thread, so this only ever frees ctx's
+// staged +1.
 void ReleaseScopedURL(DeviceContext* ctx) {
   if (ctx && ctx->securityScopedURL) {
     CFRelease(ctx->securityScopedURL);
@@ -535,8 +449,9 @@ ICAError CloseDevice(ScannerObjectInfo* objectInfo) {
   os_log(Log(), "callback: ICD_ScannerCloseDevice");
   DeviceContext* ctx = ContextOf(objectInfo);
   if (ctx) {
-    StopScan(ctx);  // Join the worker before freeing the context it points at.
-    ReleaseScopedURL(ctx);  // Worker is joined; the borrowed URL is now free.
+    // No scan worker to join (Task 16): Start runs the scan synchronously, so by
+    // the time CloseDevice is called no scan is in flight. Just free the context.
+    ReleaseScopedURL(ctx);
     delete ctx;
     objectInfo->privateData = nullptr;
   }
@@ -548,7 +463,6 @@ ICAError Cleanup(ScannerObjectInfo* objectInfo) {
   // Defensive: free any context still attached (CloseDevice normally does).
   DeviceContext* ctx = ContextOf(objectInfo);
   if (ctx) {
-    StopScan(ctx);  // Same ordering guarantee as CloseDevice.
     ReleaseScopedURL(ctx);
     delete ctx;
     objectInfo->privateData = nullptr;
@@ -672,10 +586,10 @@ ICAError CloseSession(const ScannerObjectInfo* deviceObjectInfo,
   os_log(Log(), "callback: ICD_ScannerCloseSession");
   DeviceContext* ctx = ContextOf(deviceObjectInfo);
   if (ctx) {
-    // A session close mid-scan is the host's cancel path (there is no dedicated
-    // ICD_ScannerCancel callback in the SDK table): stop and join the worker
-    // here. After a completed scan this simply joins the finished thread.
-    StopScan(ctx);
+    // With a synchronous Start (Task 16) there is no worker to stop: a scan has
+    // fully completed (ScannerScanDone sent) before Start returns, so the host
+    // only ever reaches CloseSession between scans. Host cancel is handled at a
+    // page boundary inside the scan via the progress replyCode instead.
     ctx->sessionOpen = false;
   }
   if (pb) pb->header.err = noErr;
@@ -884,9 +798,10 @@ CFURLRef ResolveSecurityScopedURL(CFDictionaryRef dict) {
 // device context: a FINAL scan carries a security-scoped destination URL and/or
 // a "document folder" path plus document name/format/extension keys -> file
 // based transfer; an overview/preview scan carries none of these -> the
-// in-memory band path. It stages the result on ctx for the next Start to
-// snapshot; a still-running worker is unaffected because it already holds its own
-// per-job snapshot (Task 13), so releasing ctx's staged scoped URL here is safe.
+// in-memory image path. It stages the result on ctx for the next Start to
+// consume. Because a scan runs synchronously inside Start (Task 16),
+// SetParameters can never overlap a running scan, so releasing ctx's staged
+// scoped URL here is safe.
 void DetectTransferMode(DeviceContext* ctx, CFDictionaryRef dict) {
   if (ctx == nullptr) return;
   ReleaseScopedURL(ctx);  // Drop any prior request's staged scoped URL.
@@ -986,13 +901,22 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 //     note below for which notification carries the pixels.
 // All of these symbols are exported by ICADevices.tbd, so the module links.
 //
+// SCAN EXECUTION THREAD (Task 16, authoritative -- reverses decision D):
+//   The ENTIRE scan runs SYNCHRONOUSLY on icdd's callback thread, inside
+//   ICD_ScannerStart. ICA notification delivery/reply is bound to the icdd
+//   connection runloop on that callback thread, so notifications posted from any
+//   other thread return noErr yet never reach the host. The earlier background
+//   std::thread worker is exactly why the overview never rendered, the UI stuck
+//   on "Scanner is warming up", and the scan never completed. Start now connects,
+//   runs RunScan, hands every page back, and sends ScannerScanDone all inline,
+//   returning only after ScanDone. Blocking Start for the whole scan is correct
+//   and expected by icdd (all four reference modules do exactly this).
+//
 // HAND-BACK ORCHESTRATION (Task 14, corrected against a working ICA scanner
 // module's convention -- interface facts only, clean-room, no source copied):
-//   - WARM-UP (Task 15): the canonical per-scan sequence opens with two
-//     kICANotificationTypeDeviceStatusInfo notifications carrying
-//     kICANotificationSubTypeKey = kICANotificationSubTypeWarmUpStarted then
-//     kICANotificationSubTypeWarmUpDone (all ICAApplication.h) before any scan
-//     pass; the worker posts these against the device object.
+//   - WARM-UP: dropped in Task 16. The shipping Tahoe fork sends no warm-up
+//     notifications; ours (posted from the worker thread) is what left the UI
+//     stuck on "Scanner is warming up", so PostWarmUp and its calls are removed.
 //   - The in-memory (overview/preview) pixels are delivered INLINE in a
 //     kICANotificationTypeScanProgressStatus notification packed with
 //     ICDAddImageInfoToNotificationDictionary -- the IMAGE-info packer, NOT the
@@ -1032,15 +956,26 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 // device-in-the-loop re-test can confirm the host consumes the Image-info keys
 // (the overview render is host-side and cannot be verified from the module).
 
+// userCanceledErr (MacErrors.h, -128) as it arrives in the UInt32 replyCode of a
+// waited-for notification: the host sets it when the user cancels the scan.
+constexpr UInt32 kUserCanceledReplyCode = static_cast<UInt32>(-128);
+
+// Outcome of handing one page back: delivered, host cancelled at this page
+// boundary (progress replyCode == userCanceledErr), or a delivery/encode error.
+enum class PageResult { kOk, kCanceled, kError };
+
 // Sets the type + the device/scanner ICAObject (under kICANotificationICAObjectKey,
 // the key every scanner notification carries) and pushes the dictionary to the
-// host. `waitForReply` uses ICDSendNotificationAndWaitForReply (so the band
+// host. `waitForReply` uses ICDSendNotificationAndWaitForReply (so the image
 // buffer stays alive until icdd has copied it, and a user cancel surfaces in
 // replyCode) for the data-bearing ScanProgressStatus; the page/scan-done signals
-// are fire-and-forget. Returns the framework's ICAError.
+// are fire-and-forget. When `outReplyCode` is non-null it receives the host's
+// reply code (only meaningful for a waited-for send). Returns the framework's
+// ICAError.
 ICAError SendScannerNotification(CFMutableDictionaryRef dict,
                                  ICAObject icaObject, CFStringRef type,
-                                 bool waitForReply) {
+                                 bool waitForReply,
+                                 UInt32* outReplyCode = nullptr) {
   if (dict == nullptr) return kICADeviceInvalidParamErr;
   CFDictionarySetValue(dict, kICANotificationTypeKey, type);
   CFNumberRef objNum =
@@ -1051,28 +986,9 @@ ICAError SendScannerNotification(CFMutableDictionaryRef dict,
   }
   ICASendNotificationPB pb = {};
   pb.notificationDictionary = dict;
-  return waitForReply ? ICDSendNotificationAndWaitForReply(&pb)
-                      : ICDSendNotification(&pb);
-}
-
-// Posts one warm-up status notification (Task 15). The authoritative per-scan
-// sequence opens with a kICANotificationTypeDeviceStatusInfo carrying
-// kICANotificationSubTypeKey = kICANotificationSubTypeWarmUpStarted, then a
-// second with kICANotificationSubTypeWarmUpDone, before any scan pass -- the host
-// expects this pair to move its scan UI out of the pre-scan state (all constants
-// from ICADevices.framework ICAApplication.h). `icaObject` is the device object.
-// Status info is not data-bearing, so it is fire-and-forget (plain
-// ICDSendNotification). Returns the framework's ICAError.
-ICAError PostWarmUp(ICAObject icaObject, CFStringRef subtype) {
-  CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
-      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
-      &kCFTypeDictionaryValueCallBacks);
-  if (dict == nullptr) return kICADeviceMemoryAllocationErr;
-  CFDictionarySetValue(dict, kICANotificationSubTypeKey, subtype);
-  ICAError err = SendScannerNotification(
-      dict, icaObject, kICANotificationTypeDeviceStatusInfo,
-      /*waitForReply=*/false);
-  CFRelease(dict);
+  const ICAError err = waitForReply ? ICDSendNotificationAndWaitForReply(&pb)
+                                    : ICDSendNotification(&pb);
+  if (outReplyCode) *outReplyCode = pb.replyCode;
   return err;
 }
 
@@ -1094,17 +1010,19 @@ void LogNotificationDict(const char* label, CFDictionaryRef dict) {
 // full-height IMAGE-info chunk in a ScanProgressStatus, then signals the page
 // complete. `bytes` must point at `byteCount` host-ready bytes: interleaved
 // 24-bit RGB (post-DecodeJpeg) for kRgb, raw 8-bit gray for kGray, packed 1-bpp
-// for kBitonal. `icaObject` is the DEVICE object (Task 15). Returns true if the
-// image was accepted and both notifications sent.
-bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
-              const uint8_t* bytes, size_t byteCount, int width, int height,
-              int pageIndex) {
+// for kBitonal. `icaObject` is the DEVICE object (Task 15). Returns kOk if the
+// image was accepted and both notifications sent, kCanceled if the host replied
+// userCanceledErr to the progress notification (host cancel at this page
+// boundary), or kError on bad geometry / a failed send.
+PageResult PostPage(ICAObject icaObject, brscan::PixelFormat format,
+                    const uint8_t* bytes, size_t byteCount, int width,
+                    int height, int pageIndex) {
   std::optional<brscan::ica::BufferDescriptor> d =
       brscan::ica::DescribeBuffer(format, width, height);
   if (!d) {
     os_log_error(Log(), "PostPage[%d]: invalid geometry %dx%d", pageIndex,
                  width, height);
-    return false;
+    return PageResult::kError;
   }
 
   // The IMAGE-info packer copies exactly `dataSize` bytes starting at `bytes`
@@ -1133,7 +1051,7 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
                  "PostPage[%d]: buffer too small for image-info (%zu < %lld); "
                  "not sending",
                  pageIndex, byteCount, (long long)dataSize);
-    return false;
+    return PageResult::kError;
   }
 
   // 1) Deliver the pixels via the IMAGE-info packer (Defect A): populate the
@@ -1143,7 +1061,7 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
   CFMutableDictionaryRef imageDict = CFDictionaryCreateMutable(
       nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
-  if (imageDict == nullptr) return false;
+  if (imageDict == nullptr) return PageResult::kError;
 
   ICAError addErr = ICDAddImageInfoToNotificationDictionary(
       imageDict, static_cast<UInt32>(width), static_cast<UInt32>(height),
@@ -1153,10 +1071,21 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
 
   LogNotificationDict("PostPage.progress", imageDict);
 
+  UInt32 replyCode = 0;
   ICAError imageErr = SendScannerNotification(
       imageDict, icaObject, kICANotificationTypeScanProgressStatus,
-      /*waitForReply=*/true);
+      /*waitForReply=*/true, &replyCode);
   CFRelease(imageDict);
+
+  // Host cancel: the progress reply carries userCanceledErr. Stop here without
+  // sending a page-done -- the caller ends the scan cleanly (cancel takes effect
+  // at this page boundary, not mid-RunScan).
+  if (replyCode == kUserCanceledReplyCode) {
+    os_log(Log(),
+           "PostPage[%d]: host cancel (progress replyCode=userCanceledErr)",
+           pageIndex);
+    return PageResult::kCanceled;
+  }
 
   // 2) Signal the page complete (no payload).
   CFMutableDictionaryRef pageDict = CFDictionaryCreateMutable(
@@ -1172,11 +1101,14 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
 
   os_log(Log(),
          "PostPage[%d]: %dx%d format=%{public}s bpp=%d stride=%lld bytes=%zu "
-         "icaObject=0x%08x addImageInfo=%d sendProgressImage=%d sendPageDone=%d",
+         "icaObject=0x%08x addImageInfo=%d sendProgressImage=%d replyCode=%u "
+         "sendPageDone=%d",
          pageIndex, width, height, PixelFormatName(format), d->bits_per_pixel,
          (long long)d->bytes_per_row, byteCount, icaObject, addErr, imageErr,
-         pageErr);
-  return addErr == noErr && imageErr == noErr && pageErr == noErr;
+         replyCode, pageErr);
+  return (addErr == noErr && imageErr == noErr && pageErr == noErr)
+             ? PageResult::kOk
+             : PageResult::kError;
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,40 +1194,47 @@ bool WriteImageToURL(CGImageRef image, NSURL* fileURL, CFStringRef uti) {
 // done. Resolves the destination folder (security-scoped URL preferred, plain
 // "document folder" path as fallback), start/stop-accessing the scoped resource
 // around the write, encodes via ImageIO, then posts a ScannerPageDone carrying
-// the written file path under kICANotificationScannerDocumentNameKey. Returns
-// true if the file was written.
-bool PostFilePage(const ScanJob& job, ICAObject icaObject,
-                  brscan::PixelFormat format, const uint8_t* bytes,
-                  size_t byteCount, int width, int height, int pageIndex) {
+// the written file path under kICANotificationScannerDocumentNameKey. The
+// scoped URL is borrowed (owned by Start, which releases it after the scan);
+// this only starts/stops access, it does not retain or release. Returns kOk if
+// the file was written, kError otherwise. (The file path posts page-done
+// fire-and-forget, so it never observes a host cancel -- cancel is detected on
+// the in-memory overview path.)
+PageResult PostFilePage(CFURLRef securityScopedURL,
+                        const std::string& documentFolderPath,
+                        const brscan::ica::TransferPlan& transferPlan,
+                        ICAObject icaObject, brscan::PixelFormat format,
+                        const uint8_t* bytes, size_t byteCount, int width,
+                        int height, int pageIndex) {
   bool wrote = false;
   std::string writtenPath;
   @autoreleasepool {
     NSURL* folderURL = nil;
     BOOL accessing = NO;
     const char* pathKind = "none";
-    if (job.securityScopedURL != nullptr) {
+    if (securityScopedURL != nullptr) {
       // Scoped destination: start accessing the security-scoped resource for the
-      // duration of the write, then stop below (per-job token from the snapshot).
-      folderURL = (__bridge NSURL*)job.securityScopedURL;
+      // duration of the write, then stop below. The URL is owned by Start.
+      folderURL = (__bridge NSURL*)securityScopedURL;
       accessing = [folderURL startAccessingSecurityScopedResource];
       pathKind = "scoped";
-    } else if (!job.documentFolderPath.empty()) {
+    } else if (!documentFolderPath.empty()) {
       NSString* p =
-          [[NSString stringWithUTF8String:job.documentFolderPath.c_str()]
+          [[NSString stringWithUTF8String:documentFolderPath.c_str()]
               stringByExpandingTildeInPath];
       folderURL = [NSURL fileURLWithPath:p isDirectory:YES];
       pathKind = "plain";
     }
     if (folderURL == nil) {
       os_log_error(Log(), "PostFilePage[%d]: no destination folder", pageIndex);
-      return false;
+      return PageResult::kError;
     }
     os_log(Log(),
            "PostFilePage[%d]: destination path=%{public}s scopedAccess=%d",
            pageIndex, pathKind, accessing);
 
     const std::string filename =
-        brscan::ica::TransferFilenameForPage(job.transferPlan, pageIndex);
+        brscan::ica::TransferFilenameForPage(transferPlan, pageIndex);
     NSURL* fileURL = [folderURL
         URLByAppendingPathComponent:[NSString
                                         stringWithUTF8String:filename.c_str()]];
@@ -1303,10 +1242,10 @@ bool PostFilePage(const ScanJob& job, ICAObject icaObject,
     CGImageRef image = CreatePageImage(format, bytes, byteCount, width, height);
     if (image != nullptr) {
       NSString* utiStr =
-          [NSString stringWithUTF8String:job.transferPlan.uti.c_str()];
+          [NSString stringWithUTF8String:transferPlan.uti.c_str()];
       os_log(Log(),
              "file transfer: writing %{public}@ format=%{public}s %dx%d",
-             fileURL.path, job.transferPlan.uti.c_str(), width, height);
+             fileURL.path, transferPlan.uti.c_str(), width, height);
       wrote = WriteImageToURL(image, fileURL, (__bridge CFStringRef)utiStr);
       CGImageRelease(image);
     } else {
@@ -1355,45 +1294,49 @@ bool PostFilePage(const ScanJob& job, ICAObject icaObject,
     os_log(Log(), "PostFilePage[%d]: wrote=%d sendPageDone=%d", pageIndex, wrote,
            pageErr);
   }
-  return wrote;
+  return wrote ? PageResult::kOk : PageResult::kError;
 }
 
-// The background scan worker. Owns its TcpTransport on the stack; publishes it to
-// ctx->activeTransport (under scanMutex) only for the cancel path. Runs the
-// normal host-initiated RunScan (button_flow == false), then hands each page
-// back and finishes with a ScannerScanDone. Holds a raw ctx pointer, kept valid
-// by StopScan joining this thread before the context is freed.
-void RunScanWorker(DeviceContext* ctx, ScanJob job) {
-  const brscan::Params& params = job.params;
-  const ICAObject deviceObject = job.deviceObject;
+// Runs the ENTIRE scan SYNCHRONOUSLY on icdd's callback thread (Task 16),
+// returning only after ScannerScanDone. ICA notification delivery/reply is bound
+// to the icdd connection runloop on the callback thread, so the scan MUST run
+// here -- notifications posted from any other thread return noErr yet never reach
+// the host (the earlier background-thread bug). `transport`, the destination URL,
+// and every page buffer are locals owned by the caller (Start), so there is no
+// worker, no join, and no cross-thread state. `securityScopedURL` is borrowed
+// (Start owns and releases it). Returns the ICAError reported to the host in the
+// final ScannerScanDone (noErr on success or a clean host cancel).
+ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
+                            const brscan::Params& params, bool fileTransfer,
+                            const brscan::ica::TransferPlan& transferPlan,
+                            const std::string& documentFolderPath,
+                            CFURLRef securityScopedURL) {
   os_log(Log(),
-         "ScanWorker: begin ip='%{public}s' port=%d mode=%{public}s dpi=%d "
+         "SyncScan: begin ip='%{public}s' port=%d mode=%{public}s dpi=%d "
          "source=%{public}s duplex=%d fileTransfer=%d",
-         ctx->ipAddress.c_str(), ctx->port, ModeName(params.mode), params.x_dpi,
-         SourceName(params.source), params.duplex, job.fileTransfer);
+         ctx.ipAddress.c_str(), ctx.port, ModeName(params.mode), params.x_dpi,
+         SourceName(params.source), params.duplex, fileTransfer);
 
-  brscan::TcpTransport transport(ctx->ipAddress,
-                                 static_cast<uint16_t>(ctx->port));
-  {
-    std::lock_guard<std::mutex> lock(ctx->scanMutex);
-    ctx->activeTransport = &transport;
-  }
+  brscan::TcpTransport transport(ctx.ipAddress,
+                                 static_cast<uint16_t>(ctx.port));
 
   ICAError finalErr = noErr;
+  bool canceled = false;
+
   // Bounded connect retry (Task 11): the Brother device allows a single scan
   // connection, so a lingering socket from a prior session can lose the first
   // race (observed live: connect -> 1, then success on retry). Try up to
-  // kConnectAttempts times, ~kConnectBackoff apart, bailing early on a cancel.
+  // kConnectAttempts times, ~kConnectBackoff apart. std::this_thread::sleep_for
+  // is used only for this backoff -- there is no scan worker thread (Task 16).
   constexpr int kConnectAttempts = 3;
   constexpr auto kConnectBackoff = std::chrono::milliseconds(500);
   brscan::Status connectStatus = brscan::Status::kIoError;
   for (int attempt = 1; attempt <= kConnectAttempts; ++attempt) {
-    if (ctx->cancelRequested.load()) break;
     connectStatus = transport.Connect();
-    os_log(Log(), "ScanWorker: transport connect attempt %d/%d -> %d", attempt,
+    os_log(Log(), "SyncScan: transport connect attempt %d/%d -> %d", attempt,
            kConnectAttempts, (int)connectStatus);
     if (connectStatus == brscan::Status::kOk) break;
-    if (attempt < kConnectAttempts && !ctx->cancelRequested.load()) {
+    if (attempt < kConnectAttempts) {
       std::this_thread::sleep_for(kConnectBackoff);
     }
   }
@@ -1401,35 +1344,18 @@ void RunScanWorker(DeviceContext* ctx, ScanJob job) {
   if (connectStatus != brscan::Status::kOk) {
     finalErr = kICADeviceInternalErr;
   } else {
-    // Warm-up handshake (Task 15): the canonical sequence posts warm-up-started
-    // then warm-up-done before any scan pass. Sent against the device object.
-    ICAError wuStart =
-        PostWarmUp(deviceObject, kICANotificationSubTypeWarmUpStarted);
-    ICAError wuDone =
-        PostWarmUp(deviceObject, kICANotificationSubTypeWarmUpDone);
-    os_log(Log(),
-           "ScanWorker: warm-up notifications sent object=0x%08x started=%d "
-           "done=%d",
-           deviceObject, wuStart, wuDone);
-
     std::vector<brscan::ScanResult> pages;
     const brscan::Status scanStatus =
         brscan::RunScan(transport, params, &pages);
-    os_log(Log(), "ScanWorker: RunScan -> status=%d pages=%zu",
-           (int)scanStatus, pages.size());
+    os_log(Log(), "SyncScan: RunScan -> status=%d pages=%zu", (int)scanStatus,
+           pages.size());
 
     if (scanStatus != brscan::Status::kOk) {
-      // A mid-scan cancel surfaces as kTimeout once StopScan closes the socket;
-      // treat a requested cancel as a clean stop, anything else as an error.
-      finalErr = ctx->cancelRequested.load() ? noErr : kICADeviceInternalErr;
+      finalErr = kICADeviceInternalErr;
     } else {
       int idx = 0;
       for (const brscan::ScanResult& page : pages) {
-        if (ctx->cancelRequested.load()) {
-          os_log(Log(), "ScanWorker: cancel observed, stopping at page %d", idx);
-          break;
-        }
-        os_log(Log(), "ScanWorker: page %d %dx%d format=%{public}s payload=%zu",
+        os_log(Log(), "SyncScan: page %d %dx%d format=%{public}s payload=%zu",
                idx, page.width, page.height, PixelFormatName(page.format),
                page.data.size());
 
@@ -1447,8 +1373,8 @@ void RunScanWorker(DeviceContext* ctx, ScanJob job) {
           const brscan::Status dec =
               brscan::DecodeJpeg(page.data.data(), page.data.size(), &img);
           if (dec != brscan::Status::kOk) {
-            os_log_error(Log(), "ScanWorker: page %d JPEG decode failed (%d)",
-                         idx, (int)dec);
+            os_log_error(Log(), "SyncScan: page %d JPEG decode failed (%d)", idx,
+                         (int)dec);
             finalErr = kICADeviceInternalErr;
             ready = false;
           } else {
@@ -1464,15 +1390,21 @@ void RunScanWorker(DeviceContext* ctx, ScanJob job) {
 
         if (ready) {
           // Task 12: a FINAL scan writes the page to the host's destination
-          // file; an overview/preview scan pushes it back as an in-memory band.
-          // The mode + destination come from this worker's own snapshot, never
-          // the mutable ctx (Task 13).
-          if (job.fileTransfer) {
-            PostFilePage(job, deviceObject, outFormat, bytes, byteCount,
-                         outWidth, outHeight, idx);
-          } else {
-            PostPage(deviceObject, outFormat, bytes, byteCount, outWidth,
-                     outHeight, idx);
+          // file; an overview/preview scan pushes it back as an in-memory image.
+          const PageResult result =
+              fileTransfer
+                  ? PostFilePage(securityScopedURL, documentFolderPath,
+                                 transferPlan, deviceObject, outFormat, bytes,
+                                 byteCount, outWidth, outHeight, idx)
+                  : PostPage(deviceObject, outFormat, bytes, byteCount, outWidth,
+                             outHeight, idx);
+          if (result == PageResult::kCanceled) {
+            // Host cancel at this page boundary (Task 16): stop sending further
+            // pages and finish with a clean ScannerScanDone. Cancel is observed
+            // between pages, not mid-RunScan (RunScan is monolithic).
+            os_log(Log(), "SyncScan: host cancel at page %d; stopping", idx);
+            canceled = true;
+            break;
           }
         }
         ++idx;
@@ -1480,21 +1412,19 @@ void RunScanWorker(DeviceContext* ctx, ScanJob job) {
     }
   }
 
-  {
-    std::lock_guard<std::mutex> lock(ctx->scanMutex);
-    ctx->activeTransport = nullptr;
-  }
   transport.Disconnect();
 
   // Completion: always tell the host the scan is done, carrying an error code
-  // when one occurred so the scan UI does not hang waiting for more pages.
+  // when one occurred (but not for a clean host cancel) so the scan UI does not
+  // hang waiting for more pages.
+  const ICAError doneErr = canceled ? noErr : finalErr;
   CFMutableDictionaryRef done = CFDictionaryCreateMutable(
       nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
   if (done) {
-    if (finalErr != noErr) {
+    if (doneErr != noErr) {
       CFNumberRef errNum =
-          CFNumberCreate(nullptr, kCFNumberSInt32Type, &finalErr);
+          CFNumberCreate(nullptr, kCFNumberSInt32Type, &doneErr);
       if (errNum) {
         CFDictionarySetValue(done, kICAErrorKey, errNum);
         CFRelease(errNum);
@@ -1504,10 +1434,12 @@ void RunScanWorker(DeviceContext* ctx, ScanJob job) {
         done, deviceObject, kICANotificationTypeScannerScanDone,
         /*waitForReply=*/false);
     CFRelease(done);
-    os_log(Log(), "ScanWorker: ScannerScanDone sent err=%d (finalErr=%d)",
-           sendErr, finalErr);
+    os_log(Log(),
+           "SyncScan: ScannerScanDone sent err=%d (finalErr=%d canceled=%d)",
+           sendErr, finalErr, canceled);
   }
-  os_log(Log(), "ScanWorker: end");
+  os_log(Log(), "SyncScan: end (ran on callback thread)");
+  return doneErr;
 }
 
 ICAError Start(const ScannerObjectInfo* deviceObjectInfo,
@@ -1526,28 +1458,13 @@ ICAError Start(const ScannerObjectInfo* deviceObjectInfo,
     return kICADeviceInternalErr;
   }
 
-  // Cancel any in-flight scan before starting a new one (Task 13). StopScan sets
-  // the cancel flag, disconnects the live socket so a blocked RunScan unwinds,
-  // and JOINS the stale worker -- so a superseded overview/scan cannot linger or
-  // hand a page back into this new scan's destination. (This replaces a bare
-  // join that only reaped an already-finished worker and would have let a still
-  // running one overlap.) Then clear the cancel flag for this run.
-  StopScan(ctx);
-  ctx->cancelRequested.store(false);
-
-  // Snapshot the transfer settings + params into a per-job value object so the
-  // worker hands back using ONLY its own copy, immune to a later SetParameters
-  // rewriting the mutable ctx fields. Ownership of the resolved security-scoped
-  // URL MOVES from ctx into the job (its access-token lifetime is now per-job,
-  // released when the job is destroyed), leaving ctx with nothing to double-free.
   // Notification object (Task 15 prime fix). Prior builds handed every
   // ScanProgressStatus / ScannerPageDone / ScannerScanDone the trigger's
   // ICD_ScannerStartPB::object; the host keys its scan session on the DEVICE
   // object (ScannerObjectInfo::icaObject, "Apple" in ICD_ScannerCalls.h), so
   // notifications against the wrong object never completed the scan or rendered
   // the overview. Prefer the captured device object; fall back to pb->object only
-  // if the framework has not populated it. Log both once so a re-test confirms
-  // which is right.
+  // if the framework has not populated it.
   if (deviceObjectInfo && deviceObjectInfo->icaObject != 0) {
     ctx->deviceObject = deviceObjectInfo->icaObject;
   }
@@ -1559,26 +1476,37 @@ ICAError Start(const ScannerObjectInfo* deviceObjectInfo,
          deviceObjectInfo ? deviceObjectInfo->icaObject : 0, pb->object,
          notifyObject);
 
-  ScanJob job;
-  job.params = ctx->params;
-  job.deviceObject = notifyObject;
-  job.fileTransfer = ctx->fileTransfer;
-  job.transferPlan = ctx->transferPlan;
-  job.documentFolderPath = ctx->documentFolderPath;
-  job.securityScopedURL = ctx->securityScopedURL;  // Move the +1.
+  // Take the transfer settings + params as locals for this scan. SetParameters
+  // and Start alternate on the one callback thread (Task 16), so no snapshot
+  // object or lock is needed; ownership of the resolved security-scoped URL moves
+  // out of ctx into this local so its access-token lifetime is exactly this scan
+  // (released after RunScanSynchronous), leaving ctx with nothing to double-free.
+  const brscan::Params params = ctx->params;
+  const bool fileTransfer = ctx->fileTransfer;
+  const brscan::ica::TransferPlan transferPlan = ctx->transferPlan;
+  const std::string documentFolderPath = ctx->documentFolderPath;
+  CFURLRef securityScopedURL = ctx->securityScopedURL;  // Take the +1.
   ctx->securityScopedURL = nullptr;
 
-  const brscan::Params& params = job.params;
   os_log(Log(),
-         "Start: launching scan worker mode=%{public}s dpi=%d source=%{public}s "
-         "duplex=%d area=(%d,%d,%d,%d) fileTransfer=%d",
+         "Start: running SYNCHRONOUS scan mode=%{public}s dpi=%d "
+         "source=%{public}s duplex=%d area=(%d,%d,%d,%d) fileTransfer=%d",
          ModeName(params.mode), params.x_dpi, SourceName(params.source),
          params.duplex, params.area.x0, params.area.y0, params.area.x1,
-         params.area.y1, job.fileTransfer);
+         params.area.y1, fileTransfer);
 
-  // Run off icdd's callback thread; completion is posted via ScannerScanDone.
-  ctx->scanThread = std::thread(RunScanWorker, ctx, std::move(job));
+  // Run the whole scan inline on icdd's callback thread; every notification
+  // (progress/page-done/scan-done) is posted from here and returns only after
+  // ScannerScanDone.
+  const ICAError finalErr =
+      RunScanSynchronous(*ctx, notifyObject, params, fileTransfer, transferPlan,
+                         documentFolderPath, securityScopedURL);
 
+  if (securityScopedURL) CFRelease(securityScopedURL);  // Release the +1.
+
+  // Completion was already delivered via ScannerScanDone; report success from
+  // Start itself so a synchronous failure is not double-counted by the host.
+  os_log(Log(), "Start: scan complete (finalErr=%d), returning", finalErr);
   pb->header.err = noErr;
   return noErr;
 }
