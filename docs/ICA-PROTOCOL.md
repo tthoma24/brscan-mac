@@ -142,21 +142,40 @@ The module posts, per scan, in order (via `ICDSendNotification` /
 1. `kICANotificationTypeDeviceStatusInfo` + `kICANotificationSubTypeKey` =
    `kICANotificationSubTypeWarmUpStarted`, then a second with
    `…WarmUpDone`.
-2. `kICANotificationTypeScanProgressStatus` (repeated per pass) — image payload
-   via `ICDAddImageInfoToNotificationDictionary` (whole image; used for the
-   overview) or `ICDAddBandInfoToNotificationDictionary` (progressive bands).
+2. `kICANotificationTypeScanProgressStatus` — **one per decoded band, streamed
+   LIVE** (Task 18b). `brscan::RunScan`'s 4-argument streaming overload fires an
+   `on_band` callback as rows decode off the wire (16-row bands); each band is
+   packed with `ICDAddImageInfoToNotificationDictionary` using the **full page**
+   `width`/`height` and the band's `dataStartRow` / `dataNumberOfRows` /
+   `dataSize`, with `bytesPerRow` = the `DescribeBuffer` stride. The host
+   accumulates the bands into its overview/preview image, so the preview fills
+   top-to-bottom with a moving progress bar **during** the scan (not just at the
+   end — the earlier whole-image single-chunk send rendered only on completion).
    Sent with `ICDSendNotificationAndWaitForReply`; a cancel is
-   `replyCode == userCanceledErr`. The image-info args
-   (`width`/`height`/`bytesPerRow`/`dataSize`/bpp/components/color space) must
-   exactly match the pixel buffer or the host renders nothing, silently.
-3. `kICANotificationTypeScannerPageDone` — keys: `kICANotificationICAObjectKey`
-   = the **device** object (`deviceObjectInfo->icaObject`, NOT the
-   `ICD_ScannerStartPB::object` trigger), `kICANotificationTypeKey`, and (file
-   transfer) `kICANotificationScannerDocumentNameKey` = the exact destination
-   path. Sent with plain `ICDSendNotification`.
-4. `kICANotificationTypeScannerScanDone` — keys: `kICANotificationICAObjectKey`
-   (device object) + `kICANotificationTypeKey`. Plain `ICDSendNotification`.
-   Cancel path uses `kICANotificationTypeTransactionCanceled`.
+   `replyCode == userCanceledErr`, which makes `on_band` return `false` so
+   `RunScan` stops reading promptly and returns `Status::kCancelled` (a true
+   mid-scan cancel). The image-info args (`width`/`height`/`bytesPerRow`/
+   `dataSize`) must exactly match the band buffer or the host renders nothing,
+   silently — `DescribeBand` (`ica-module/buffer_descriptor.h`) computes them and
+   enforces the per-band stride guard (`band.size == stride * num_rows`).
+   `ICDAddBandInfoToNotificationDictionary` (the BAND-info packer) is NOT used:
+   the host's preview accumulator consumes the Image-info keys, not the Band-info
+   keys (former "Defect A").
+3. `kICANotificationTypeScannerPageDone` — **file transfer only.** For the
+   **memory/overview** path the streamed bands are the complete delivery, so
+   there is no whole-image send and no per-page `ScannerPageDone`. For **file
+   transfer**, after `RunScan` returns the whole page (still accumulated in the
+   `out` vector while bands streamed) is encoded to the destination and this is
+   posted. Keys: `kICANotificationICAObjectKey` = the **device** object
+   (`deviceObjectInfo->icaObject`, NOT the `ICD_ScannerStartPB::object`
+   trigger), `kICANotificationTypeKey`, and
+   `kICANotificationScannerDocumentNameKey` = the exact destination path. Sent
+   with plain `ICDSendNotification`.
+4. `kICANotificationTypeScannerScanDone` — one per scan, ends the job. Keys:
+   `kICANotificationICAObjectKey` (device object) + `kICANotificationTypeKey`.
+   Plain `ICDSendNotification`. A clean host cancel (`RunScan` returned
+   `kCancelled`) also ends with a clean `ScannerScanDone` (no file written, no
+   leaked scoped URL / transport).
 
 `kICANotificationICAObjectKey` must be the **device object's** `icaObject` on
 every notification so the host correlates them to the session; using the Start
@@ -178,11 +197,16 @@ for a scanner/TCP-IP module — a dead end; do not use it.
 Host-initiated scanning is the normal driver flow: build a `brscan::Params`
 from the request (`button_flow = false`; the driver flow's job-final terminator
 is `0x80 0x80`, unlike the button flow's single `0x80`), open a
-`brscan::TcpTransport(ip, 54921)`, and run `brscan::RunScan`. Per page: `kRgb`
-decodes via `brscan::DecodeJpeg` to RGB; `kGray`/`kBitonal` pass through;
-`DescribeBuffer` (`ica-module/buffer_descriptor.h`) computes
-bpp/stride/size/color space. The device allows one connection at a time, and a
-bounded connect retry handles a lingering-socket race.
+`brscan::TcpTransport(ip, 54921)`, and run `brscan::RunScan`'s 4-argument
+streaming overload with an `on_band` callback (Task 18b): bands stream to the
+host live for the progress bar (see the notification sequence above), while the
+overload still accumulates whole pages into `out`. The bands carry already-
+decoded, host-ready pixels; the whole pages in `out` keep `kRgb` as native JPEG
+(decoded via `brscan::DecodeJpeg` only for the file-transfer encode) and
+`kGray`/`kBitonal` as raw samples. `DescribeBuffer` / `DescribeBand`
+(`ica-module/buffer_descriptor.h`) compute bpp/stride/size/color space. The
+device allows one connection at a time, and a bounded connect retry handles a
+lingering-socket race.
 
 **Scan execution runs SYNCHRONOUSLY on icdd's callback thread, not a background
 thread (Task 16).** `ICD_ScannerStart` performs the entire scan inline —
@@ -196,9 +220,12 @@ completed. Blocking `Start` for the whole scan is correct and expected by icdd
 (matching Apple `VirtualScanner` and the other reference modules). There is no
 worker thread, no join, and no cross-thread state (the transfer settings are
 locals in `Start`, since `SetParameters` and `Start` alternate on the one
-thread). Cancel is handled at a page boundary: a `ScanProgressStatus` reply of
-`userCanceledErr` stops further pages and finishes with a clean
-`ScannerScanDone`; there is no mid-`RunScan` cancel (`RunScan` is monolithic).
+thread). Cancel is now **mid-scan** (Task 18b): a `ScanProgressStatus` reply of
+`userCanceledErr` makes the `on_band` callback return `false`, so `RunScan`
+stops reading promptly and returns `Status::kCancelled`; the module then writes
+no file and finishes with a clean `ScannerScanDone`. This supersedes the earlier
+page-boundary-only cancel (the old whole-page hand-back could only observe a
+cancel between pages).
 
 ## Geometry (platen extent) — OPEN
 

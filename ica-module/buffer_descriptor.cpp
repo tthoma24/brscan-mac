@@ -45,4 +45,35 @@ std::optional<BufferDescriptor> DescribeBuffer(const ScanResult& result) {
   return DescribeBuffer(result.format, result.width, result.height);
 }
 
+std::optional<BandImageInfo> DescribeBand(PixelFormat format, int full_width,
+                                          int full_height, int start_row,
+                                          int num_rows, size_t band_size) {
+  // The band inherits the page's stride/color-space; reuse the page descriptor
+  // so a band can never disagree with the whole-page geometry.
+  std::optional<BufferDescriptor> d =
+      DescribeBuffer(format, full_width, full_height);
+  if (!d) return std::nullopt;
+
+  // A band must cover at least one row and stay within the page.
+  if (num_rows <= 0 || start_row < 0) return std::nullopt;
+  if (static_cast<int64_t>(start_row) + num_rows >
+      static_cast<int64_t>(full_height)) {
+    return std::nullopt;
+  }
+
+  // Stride guard: the band's byte count must be exactly stride * num_rows. A
+  // silent mismatch here is what renders nothing on the host, so reject it.
+  const int64_t expected = d->bytes_per_row * num_rows;
+  if (static_cast<int64_t>(band_size) != expected) return std::nullopt;
+
+  BandImageInfo info;
+  info.width = full_width;
+  info.height = full_height;
+  info.bytes_per_row = d->bytes_per_row;
+  info.data_start_row = start_row;
+  info.data_number_of_rows = num_rows;
+  info.data_size = expected;
+  return info;
+}
+
 }  // namespace brscan::ica

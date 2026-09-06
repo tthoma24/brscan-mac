@@ -162,5 +162,81 @@ TEST(DescribeBufferTest, ScanResultOverloadMatchesPrimitiveOverload) {
   EXPECT_EQ(from_result->color_space, from_prims->color_space);
 }
 
+// ---------------------------------------------------------------------
+// DescribeBand: per-band image-info args + the stride guard (Task 18b).
+// ---------------------------------------------------------------------
+
+TEST(DescribeBandTest, RgbBandCarriesFullPageGeometryAndBandRows) {
+  // A 16-row band starting at row 32 of a 100x50 RGB page. Stride = 100*3.
+  const int64_t stride = static_cast<int64_t>(100) * 3;
+  const auto info = DescribeBand(PixelFormat::kRgb, /*full_width=*/100,
+                                 /*full_height=*/50, /*start_row=*/32,
+                                 /*num_rows=*/16, /*band_size=*/stride * 16);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->width, 100);           // FULL page width.
+  EXPECT_EQ(info->height, 50);           // FULL page height.
+  EXPECT_EQ(info->bytes_per_row, stride);
+  EXPECT_EQ(info->data_start_row, 32);
+  EXPECT_EQ(info->data_number_of_rows, 16);
+  EXPECT_EQ(info->data_size, stride * 16);
+}
+
+TEST(DescribeBandTest, GrayAndBitonalStridesMatchDescribeBuffer) {
+  const auto gray = DescribeBand(PixelFormat::kGray, 200, 300, 0, 16,
+                                 static_cast<size_t>(200) * 16);
+  ASSERT_TRUE(gray.has_value());
+  EXPECT_EQ(gray->bytes_per_row, 200);
+  EXPECT_EQ(gray->data_size, static_cast<int64_t>(200) * 16);
+
+  // Bitonal stride rounds up to whole bytes: (201 + 7) / 8 = 26.
+  const int64_t bstride = (201 + 7) / 8;
+  const auto bit = DescribeBand(PixelFormat::kBitonal, 201, 300, 16, 16,
+                                static_cast<size_t>(bstride) * 16);
+  ASSERT_TRUE(bit.has_value());
+  EXPECT_EQ(bit->bytes_per_row, bstride);
+  EXPECT_EQ(bit->data_size, bstride * 16);
+}
+
+TEST(DescribeBandTest, LastBandMayBeShorterThanTheOthers) {
+  // 50-row page in 16-row bands: the final band covers rows 48..49 (2 rows).
+  const int64_t stride = static_cast<int64_t>(100) * 3;
+  const auto info = DescribeBand(PixelFormat::kRgb, 100, 50, 48, 2,
+                                 static_cast<size_t>(stride) * 2);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->data_start_row, 48);
+  EXPECT_EQ(info->data_number_of_rows, 2);
+  EXPECT_EQ(info->data_size, stride * 2);
+}
+
+TEST(DescribeBandTest, StrideMismatchIsRejected) {
+  // band_size that is not stride * num_rows renders nothing on the host, so the
+  // guard must reject it (the module drops such a band).
+  const int64_t stride = static_cast<int64_t>(100) * 3;
+  EXPECT_EQ(DescribeBand(PixelFormat::kRgb, 100, 50, 0, 16, stride * 16 - 1),
+            std::nullopt);
+  EXPECT_EQ(DescribeBand(PixelFormat::kRgb, 100, 50, 0, 16, stride * 16 + 1),
+            std::nullopt);
+  EXPECT_EQ(DescribeBand(PixelFormat::kRgb, 100, 50, 0, 16, 0), std::nullopt);
+}
+
+TEST(DescribeBandTest, BandOutsidePageIsRejected) {
+  const int64_t stride = static_cast<int64_t>(100) * 3;
+  // start_row + num_rows runs past full_height (48 + 16 > 50).
+  EXPECT_EQ(DescribeBand(PixelFormat::kRgb, 100, 50, 48, 16,
+                         static_cast<size_t>(stride) * 16),
+            std::nullopt);
+  // Negative start row.
+  EXPECT_EQ(DescribeBand(PixelFormat::kRgb, 100, 50, -1, 16,
+                         static_cast<size_t>(stride) * 16),
+            std::nullopt);
+  // Zero / negative row count.
+  EXPECT_EQ(DescribeBand(PixelFormat::kRgb, 100, 50, 0, 0, 0), std::nullopt);
+}
+
+TEST(DescribeBandTest, InvalidPageGeometryIsRejected) {
+  EXPECT_EQ(DescribeBand(PixelFormat::kRgb, 0, 50, 0, 16, 0), std::nullopt);
+  EXPECT_EQ(DescribeBand(PixelFormat::kGray, 100, 0, 0, 16, 0), std::nullopt);
+}
+
 }  // namespace
 }  // namespace brscan::ica
