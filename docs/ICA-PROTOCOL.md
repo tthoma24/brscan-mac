@@ -1,0 +1,231 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
+# Image Capture (ICA) device-module interface
+
+This documents the macOS Image Capture *device-module* interface the Plan 2 ICA
+module (`ica-module/`) implements, reconstructed clean-room. Apple never
+published narrative docs for the third-party ICA scanner device-module protocol;
+this file records what was established from the public SDK headers, the device's
+own black-box behavior (live `os_log` traces), and — for interface facts only —
+the sequence used by Apple's `VirtualScanner` sample and two shipping
+open-source modules. See [Provenance](#provenance-and-clean-room) below and
+`PROVENANCE.md`. No vendor or Apple source was copied.
+
+A module is a background-only `.app` in `/Library/Image Capture/Devices/` that
+`icdd` (the Image Capture discovery daemon) launches and drives through the C
+callback table in `ICADevices.framework/Headers/ICD_ScannerCalls.h`
+(`gICDScannerCallbackFunctions`, entered via `ICD_ScannerMain`). It links
+`ICADevices.framework`. Ad-hoc signing suffices for local development;
+distribution needs Developer-ID + notarization.
+
+## Discovery and binding
+
+`icdd` browses Bonjour and binds a device to a module by matching the module's
+`Contents/Resources/DeviceMatchingInfo.plist` against the device's advertised
+TXT record, via icdd's `compareBonjourDeviceModuleDictionary:withBonjourTXTRecord:`.
+The match dict must live under a top-level `BonjourNetwork` dict keyed by the
+Bonjour service type, and must carry an `ICABonjourTXTRecordKey` sub-dict of
+TXT key/value pairs to compare (a bare `device type = scanner` does not bind).
+
+- Service type: `_scanner._tcp.` (the Brother raw-scan protocol, port 54921).
+- `ICABonjourTXTRecordKey`: `{ mdl = MFC-J6920DW; mfg = Brother; }` — the
+  device's own publicly-advertised TXT values (captured with `dns-sd -L`).
+- Plus `device type = scanner` and `device events = ( scan )`, and a top-level
+  `Version = 1.0`.
+
+A `DeviceInfo.plist` is also required in `Resources/`. Symptom of a missing TXT
+match dict: the device is browsed but never bound (Image Capture shows 0
+devices; the module is never launched).
+
+## Callback lifecycle
+
+Order observed live: `ICD_ScannerOpenTCPIPDevice` (fill the device
+`ScannerObjectInfo`: `objectType = kICADevice`, `objectSubtype =
+kICADeviceScanner`, a stable `uniqueID`, and `privateData` = per-connection
+context) → `ICD_ScannerGetObjectInfo` (object-tree walk) → `ICD_ScannerOpenSession`
+→ `ICD_ScannerGetParameters` → `ICD_ScannerPeriodicTask` (polled) → then, per
+scan, `ICD_ScannerSetParameters` → `ICD_ScannerStart`. Teardown:
+`ICD_ScannerCloseSession` / `ICD_ScannerCloseDevice` / `ICD_ScannerCleanup`.
+
+- Returning a *zeroed* device object from `OpenTCPIPDevice` yields
+  `-21345` (`ICReturnConnectionFailedToOpen`); filling it clears that.
+- **Object tree:** `ICD_ScannerGetObjectInfo` is walked for index 0, 1, 2 …
+  terminating on `kICAIndexOutOfRangeErr`. The device object must report a
+  finite tree: exactly one child at index 0 (a scan object, `kICAFile` /
+  `kICAFileImage`), end-of-list at index ≥ 1; any non-device parent is a leaf.
+  Reporting the device as empty (error for every index) makes icdd re-drive the
+  callback in an unbounded loop.
+- **Polled callbacks** (`GetObjectInfo`, `GetPropertyData`, `Status`,
+  `PeriodicTask`) must not `os_log` per call, or they flood the unified log.
+- `icdd` does not call `ICD_ScannerGetPropertyData` for capability rendering.
+
+## Capability schema (`ICD_ScannerGetParameters`)
+
+`icdd` hands `theDict` **empty** and the module fills it — the module dictates
+the schema (there is no pre-seed). The keys are the **TWAIN capability
+vocabulary** (`ICAP_*`), not any `kICAScanner…` constants (which do not exist on
+the module side). Everything lives under a single top-level `device` dict:
+
+```
+theDict["device"] = {
+  // capability entries for the SELECTED functional unit, FLAT in this dict:
+  "ICAP_XRESOLUTION":  { type, value, current, default },
+  "ICAP_YRESOLUTION":  { ... },
+  "ICAP_BITDEPTH":     { ... },   // values are the bit count (1, 8)
+  "ICAP_PIXELTYPE":    { ... },   // 0=BW, 1=gray, 2=RGB
+  "ICAP_PHYSICALWIDTH":  { ... }, // TWON_ONEVALUE, INCHES (see Geometry)
+  "ICAP_PHYSICALHEIGHT": { ... },
+  "ICAP_SUPPORTEDSIZES": { ... }, // array of ICScannerDocumentType values
+  "ICAP_UNITS":        { ... },   // measurement unit; inches=0 … pixels=5
+  "CAP_FEEDERENABLED": { ... },
+  "CAP_DUPLEX":        { ... },
+  "functionalUnits": {            // ONLY these two keys
+    "availableFunctionalUnitTypes": [ 0, 3 ],
+    "selectedFunctionalUnitType": 0
+  }
+}
+```
+
+Each capability entry is a TWAIN container: `{ "type": "TWON_ENUMERATION" |
+"TWON_ONEVALUE", "value": <array | scalar>, "current": <v>, "default": <v> }`
+(a numeric range adds `min`/`max`/`stepSize`). A top-level `functionalUnits`
+key (instead of the `device` wrapper) renders no controls — that wrapper is
+mandatory.
+
+Enum values (from `ImageCaptureCore/ICScannerFunctionalUnits.h`):
+`ICScannerFunctionalUnitType` flatbed=0, positiveTransparency=1,
+negativeTransparency=2, documentFeeder=3; `ICScannerPixelDataType` BW=0, gray=1,
+RGB=2; `ICScannerMeasurementUnit` inches=0, cm=1, picas=2, points=3, twips=4,
+pixels=5; `ICScannerDocumentType` USLetter=3, USLegal=4, A5=5, USLedger=9,
+USExecutive=10, A3=11 (values are non-contiguous — read from the header).
+
+Client mapping (`icdd` translates the module dict into the typed
+`ICScannerDevice` / `ICScannerFunctionalUnit` object graph — there is no
+guaranteed 1:1 key identity): `ICAP_XRESOLUTION` → `supportedResolutions` /
+`resolution`; `ICAP_BITDEPTH` → `bitDepth`; `ICAP_SUPPORTEDSIZES` →
+`supportedDocumentTypes`; `ICAP_UNITS` → `measurementUnit`.
+
+## Scan request (`ICD_ScannerSetParameters`)
+
+The host passes one top-level `userScanArea` dict of TWAIN `{type,value}`
+entries plus scan-area and destination fields. Observed keys:
+`ICAP_XRESOLUTION`/`YRESOLUTION`, `ICAP_PIXELTYPE`, `ICAP_BITDEPTH`,
+`ICAP_UNITS`, `offsetX`/`offsetY`/`width`/`height` (in `ICAP_UNITS`),
+`ColorSyncMode`, `"scan mode"` (`overview` for a preview pass),
+`useOverviewImageAsFinalImage`, `progressNotificationWithData`.
+
+Read the scan area in the request's own `ICAP_UNITS` and convert to pixels at
+the chosen DPI (inches × dpi; cm × dpi / 2.54; pixels pass through). The host
+switches its unit to whatever the module advertises for the platen.
+
+### Transfer mode (host-selected, per scan)
+
+`ICScannerTransferMode` fileBased=0 (default), memoryBased=1. The mode is
+signalled by the presence of destination keys, not a flag:
+
+- **File-based** (final scan): the request carries `document folder`,
+  `document name`, `document extension`, `document format` (a UTI), and
+  `ICSecurityScopedWrappedURL`. The module encodes the page, writes it to
+  `<document folder>/<document name>.<document extension>`, and reports that
+  exact path. `ICSecurityScopedWrappedURL`'s value is an
+  `NSSecurityScopedURLWrapper` (in no public header); unwrap it to the real
+  security-scoped `NSURL` (its `-url` selector) and bracket the write with
+  `startAccessingSecurityScopedResource` / `stop…`.
+- **Memory/overview** (preview): no destination keys; the module hands the
+  pixels back inline (see below). `"scan mode" = overview`.
+
+## Notification / completion sequence
+
+The module posts, per scan, in order (via `ICDSendNotification` /
+`ICDSendNotificationAndWaitForReply`, `ICASendNotificationPB`):
+
+1. `kICANotificationTypeDeviceStatusInfo` + `kICANotificationSubTypeKey` =
+   `kICANotificationSubTypeWarmUpStarted`, then a second with
+   `…WarmUpDone`.
+2. `kICANotificationTypeScanProgressStatus` (repeated per pass) — image payload
+   via `ICDAddImageInfoToNotificationDictionary` (whole image; used for the
+   overview) or `ICDAddBandInfoToNotificationDictionary` (progressive bands).
+   Sent with `ICDSendNotificationAndWaitForReply`; a cancel is
+   `replyCode == userCanceledErr`. The image-info args
+   (`width`/`height`/`bytesPerRow`/`dataSize`/bpp/components/color space) must
+   exactly match the pixel buffer or the host renders nothing, silently.
+3. `kICANotificationTypeScannerPageDone` — keys: `kICANotificationICAObjectKey`
+   = the **device** object (`deviceObjectInfo->icaObject`, NOT the
+   `ICD_ScannerStartPB::object` trigger), `kICANotificationTypeKey`, and (file
+   transfer) `kICANotificationScannerDocumentNameKey` = the exact destination
+   path. Sent with plain `ICDSendNotification`.
+4. `kICANotificationTypeScannerScanDone` — keys: `kICANotificationICAObjectKey`
+   (device object) + `kICANotificationTypeKey`. Plain `ICDSendNotification`.
+   Cancel path uses `kICANotificationTypeTransactionCanceled`.
+
+`kICANotificationICAObjectKey` must be the **device object's** `icaObject` on
+every notification so the host correlates them to the session; using the Start
+trigger object instead is a likely cause of a scan that never completes in the
+UI.
+
+### Object registration
+
+`ICDScannerNewObjectInfoCreated(deviceObjectInfo, 0, &newObj)`
+(`ICD_ScannerCalls.h`) registers a scanned object — but Apple's sample calls it
+**only** for the in-memory / remote-client case (`document folder == NULL`).
+For **local file transfer** no object is registered; the file write +
+`ScannerPageDone`(path) + `ScannerScanDone` is what completes the job. The
+generic `ICDNewObject` (`ICADevice.h`, deprecated 10.7) returns `unimpErr` (-4)
+for a scanner/TCP-IP module — a dead end; do not use it.
+
+## Scan execution over `libbrscan`
+
+Host-initiated scanning is the normal driver flow: build a `brscan::Params`
+from the request (`button_flow = false`; the driver flow's job-final terminator
+is `0x80 0x80`, unlike the button flow's single `0x80`), open a
+`brscan::TcpTransport(ip, 54921)`, and run `brscan::RunScan` on a background
+thread (never block icdd's callback thread). Per page: `kRgb` decodes via
+`brscan::DecodeJpeg` to RGB; `kGray`/`kBitonal` pass through; `DescribeBuffer`
+(`ica-module/buffer_descriptor.h`) computes bpp/stride/size/color space. The
+device allows one connection at a time — a new scan should cancel any in-flight
+one, and a bounded connect retry handles a lingering-socket race.
+
+## Geometry (platen extent) — OPEN
+
+`ICAP_PHYSICALWIDTH`/`ICAP_PHYSICALHEIGHT` are advertised in **inches**
+(`TWON_ONEVALUE` doubles); physical size in pixels is dpi-dependent and
+mis-scales the host's platen canvas. The MFC-J6920DW flatbed is A3-capable, so
+A3 and Ledger are valid flatbed sizes. **Known issue:** the platen still renders
+larger than it should relative to a Letter selection; the current advertisement
+uses a phantom union (A3 width × Ledger height) rather than one real glass
+rectangle. Tracked for a follow-up.
+
+## Re-test loop (device-in-the-loop)
+
+`icdd` launches the module as a child process that survives `killall icdd`, so a
+re-test must also reap it. After building:
+
+```
+sudo ica-module/install-loadspike.sh install
+sudo killall BrscanICALoadSpike 2>/dev/null      # reap the stale child
+sudo rm -f "/Library/Image Capture/Devices/deviceInfoCacheV2.plist"
+killall icdd 2>/dev/null
+# verify the INSTALLED binary carries your change:
+strings "/Library/Image Capture/Devices/BrscanICALoadSpike.app/Contents/MacOS/BrscanICALoadSpike" | grep "<a string you added>"
+log stream --predicate 'subsystem == "me.tthoma24.brscan.ica"' --style compact --info --debug
+```
+
+Then open Image Capture and select `Brother MFC-J6920DW`.
+
+## Provenance and clean-room
+
+The interface facts here (callback signatures, `kICANotification*` /
+`ICAP_*` / enum constant names, the `theDict["device"]` shape, and the
+notification order) come from:
+
+- The public SDK headers in `ICADevices.framework` and
+  `ImageCaptureCore.framework` (Apple SDK; reference only).
+- The device's own black-box behavior, captured in this module's `os_log`
+  traces and `dns-sd`.
+- The required *sequence* and which key goes on which notification, cross-checked
+  against Apple's `VirtualScanner` sample (Apple Sample Code License —
+  proprietary, GPL-incompatible), `chrspeich/SaneNetScanner` (no license
+  declared — all-rights-reserved), and `craiglinton/scansnaps1500m`
+  (Apple-`VirtualScanner`-derived). These were read for **interface facts
+  only**; no source bodies were reproduced or adapted, and none enter this
+  repository. See `PROVENANCE.md`.

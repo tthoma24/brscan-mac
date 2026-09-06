@@ -111,11 +111,20 @@ how to build and run it.
 
 ## Trademark and affiliation
 
-This project is unofficial and not affiliated with, authorized by, or
-endorsed by Brother Industries, Ltd. "Brother" and model names such as
-"MFC-J6920DW" are used only to describe hardware compatibility. All
-trademarks are the property of their respective owners.
+This project is unofficial and not affiliated with, authorized by, or endorsed
+by Brother Industries, Ltd., Apple Inc., or the TWAIN Working Group. "Brother"
+and model names such as "MFC-J6920DW" are used only to describe hardware
+compatibility; "Apple", "macOS", and "Image Capture" name the operating-system
+interfaces this software targets; "TWAIN" names the capability vocabulary
+(`ICAP_*`, `TWON_*`) that Apple's Image Capture interface reuses. All trademarks
+are the property of their respective owners.
 
 ## License
 
-GPL-2.0-or-later. See [LICENSE](LICENSE).
+Source code is licensed **GPL-2.0-or-later**. See [LICENSE](LICENSE).
+
+Documentation — the `docs/` directory, `PROVENANCE.md`, and the `README` files —
+is licensed **[CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)**
+(`SPDX-License-Identifier: CC-BY-4.0`). The docs record interface facts
+reconstructed clean-room (see `PROVENANCE.md`); they contain no third-party
+source.
