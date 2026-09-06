@@ -253,21 +253,68 @@ callbacks and translates them to a `brscan::Params` (see
 stays `false` throughout — this is host-initiated scanning, not the button
 flow.
 
-| Apple / ICA scanner parameter | `brscan::Params` field | Notes |
+**Schema (Task 8 — the real TWAIN/ICAP contract).** Plan 2 Task 2 filled the
+`ICD_ScannerGetParameters` dict with invented descriptive keys
+(`supportedResolutions`, `paperSizes`, …); the live Scan test showed Image
+Capture recognised none of them, rendered no controls, and never called `Start`.
+Image Capture's scanner modules speak the TWAIN-derived `ICAP_*` capability
+vocabulary, so `GetParameters` now emits, under a top-level `functionalUnits`
+dict:
+
+- `availableFunctionalUnitTypes` → array of `ICScannerFunctionalUnitType`
+  numbers (`0` flatbed, `3` documentFeeder); `selectedFunctionalUnitType` → `0`.
+- one capability sub-dict **per unit**, keyed by the stringified unit type
+  (`"0"`, `"3"`) — capabilities are scoped per unit because the flatbed and
+  feeder differ (the flatbed adds the platten "default" size and the
+  flatbed-only sizes and has the larger extent).
+
+Each capability is a TWAIN-style container
+`{ "type": "TWON_ENUMERATION" | "TWON_ONEVALUE", "value": <array | scalar>,
+"current": <v>, "default": <v> }` under these keys:
+
+| ICAP capability key | Shape | Value | `brscan::Params` on the way back in |
+|---|---|---|---|
+| `ICAP_XRESOLUTION`, `ICAP_YRESOLUTION` | `TWON_ENUMERATION` | DPI `{100,150,200,300,400,600}`, current/default 300 | `x_dpi`, `y_dpi` (clamped to the `ESC I` `Offer` max) |
+| `ICAP_BITDEPTH` | `TWON_ENUMERATION` | `ICScannerBitDepth` `{1, 8}`, default 8 | `mode` (with the scan-mode/pixel type: 8-bit RGB → `kColor`, 8-bit gray → `kGray`, 1-bit → `kBlackWhite`) |
+| `ICAP_PHYSICALWIDTH`, `ICAP_PHYSICALHEIGHT` | `TWON_ONEVALUE` | the unit's max extent in `ICAP_UNITS` (pixels at 300 dpi, from `daemon/paper_size.cpp`) | bounds `area` |
+| `ICAP_SUPPORTEDSIZES` | `TWON_ENUMERATION` | array of `ICScannerDocumentType` values (see paper mapping) | `area` (via the size picker) |
+| `ICAP_UNITS` | `TWON_ONEVALUE` | `ICScannerMeasurementUnit` pixels = `5` | keeps host geometry in the module's pixel space |
+
+Paper-token → `ICScannerDocumentType` (raw values are the **non-contiguous**
+ImageCaptureCore enum, verified against the SDK header
+`ICScannerFunctionalUnits.h`; the mapping lives in
+`scan_translate.h::DocumentTypeForPaperToken`): LETTER → `USLetter` (3), LEGAL →
+`USLegal` (4), A4 → `A4` (1), LEDGER → `USLedger` (9), A3 → `A3` (11), A5 → `A5`
+(5), EXECUTIVE → `USExecutive` (10); the flatbed also advertises `Default` (0,
+platten). PHOTO and BCARD have no clean standard case, so they are omitted from
+`ICAP_SUPPORTEDSIZES` and offered as a custom scan area only. Brightness /
+contrast are **not** scalar client capabilities (they are `vendorFeatures` /
+`ICScannerFeatureRange`), so they are deferred this task: the invented
+`brightness`/`contrast`/`*Range` keys are dropped from the advertisement and
+`TranslateScanParams` simply defaults them to 50. A later task can add them as
+`ICScannerFeatureRange` if the panel needs them.
+
+**`SetParameters` echo → `ScanRequest` → `Params`.** The host echoes its
+selection back through `ICD_ScannerSetParameters`; the module reads the real
+keys, each presence-aware (a missing key falls back to the design default):
+
+| Echoed key | `brscan::Params` field | Notes |
 |---|---|---|
-| Resolution (DPI) | `x_dpi`, `y_dpi` | Same value both axes for the normal UI; clamp to the device's offered maximum from the `ESC I` offer (`Offer`). Default 300. |
-| Color / bit-depth ("pixel data type") | `mode` | RGB 8-bit → `ScanMode::kColor`; Gray 8-bit → `ScanMode::kGray`; 1-bit / black-and-white → `ScanMode::kBlackWhite`. |
-| — (no ICA equivalent initially) | `ScanMode::kTrueGray`, `kErrorDiffusion` | Not exposed in the first release; the ICA UI has no natural control for them. Revisit if the picker turns out to distinguish them. |
-| Functional unit: flatbed vs. document feeder | `source` | Flatbed → `Source::kFlatbed`; feeder → `Source::kAdf`. |
-| Duplex (feeder option) | `duplex` | Only meaningful for `kAdf`. |
-| Scan area (host units) | `area` (`Area{x0,y0,x1,y1}`, pixels at resolution) | Convert the host's rect (unit TBD — item 5) to pixels at the chosen DPI. A zero area (`{0,0,0,0}`) means "full offered area," which `RunScan` already honors. |
-| Paper-size selection | `area` (via the enumeration unit) | The size picker resolves a named size to an area within the device max; this drives `area` when the user picks a size rather than a custom rect. |
-| Brightness | `brightness` (0–100) | Map the host's brightness scale onto 0–100; confirm the host's range. Default 50. |
-| Contrast | `contrast` (0–100) | As brightness. Default 50. |
+| `ICAP_XRESOLUTION` (number) | `x_dpi`, `y_dpi` | Same value both axes; clamped to the offered max. Default 300. |
+| `scan mode` (string) | `mode` | Best-effort case-insensitive map to a pixel type (black/bw/bitonal/text → `kBlackWhite`, gray → `kGray`, else `kColor`); exact string vocabulary is device-in-the-loop. |
+| `selectedFunctionalUnitType` (number) | `source` | Flatbed `0` → `Source::kFlatbed`; feeder `3` → `Source::kAdf`. |
+| `duplex` (bool) | `duplex` | Only honoured for `kAdf`. |
+| `userScanArea` (dict: `offsetX`,`offsetY`,`width`,`height`) | `area` (`Area{x0,y0,x1,y1}`, pixels — `ICAP_UNITS`) | `x0=offsetX`, `y0=offsetY`, `x1=offsetX+width`, `y1=offsetY+height`, via the pure, unit-tested `scan_translate.h::CornersFromUserScanArea`. A degenerate/absent rect means `{0,0,0,0}` = "full offered area," which `RunScan` honours. |
+| `ICAP_UNITS`, `document folder`/`name`/`extension`/`format`, `ColorSyncMode` | — | Logged for the live trace; the destination strings do not affect the in-memory band hand-back. |
+| — (no ICA control) | `ScanMode::kTrueGray`, `kErrorDiffusion` | Not exposed; the panel has no natural control for them. |
 
 Reverse direction (device → host), per page: `RunScan` fills a `ScanResult`
 with `format`, `width`, `height`, and native `data`; decision G turns that into
-the host's band/file buffer. The `Offer` the device returns from `ESC I` gives
+the host's band buffer via `ICDAddBandInfoToNotificationDictionary`. Each
+`kICANotificationTypeScannerPageDone` now also carries
+`kICANotificationICAObjectKey` — a per-page image `ICAObject` minted as a child
+of the device object with `ICDNewObject` — which the public headers say the page
+notification must reference. The `Offer` the device returns from `ESC I` gives
 the true maximum resolution and pixel dimensions, which the module should use to
 bound the parameter ranges it advertises to the host so the UI never offers an
 impossible value.

@@ -9,6 +9,9 @@
 
 #include "scan_translate.h"
 
+#include <cstddef>
+#include <iterator>
+
 #include <gtest/gtest.h>
 
 #include "brscan/types.h"
@@ -159,6 +162,101 @@ TEST(TranslateScanParamsTest, DegenerateAreaMeansFull) {
   EXPECT_EQ(p.area.y0, 0);
   EXPECT_EQ(p.area.x1, 0);
   EXPECT_EQ(p.area.y1, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Paper token -> ICScannerDocumentType (ICAP_SUPPORTEDSIZES members). The raw
+// values are the NON-contiguous ImageCaptureCore enum, verified against the SDK
+// header ICScannerFunctionalUnits.h.
+TEST(DocumentTypeForPaperTokenTest, StandardTokensMapToSdkValues) {
+  EXPECT_EQ(DocumentTypeForPaperToken("LETTER"), kDocumentTypeUSLetter);  // 3
+  EXPECT_EQ(DocumentTypeForPaperToken("LEGAL"), kDocumentTypeUSLegal);    // 4
+  EXPECT_EQ(DocumentTypeForPaperToken("A4"), kDocumentTypeA4);            // 1
+  EXPECT_EQ(DocumentTypeForPaperToken("LEDGER"), kDocumentTypeUSLedger);  // 9
+  EXPECT_EQ(DocumentTypeForPaperToken("A3"), kDocumentTypeA3);            // 11
+  EXPECT_EQ(DocumentTypeForPaperToken("A5"), kDocumentTypeA5);            // 5
+  EXPECT_EQ(DocumentTypeForPaperToken("EXECUTIVE"),
+            kDocumentTypeUSExecutive);  // 10
+}
+
+// The distinct raw values must not collide (guards against a copy/paste slip in
+// the non-contiguous mapping).
+TEST(DocumentTypeForPaperTokenTest, StandardValuesAreDistinct) {
+  const int values[] = {
+      DocumentTypeForPaperToken("LETTER"), DocumentTypeForPaperToken("LEGAL"),
+      DocumentTypeForPaperToken("A4"),     DocumentTypeForPaperToken("LEDGER"),
+      DocumentTypeForPaperToken("A3"),     DocumentTypeForPaperToken("A5"),
+      DocumentTypeForPaperToken("EXECUTIVE")};
+  for (size_t i = 0; i < std::size(values); ++i) {
+    for (size_t j = i + 1; j < std::size(values); ++j) {
+      EXPECT_NE(values[i], values[j]) << "collision at " << i << "," << j;
+    }
+  }
+}
+
+TEST(DocumentTypeForPaperTokenTest, PhotoAndBusinessCardHaveNoStandardType) {
+  EXPECT_EQ(DocumentTypeForPaperToken("PHOTO"), kDocumentTypeNone);
+  EXPECT_EQ(DocumentTypeForPaperToken("BCARD"), kDocumentTypeNone);
+}
+
+TEST(DocumentTypeForPaperTokenTest, UnknownTokenIsNone) {
+  EXPECT_EQ(DocumentTypeForPaperToken("B4"), kDocumentTypeNone);
+  EXPECT_EQ(DocumentTypeForPaperToken("letter"), kDocumentTypeNone);  // case.
+  EXPECT_EQ(DocumentTypeForPaperToken(""), kDocumentTypeNone);
+}
+
+// ---------------------------------------------------------------------------
+// Host userScanArea (offset + extent, pixels) -> corner-bounded Area.
+TEST(CornersFromUserScanAreaTest, PositiveRectConverts) {
+  Area a{};
+  ASSERT_TRUE(CornersFromUserScanArea(10, 20, 2540, 3280, &a));
+  EXPECT_EQ(a.x0, 10);
+  EXPECT_EQ(a.y0, 20);
+  EXPECT_EQ(a.x1, 2550);
+  EXPECT_EQ(a.y1, 3300);
+}
+
+TEST(CornersFromUserScanAreaTest, ZeroOffsetConverts) {
+  Area a{};
+  ASSERT_TRUE(CornersFromUserScanArea(0, 0, 100, 200, &a));
+  EXPECT_EQ(a.x0, 0);
+  EXPECT_EQ(a.y0, 0);
+  EXPECT_EQ(a.x1, 100);
+  EXPECT_EQ(a.y1, 200);
+}
+
+TEST(CornersFromUserScanAreaTest, NonPositiveExtentRejected) {
+  Area a{-1, -1, -1, -1};
+  EXPECT_FALSE(CornersFromUserScanArea(0, 0, 0, 200, &a));
+  EXPECT_FALSE(CornersFromUserScanArea(0, 0, 100, 0, &a));
+  EXPECT_FALSE(CornersFromUserScanArea(0, 0, -5, 200, &a));
+  // `out` untouched on rejection.
+  EXPECT_EQ(a.x0, -1);
+  EXPECT_EQ(a.y0, -1);
+  EXPECT_EQ(a.x1, -1);
+  EXPECT_EQ(a.y1, -1);
+}
+
+TEST(CornersFromUserScanAreaTest, NullOutRejected) {
+  EXPECT_FALSE(CornersFromUserScanArea(0, 0, 100, 100, nullptr));
+}
+
+// The corner output feeds TranslateScanParams unchanged: a converted positive
+// rect flows through as the scan area.
+TEST(CornersFromUserScanAreaTest, FeedsTranslateScanParams) {
+  Area a{};
+  ASSERT_TRUE(CornersFromUserScanArea(5, 6, 200, 300, &a));
+  ScanRequest r;
+  r.has_area = true;
+  r.area_x0 = a.x0;
+  r.area_y0 = a.y0;
+  r.area_x1 = a.x1;
+  r.area_y1 = a.y1;
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.area.x0, 5);
+  EXPECT_EQ(p.area.y0, 6);
+  EXPECT_EQ(p.area.x1, 205);
+  EXPECT_EQ(p.area.y1, 306);
 }
 
 }  // namespace
