@@ -251,9 +251,12 @@ if(BUILD_TESTING)
     tests/notification_deduper_test.cpp
     tools/scan_output.cpp
     tests/option_sets_test.cpp
+    ica-module/buffer_descriptor.cpp
+    tests/buffer_descriptor_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
-  target_include_directories(brscan_tests PRIVATE libbrscan tests daemon tools)
+  target_include_directories(brscan_tests PRIVATE libbrscan tests daemon tools
+                             ica-module)
   target_include_directories(brscan_tests PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
   target_link_libraries(brscan_tests PRIVATE ${TURBOJPEG_LIBRARIES})
   target_link_directories(brscan_tests PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
