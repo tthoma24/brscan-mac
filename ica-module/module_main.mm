@@ -33,8 +33,10 @@
 // own black-box behaviour; no Brother or Apple source. Device identity is the
 // synthetic BRW00AABBCCDDEE.
 
+#import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <ICADevices/ICADevices.h>
+#import <ImageIO/ImageIO.h>
 #import <os/log.h>
 
 #include <atomic>
@@ -44,6 +46,7 @@
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -53,6 +56,7 @@
 #include "brscan/types.h"
 #include "buffer_descriptor.h"
 #include "decode_jpeg.h"  // libbrscan private header (on the libbrscan inc dir).
+#include "file_transfer.h"
 #include "scan_parameters.h"
 #include "scan_translate.h"
 
@@ -104,6 +108,18 @@ struct DeviceContext {
   // Task 7 scan state. The host's last SetParameters selection, translated to a
   // brscan::Params, is stored here so ICD_ScannerStart can run RunScan with it.
   brscan::Params params;  // Defaults (kColor/flatbed/300) until SetParameters.
+
+  // Task 12 transfer mode. A FINAL scan carries a destination (a security-scoped
+  // folder URL and/or a "document folder" path) plus document name/format/
+  // extension keys -> file-based transfer: encode the page and WRITE it there.
+  // An overview/preview scan carries none of these -> the in-memory band path
+  // below. SetParameters detects the mode and fills these; the worker consumes
+  // them. `securityScopedURL` is a retained CFURLRef (or null); it is released
+  // in SetParameters (before being overwritten) and in CloseDevice/Cleanup.
+  bool fileTransfer = false;
+  brscan::ica::TransferPlan transferPlan;
+  std::string documentFolderPath;   // Plain-path fallback ("document folder").
+  CFURLRef securityScopedURL = nullptr;  // Owned; resolved scoped folder URL.
 
   // The scan runs on a background thread so it never blocks icdd's callback
   // thread (PLAN-2-DESIGN.md decision D). Only the device object owns this
@@ -390,11 +406,22 @@ void StopScan(DeviceContext* ctx) {
   if (ctx->scanThread.joinable()) ctx->scanThread.join();
 }
 
+// Releases the retained security-scoped destination URL, if any. Safe to call
+// when none is held. Callers must not hold a scan worker that still borrows it
+// (SetParameters and the close paths call this only when no scan is running).
+void ReleaseScopedURL(DeviceContext* ctx) {
+  if (ctx && ctx->securityScopedURL) {
+    CFRelease(ctx->securityScopedURL);
+    ctx->securityScopedURL = nullptr;
+  }
+}
+
 ICAError CloseDevice(ScannerObjectInfo* objectInfo) {
   os_log(Log(), "callback: ICD_ScannerCloseDevice");
   DeviceContext* ctx = ContextOf(objectInfo);
   if (ctx) {
     StopScan(ctx);  // Join the worker before freeing the context it points at.
+    ReleaseScopedURL(ctx);  // Worker is joined; the borrowed URL is now free.
     delete ctx;
     objectInfo->privateData = nullptr;
   }
@@ -407,6 +434,7 @@ ICAError Cleanup(ScannerObjectInfo* objectInfo) {
   DeviceContext* ctx = ContextOf(objectInfo);
   if (ctx) {
     StopScan(ctx);  // Same ordering guarantee as CloseDevice.
+    ReleaseScopedURL(ctx);
     delete ctx;
     objectInfo->privateData = nullptr;
   }
@@ -568,15 +596,138 @@ ICAError GetParameters(const ScannerObjectInfo* /*deviceObjectInfo*/,
   return noErr;
 }
 
+// Logs every top-level key of the host's parameter dict on its own line. A
+// whole-dictionary %{public}@ is truncated by os_log's message-size limit, which
+// hid the file-transfer keys in earlier builds (the Task-11 log cut off before
+// them); one key per line reliably reveals the exact spellings, the value
+// classes, and the format token for a live re-test.
+void LogFullDict(const char* label, CFDictionaryRef dict) {
+  if (dict == nullptr) return;
+  NSDictionary* d = (__bridge NSDictionary*)dict;
+  os_log(Log(), "%{public}s: %lu top-level keys", label,
+         (unsigned long)d.count);
+  for (id key in d) {
+    id value = [d objectForKey:key];
+    os_log(Log(), "  %{public}s['%{public}@'] (%{public}@) = %{public}@", label,
+           key, [value class], value);
+  }
+}
+
+// Looks a key up in the host's parameter dict, checking the top level first and
+// then the nested `userScanArea` (and a `device` -> `userScanArea` wrapper).
+// The document/destination keys have been seen at the top level, but the host
+// also nests the scan selection inside userScanArea (Task 11), so probe both.
+id LookupParamValue(CFDictionaryRef dict, NSString* key) {
+  if (dict == nullptr) return nil;
+  NSDictionary* d = (__bridge NSDictionary*)dict;
+  id value = [d objectForKey:key];
+  if (value != nil) return value;
+  id area = [d objectForKey:@"userScanArea"];
+  if ([area isKindOfClass:[NSDictionary class]]) {
+    value = [(NSDictionary*)area objectForKey:key];
+    if (value != nil) return value;
+  }
+  id device = [d objectForKey:@"device"];
+  if ([device isKindOfClass:[NSDictionary class]]) {
+    id deviceArea = [(NSDictionary*)device objectForKey:@"userScanArea"];
+    if ([deviceArea isKindOfClass:[NSDictionary class]]) {
+      value = [(NSDictionary*)deviceArea objectForKey:key];
+    }
+  }
+  return value;
+}
+
+// Reads a string-valued parameter (top level or nested), or "" if absent / not
+// a string. Unlike CopyStringParam this has no fixed-size cap, so a long
+// destination-folder path is read in full.
+std::string LookupStringParam(CFDictionaryRef dict, NSString* key) {
+  id value = LookupParamValue(dict, key);
+  if ([value isKindOfClass:[NSString class]]) {
+    const char* c = [(NSString*)value UTF8String];
+    return c ? std::string(c) : std::string();
+  }
+  return std::string();
+}
+
+// Resolves the host's security-scoped destination folder to a retained CFURLRef
+// (caller owns the +1; ReleaseScopedURL frees it), or null if absent/unusable.
+// The value under ICSecurityScopedWrappedURL is NOT declared in any public SDK
+// header -- it is a modern icdd key observed only in our own live logs -- so its
+// concrete type is handled defensively: an NSURL is used as-is; NSData is
+// resolved as a security-scoped bookmark; an NSString is treated as a file path.
+CFURLRef ResolveSecurityScopedURL(CFDictionaryRef dict) {
+  id value = LookupParamValue(dict, @"ICSecurityScopedWrappedURL");
+  if (value == nil) return nullptr;
+
+  NSURL* url = nil;
+  if ([value isKindOfClass:[NSURL class]]) {
+    url = (NSURL*)value;
+  } else if ([value isKindOfClass:[NSData class]]) {
+    NSError* err = nil;
+    BOOL stale = NO;
+    url = [NSURL URLByResolvingBookmarkData:(NSData*)value
+                                   options:NSURLBookmarkResolutionWithSecurityScope
+                             relativeToURL:nil
+                       bookmarkDataIsStale:&stale
+                                     error:&err];
+    os_log(Log(),
+           "ResolveSecurityScopedURL: bookmark resolve stale=%d err=%{public}@",
+           stale, err);
+  } else if ([value isKindOfClass:[NSString class]]) {
+    url = [NSURL fileURLWithPath:(NSString*)value];
+  } else {
+    os_log_error(Log(),
+                 "ResolveSecurityScopedURL: unexpected value class %{public}@",
+                 [value class]);
+    return nullptr;
+  }
+  if (url == nil) return nullptr;
+  return static_cast<CFURLRef>(CFRetain((__bridge CFTypeRef)url));
+}
+
+// Detects the transfer mode from a SetParameters request and records it on the
+// device context: a FINAL scan carries a security-scoped destination URL and/or
+// a "document folder" path plus document name/format/extension keys -> file
+// based transfer; an overview/preview scan carries none of these -> the
+// in-memory band path. Must run only when no worker is in flight (SetParameters
+// precedes Start), since it releases/replaces the borrowed scoped URL.
+void DetectTransferMode(DeviceContext* ctx, CFDictionaryRef dict) {
+  if (ctx == nullptr) return;
+  ReleaseScopedURL(ctx);  // Drop any prior request's scoped URL.
+  ctx->fileTransfer = false;
+  ctx->documentFolderPath.clear();
+
+  const std::string docFolder = LookupStringParam(dict, @"document folder");
+  const std::string docName = LookupStringParam(dict, @"document name");
+  const std::string docExt = LookupStringParam(dict, @"document extension");
+  const std::string docFormat = LookupStringParam(dict, @"document format");
+  CFURLRef scoped = ResolveSecurityScopedURL(dict);
+
+  if (scoped != nullptr || !docFolder.empty()) {
+    ctx->fileTransfer = true;
+    ctx->securityScopedURL = scoped;  // Owns the +1 (may be null).
+    ctx->documentFolderPath = docFolder;
+    ctx->transferPlan = brscan::ica::PlanTransfer(docFormat, docExt, docName);
+    os_log(Log(),
+           "SetParameters: FILE transfer -> folder='%{public}s' scopedURL=%d "
+           "uti=%{public}s ext=%{public}s stem=%{public}s",
+           docFolder.c_str(), scoped != nullptr,
+           ctx->transferPlan.uti.c_str(), ctx->transferPlan.extension.c_str(),
+           ctx->transferPlan.stem.c_str());
+  } else {
+    if (scoped != nullptr) CFRelease(scoped);
+    os_log(Log(), "SetParameters: MEMORY/overview transfer (no destination)");
+  }
+}
+
 ICAError SetParameters(const ScannerObjectInfo* deviceObjectInfo,
                        ICD_ScannerSetParametersPB* pb) {
   os_log(Log(), "callback: ICD_ScannerSetParameters");
   if (pb == nullptr) return kICADeviceInvalidParamErr;
   DeviceContext* ctx = ContextOf(deviceObjectInfo);
   if (pb->theDict) {
-    os_log(Log(), "SetParameters: host set %ld keys: %{public}@",
-           CFDictionaryGetCount(pb->theDict),
-           (__bridge NSDictionary*)pb->theDict);
+    // Full per-key dump (a whole-dict %@ truncates and hid the transfer keys).
+    LogFullDict("SetParameters.dict", pb->theDict);
 
     // Translate the host's selection to a brscan::Params and stash it on the
     // device context for ICD_ScannerStart to scan with.
@@ -584,6 +735,9 @@ ICAError SetParameters(const ScannerObjectInfo* deviceObjectInfo,
     brscan::ica::ScanLimits limits;  // default max_dpi = highest offer (600).
     brscan::Params params = brscan::ica::TranslateScanParams(req, limits);
     if (ctx) ctx->params = params;
+
+    // Detect file-based vs overview/memory transfer for this scan.
+    DetectTransferMode(ctx, pb->theDict);
 
     os_log(Log(),
            "SetParameters: translated -> mode=%{public}s dpi=%d source=%{public}s "
@@ -773,6 +927,173 @@ bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
   return addErr == noErr && bandErr == noErr && pageErr == noErr;
 }
 
+// ---------------------------------------------------------------------------
+// File-based transfer (Task 12).
+//
+// When the host asks for a saved file (see the transfer-mode note above and
+// PLAN-2-DESIGN.md), the module encodes each decoded page with native macOS
+// ImageIO (CGImageDestination) and writes it into the host's destination
+// folder, then posts the page/scan-done notifications the host recognises for a
+// saved file. This is entirely self-contained -- it does NOT use
+// daemon/output_writer (different scope). CGImage construction facts are the
+// public CoreGraphics/ImageIO contract; the notification sequence is confirmed
+// from Apple's ICADevices sample VirtualScanner (facts only, no source copied):
+// its file transfer writes the page with CGImageDestinationCreateWithURL / ...
+// AddImage / ...Finalize, posts a kICANotificationTypeScannerPageDone carrying
+// the file path under kICANotificationScannerDocumentNameKey, and ends the job
+// with a single kICANotificationTypeScannerScanDone.
+
+// Builds a CGImage for one decoded page. `bytes`/`byteCount` are the host-ready
+// pixels: interleaved 24-bit RGB (post-DecodeJpeg) for kRgb, raw 8-bit gray for
+// kGray, packed 1-bpp MSB-first (1 = black) for kBitonal. The image borrows
+// `bytes` through a no-copy data provider, so `bytes` MUST outlive the returned
+// image (the caller releases it right after the encode, while `bytes` is still
+// on the stack). Caller owns the result (CGImageRelease). Returns null on bad
+// geometry, short buffer, or a CoreGraphics failure.
+CGImageRef CreatePageImage(brscan::PixelFormat format, const uint8_t* bytes,
+                           size_t byteCount, int width, int height) {
+  std::optional<brscan::ica::BufferDescriptor> d =
+      brscan::ica::DescribeBuffer(format, width, height);
+  if (!d) return nullptr;
+  if (bytes == nullptr ||
+      byteCount < static_cast<size_t>(d->expected_byte_count)) {
+    return nullptr;
+  }
+
+  CGColorSpaceRef cs = (format == brscan::PixelFormat::kRgb)
+                           ? CGColorSpaceCreateDeviceRGB()
+                           : CGColorSpaceCreateDeviceGray();
+  if (cs == nullptr) return nullptr;
+
+  CGDataProviderRef provider =
+      CGDataProviderCreateWithData(nullptr, bytes, byteCount, nullptr);
+  if (provider == nullptr) {
+    CGColorSpaceRelease(cs);
+    return nullptr;
+  }
+
+  const size_t bitsPerComponent =
+      (format == brscan::PixelFormat::kBitonal) ? 1 : 8;
+
+  // Bitonal: libbrscan packs 1 = black, but a 1-bit gray CGImage maps bit 1 ->
+  // white. A {1,0} decode array flips the polarity so ink stays black.
+  const CGFloat bitonalDecode[2] = {1.0, 0.0};
+  const CGFloat* decode =
+      (format == brscan::PixelFormat::kBitonal) ? bitonalDecode : nullptr;
+
+  CGImageRef img = CGImageCreate(
+      static_cast<size_t>(width), static_cast<size_t>(height), bitsPerComponent,
+      static_cast<size_t>(d->bits_per_pixel),
+      static_cast<size_t>(d->bytes_per_row), cs,
+      kCGImageAlphaNone | kCGBitmapByteOrderDefault, provider, decode,
+      /*shouldInterpolate=*/false, kCGRenderingIntentDefault);
+
+  CGDataProviderRelease(provider);
+  CGColorSpaceRelease(cs);
+  return img;
+}
+
+// Encodes `image` to `fileURL` as the ImageIO type `uti`. Returns true on a
+// finalized write.
+bool WriteImageToURL(CGImageRef image, NSURL* fileURL, CFStringRef uti) {
+  if (image == nullptr || fileURL == nil || uti == nullptr) return false;
+  CGImageDestinationRef dst = CGImageDestinationCreateWithURL(
+      (__bridge CFURLRef)fileURL, uti, 1, nullptr);
+  if (dst == nullptr) return false;
+  CGImageDestinationAddImage(dst, image, nullptr);
+  const bool ok = CGImageDestinationFinalize(dst);
+  CFRelease(dst);
+  return ok;
+}
+
+// Writes one decoded page to the file-based destination and signals the page
+// done. Resolves the destination folder (security-scoped URL preferred, plain
+// "document folder" path as fallback), start/stop-accessing the scoped resource
+// around the write, encodes via ImageIO, then posts a ScannerPageDone carrying
+// the written file path under kICANotificationScannerDocumentNameKey. Returns
+// true if the file was written.
+bool PostFilePage(DeviceContext* ctx, ICAObject icaObject,
+                  brscan::PixelFormat format, const uint8_t* bytes,
+                  size_t byteCount, int width, int height, int pageIndex) {
+  bool wrote = false;
+  std::string writtenPath;
+  @autoreleasepool {
+    NSURL* folderURL = nil;
+    BOOL accessing = NO;
+    if (ctx->securityScopedURL != nullptr) {
+      folderURL = (__bridge NSURL*)ctx->securityScopedURL;
+      accessing = [folderURL startAccessingSecurityScopedResource];
+    } else if (!ctx->documentFolderPath.empty()) {
+      NSString* p =
+          [[NSString stringWithUTF8String:ctx->documentFolderPath.c_str()]
+              stringByExpandingTildeInPath];
+      folderURL = [NSURL fileURLWithPath:p isDirectory:YES];
+    }
+    if (folderURL == nil) {
+      os_log_error(Log(), "PostFilePage[%d]: no destination folder", pageIndex);
+      return false;
+    }
+
+    const std::string filename =
+        brscan::ica::TransferFilenameForPage(ctx->transferPlan, pageIndex);
+    NSURL* fileURL = [folderURL
+        URLByAppendingPathComponent:[NSString
+                                        stringWithUTF8String:filename.c_str()]];
+
+    CGImageRef image = CreatePageImage(format, bytes, byteCount, width, height);
+    if (image != nullptr) {
+      NSString* utiStr =
+          [NSString stringWithUTF8String:ctx->transferPlan.uti.c_str()];
+      os_log(Log(),
+             "file transfer: writing %{public}@ format=%{public}s %dx%d",
+             fileURL.path, ctx->transferPlan.uti.c_str(), width, height);
+      wrote = WriteImageToURL(image, fileURL, (__bridge CFStringRef)utiStr);
+      CGImageRelease(image);
+    } else {
+      os_log_error(Log(), "PostFilePage[%d]: CGImage build failed %dx%d",
+                   pageIndex, width, height);
+    }
+
+    if (accessing) [folderURL stopAccessingSecurityScopedResource];
+
+    if (wrote) {
+      NSNumber* size = nil;
+      [fileURL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+      const char* pathC = fileURL.path.UTF8String;
+      writtenPath = pathC ? pathC : "";
+      os_log(Log(), "file transfer: wrote %lld bytes to %{public}@",
+             (long long)size.longLongValue, fileURL.path);
+    }
+
+    // Page-done notification: reference the scanner ICAObject like every scanner
+    // notification, and carry the written file path under the document-name key
+    // (VirtualScanner's file mode posts the path here so the host picks up the
+    // saved file).
+    CFMutableDictionaryRef pageDict = CFDictionaryCreateMutable(
+        nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    ICAError pageErr = kICADeviceInvalidParamErr;
+    if (pageDict) {
+      if (wrote && !writtenPath.empty()) {
+        CFStringRef cfPath = CFStringCreateWithCString(
+            nullptr, writtenPath.c_str(), kCFStringEncodingUTF8);
+        if (cfPath) {
+          CFDictionarySetValue(pageDict, kICANotificationScannerDocumentNameKey,
+                               cfPath);
+          CFRelease(cfPath);
+        }
+      }
+      pageErr = SendScannerNotification(pageDict, icaObject,
+                                        kICANotificationTypeScannerPageDone,
+                                        /*waitForReply=*/false);
+      CFRelease(pageDict);
+    }
+    os_log(Log(), "PostFilePage[%d]: wrote=%d sendPageDone=%d", pageIndex, wrote,
+           pageErr);
+  }
+  return wrote;
+}
+
 // The background scan worker. Owns its TcpTransport on the stack; publishes it to
 // ctx->activeTransport (under scanMutex) only for the cancel path. Runs the
 // normal host-initiated RunScan (button_flow == false), then hands each page
@@ -836,23 +1157,45 @@ void RunScanWorker(DeviceContext* ctx, brscan::Params params,
                idx, page.width, page.height, PixelFormatName(page.format),
                page.data.size());
 
+        // Normalise the page to host-ready bytes: color arrives as baseline
+        // JPEG and is decoded to interleaved RGB; gray/bitonal pass through.
+        // `img` must outlive the hand-back call below (it backs the RGB bytes).
+        brscan::Image img;
+        const uint8_t* bytes = nullptr;
+        size_t byteCount = 0;
+        int outWidth = page.width;
+        int outHeight = page.height;
+        brscan::PixelFormat outFormat = page.format;
+        bool ready = true;
         if (page.format == brscan::PixelFormat::kRgb) {
-          // Color pages arrive as baseline JPEG; decode to interleaved RGB.
-          brscan::Image img;
           const brscan::Status dec =
               brscan::DecodeJpeg(page.data.data(), page.data.size(), &img);
           if (dec != brscan::Status::kOk) {
             os_log_error(Log(), "ScanWorker: page %d JPEG decode failed (%d)",
                          idx, (int)dec);
             finalErr = kICADeviceInternalErr;
+            ready = false;
           } else {
-            PostPage(deviceObject, brscan::PixelFormat::kRgb, img.pixels.data(),
-                     img.pixels.size(), img.width, img.height, idx);
+            bytes = img.pixels.data();
+            byteCount = img.pixels.size();
+            outWidth = img.width;
+            outHeight = img.height;
           }
         } else {
-          // Gray / bitonal already carry host-ready bytes.
-          PostPage(deviceObject, page.format, page.data.data(),
-                   page.data.size(), page.width, page.height, idx);
+          bytes = page.data.data();
+          byteCount = page.data.size();
+        }
+
+        if (ready) {
+          // Task 12: a FINAL scan writes the page to the host's destination
+          // file; an overview/preview scan pushes it back as an in-memory band.
+          if (ctx->fileTransfer) {
+            PostFilePage(ctx, deviceObject, outFormat, bytes, byteCount,
+                         outWidth, outHeight, idx);
+          } else {
+            PostPage(deviceObject, outFormat, bytes, byteCount, outWidth,
+                     outHeight, idx);
+          }
         }
         ++idx;
       }

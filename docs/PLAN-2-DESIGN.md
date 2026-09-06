@@ -350,11 +350,58 @@ tried to mint a per-page object with `ICDNewObject`, which returns `unimpErr`
 not serviced for scanner modules). No object is minted on the in-memory band
 path; the scanner-specific `ICDScannerNewObjectInfoCreated` +
 `kICANotificationTypeObjectAdded` + `kICANotificationScannerDocumentNameKey`
-belong to the alternative file-based transfer mode (the documented fallback if
-the band path does not render). The `Offer` the device returns from `ESC I`
-gives the true maximum resolution and pixel dimensions, which bound the
-parameter ranges advertised to the host so the UI never offers an impossible
-value.
+belong to the alternative file-based transfer mode. The `Offer` the device
+returns from `ESC I` gives the true maximum resolution and pixel dimensions,
+which bound the parameter ranges advertised to the host so the UI never offers
+an impossible value.
+
+### Two transfer modes: file-based vs overview/memory (Task 12)
+
+The host chooses the transfer mode **per scan**, and the module must honour the
+one it asks for or the client hangs. The two modes are distinguished by the keys
+the SetParameters request carries (confirmed from the live trace and Apple's
+public `VirtualScanner` sample module, interface facts only):
+
+- **Overview / preview → in-memory bands.** The request carries
+  `"scan mode" = overview`, `progressNotificationWithData = 1`, and **no**
+  destination. The module keeps the Task-11 path: push the decoded page as one
+  full-height band in a `kICANotificationTypeScanProgressStatus`, then
+  `ScannerPageDone`, then `ScannerScanDone`.
+
+- **Final scan → file-based transfer.** The request carries a security-scoped
+  destination folder under `ICSecurityScopedWrappedURL` (a modern icdd key not
+  present in any public SDK header — observed only in our own logs) **and/or** a
+  plain `"document folder"` path, plus `"document name"`, `"document extension"`,
+  and `"document format"` (a UTI). The host is asking the module to **encode the
+  page, write it into that folder, and post a file/object completion**. Pushing
+  bands here (the pre-Task-12 defect) leaves the host waiting for a file it never
+  gets → the "Scanning document" hang.
+
+  The module now: resolves + `startAccessingSecurityScopedResource` on the
+  destination URL; encodes the decoded page with native macOS **ImageIO**
+  (`CGImageDestinationCreateWithURL` / `AddImage` / `Finalize`) — kRgb via
+  `DecodeJpeg` → RGB `CGImage`, kGray/kBitonal via a matching `CGImage`
+  (bitonal uses a `{1,0}` decode array so `1 = black` renders as ink) — to the
+  requested format (TIFF/JPEG/PNG; default TIFF); writes
+  `<document name>.<extension>` into the folder (multi-page/ADF appends a
+  ` N` index; single-page flatbed is the must-pass, multi-page a follow-up);
+  `stopAccessingSecurityScopedResource`; then posts a
+  `kICANotificationTypeScannerPageDone` carrying the written path under
+  `kICANotificationScannerDocumentNameKey`, and finally one
+  `kICANotificationTypeScannerScanDone`. Encoding uses ImageIO directly in the
+  module — it does **not** pull in `daemon/output_writer` (different scope).
+
+  For a **local** client (a `"document folder"` is present, as with Image
+  Capture saving to `~/Documents`) VirtualScanner writes the file and posts
+  PageDone + ScanDone without minting an object; the
+  `ICDScannerNewObjectInfoCreated` + `kICANotificationTypeObjectAdded` object
+  announce is its **remote/network** path (`documentFolderPath == NULL`), so the
+  module does not use it here (also side-stepping the `ICDNewObject` `unimpErr`
+  seen in Task 7). The pure filename/UTI policy (default TIFF, derive a missing
+  extension from the UTI and vice-versa, strip a duplicated extension, index
+  multi-page names) lives in the hermetically tested `ica-module/file_transfer`
+  unit; the CoreFoundation / ImageIO / security-scoped-URL glue is in
+  `module_main.mm` and is device-side, not unit-testable.
 
 ## Testing strategy
 
