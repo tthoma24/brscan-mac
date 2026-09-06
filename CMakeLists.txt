@@ -156,6 +156,7 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
     ica-module/scan_parameters.mm
     ica-module/scan_translate.cpp
     ica-module/buffer_descriptor.cpp
+    ica-module/file_transfer.cpp
     daemon/paper_size.cpp)
   set_target_properties(brscan-ica-loadspike PROPERTIES
     OUTPUT_NAME ${MODULE_NAME}
@@ -168,9 +169,10 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
 
   # ICADevices supplies ICD_ScannerMain + gICDScannerCallbackFunctions and the
   # band/notification hand-back API; Foundation/CoreGraphics are pulled in by the
-  # umbrella header. libbrscan supplies the scan protocol; libturbojpeg is its
-  # private dependency but must be on the final link line since libbrscan is a
-  # static library.
+  # umbrella header. ImageIO (Task 12) encodes each decoded page to the host's
+  # requested file format (CGImageDestination) for file-based transfer. libbrscan
+  # supplies the scan protocol; libturbojpeg is its private dependency but must be
+  # on the final link line since libbrscan is a static library.
   find_library(ICADEVICES_FRAMEWORK ICADevices REQUIRED)
   find_library(ICA_FOUNDATION_FRAMEWORK Foundation REQUIRED)
   find_library(ICA_COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
@@ -179,6 +181,7 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
     ${ICADEVICES_FRAMEWORK}
     ${ICA_FOUNDATION_FRAMEWORK}
     ${ICA_COREGRAPHICS_FRAMEWORK}
+    ${IMAGEIO_FRAMEWORK}
     ${TURBOJPEG_LIBRARIES})
   target_link_directories(brscan-ica-loadspike PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
@@ -271,6 +274,8 @@ if(BUILD_TESTING)
     tests/buffer_descriptor_test.cpp
     ica-module/scan_translate.cpp
     tests/scan_translate_test.cpp
+    ica-module/file_transfer.cpp
+    tests/file_transfer_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests daemon tools
