@@ -39,6 +39,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -183,85 +184,94 @@ CFDictionaryRef GetSubDict(CFDictionaryRef dict, CFStringRef key) {
   return nullptr;
 }
 
-// Maps the host's "scan mode" string to an ICScannerPixelDataType value (0=BW,
-// 1=Gray, 2=RGB), which TranslateScanParams then turns into a ScanMode.
-// CLEAN-ROOM / device-in-the-loop: the exact "scan mode" string vocabulary the
-// host echoes is not in the public headers; this is a best-effort,
-// case-insensitive substring match, defaulting to RGB. The live SetParameters
-// dump (logged in full below) is what confirms the real strings.
-int PixelTypeForScanMode(const std::string& mode) {
-  std::string m;
-  m.reserve(mode.size());
-  for (char c : mode) m += static_cast<char>(std::tolower((unsigned char)c));
-  if (m.find("black") != std::string::npos ||
-      m.find("bw") != std::string::npos ||
-      m.find("bitonal") != std::string::npos ||
-      m.find("text") != std::string::npos) {
-    return 0;  // ICScannerPixelDataTypeBW.
+// Reads the integer payload of a nested TWAIN-style capability entry. The host
+// echoes each ICAP_* selection as a sub-dict {type, value[, current]} (Plan 2
+// Task 11 live trace); this prefers `value` and falls back to `current`. If the
+// key is not a sub-dict it is read directly as an int at `parent` (a flat
+// encoding fallback), so the parse is robust to either shape. Sets *has and *out
+// only when a numeric payload is found; leaves them untouched otherwise.
+void ReadIcapEntry(CFDictionaryRef parent, CFStringRef key, bool* has,
+                   int* out) {
+  if (!parent || !has || !out) return;
+  int probe = INT32_MIN;
+  CFDictionaryRef entry = GetSubDict(parent, key);
+  if (entry) {
+    CopyIntParam(entry, CFSTR("value"), &probe);
+    if (probe == INT32_MIN) CopyIntParam(entry, CFSTR("current"), &probe);
+  } else {
+    CopyIntParam(parent, key, &probe);
   }
-  if (m.find("gray") != std::string::npos ||
-      m.find("grey") != std::string::npos) {
-    return 1;  // ICScannerPixelDataTypeGray.
+  if (probe != INT32_MIN) {
+    *has = true;
+    *out = probe;
   }
-  return 2;  // ICScannerPixelDataTypeRGB.
 }
 
-// Reads the host's SetParameters CFDictionary into a framework-free ScanRequest,
-// keyed by the real echoed keys that pair with the ICAP capability schema
-// GetParameters advertises (Task 8): ICAP_XRESOLUTION, ICAP_UNITS,
-// selectedFunctionalUnitType, the "scan mode" string, and the userScanArea
-// sub-dict (offsetX/offsetY/width/height, in ICAP_UNITS = pixels). Every read is
-// presence-aware; a missing key falls back to the design default in
-// TranslateScanParams. The pure userScanArea->corners conversion lives in
-// scan_translate (CornersFromUserScanArea) and is unit-tested there.
+// Reads the host's SetParameters CFDictionary into a framework-free ScanRequest.
+// Plan 2 Task 11 live trace: the host nests the ICAP_* selection inside ONE
+// top-level `userScanArea` dictionary, each entry a TWAIN {type, value[,current]}
+// sub-dict (ICAP_XRESOLUTION / ICAP_YRESOLUTION / ICAP_PIXELTYPE / ICAP_BITDEPTH
+// / ICAP_UNITS, plus the scan-rectangle offset/extent). Older builds put keys at
+// the top level, and Task 10 introduced a `device` wrapper on the capability
+// schema, so this prefers the nested userScanArea, falls back to the top-level
+// dict, and also probes a `device` wrapper. The CoreFoundation traversal lives
+// here; the pure integers -> ScanRequest mapping is scan_translate's
+// ScanRequestFromIcap (unit-tested), and the userScanArea -> corners conversion
+// is CornersFromUserScanArea (also unit-tested).
 brscan::ica::ScanRequest ReadScanRequest(CFDictionaryRef dict) {
-  brscan::ica::ScanRequest req;
-  // Presence-aware reads: probe with a sentinel, then check whether it changed
-  // (CopyIntParam writes only when the key exists).
-  auto readInt = [&](CFDictionaryRef d, CFStringRef key, bool* has, int* dst) {
-    int probe = INT32_MIN;
-    CopyIntParam(d, key, &probe);
-    if (probe != INT32_MIN) {
-      *has = true;
-      *dst = probe;
-    }
-  };
+  CFDictionaryRef area = GetSubDict(dict, CFSTR("userScanArea"));
+  if (!area) {
+    CFDictionaryRef device = GetSubDict(dict, CFSTR("device"));
+    if (device) area = GetSubDict(device, CFSTR("userScanArea"));
+  }
+  CFDictionaryRef src = area ? area : dict;
 
-  // Resolution: echoed as ICAP_XRESOLUTION (applied to both axes downstream).
-  readInt(dict, CFSTR("ICAP_XRESOLUTION"), &req.has_resolution,
-          &req.resolution);
+  // Full dump of the parameter source (the Task-8 log truncated before the
+  // scan-area offset/extent). This is what confirms the real area key names for
+  // a follow-up, so the truncation is deliberately removed here.
+  os_log(Log(),
+         "ReadScanRequest: userScanArea present=%d; FULL source dict: %{public}@",
+         area != nullptr, (__bridge NSDictionary*)src);
 
-  // Functional unit / source: echoed as the selected functional-unit type.
-  readInt(dict, CFSTR("selectedFunctionalUnitType"), &req.has_functional_unit,
-          &req.functional_unit);
-  CopyBoolParam(dict, CFSTR("duplex"), &req.duplex);
+  brscan::ica::IcapScanSelection sel;
+  ReadIcapEntry(src, CFSTR("ICAP_XRESOLUTION"), &sel.has_x_resolution,
+                &sel.x_resolution);
+  ReadIcapEntry(src, CFSTR("ICAP_YRESOLUTION"), &sel.has_y_resolution,
+                &sel.y_resolution);
+  ReadIcapEntry(src, CFSTR("ICAP_PIXELTYPE"), &sel.has_pixel_type,
+                &sel.pixel_type);
+  ReadIcapEntry(src, CFSTR("ICAP_BITDEPTH"), &sel.has_bit_depth,
+                &sel.bit_depth);
+  ReadIcapEntry(src, CFSTR("ICAP_UNITS"), &sel.has_units, &sel.units);
 
-  // Colour mode: echoed as the "scan mode" string.
-  std::string scanMode;
-  CopyStringParam(dict, CFSTR("scan mode"), &scanMode);
-  if (!scanMode.empty()) {
-    req.has_pixel_type = true;
-    req.pixel_type = PixelTypeForScanMode(scanMode);
+  // Functional unit / duplex: prefer the nested source, fall back to top level.
+  ReadIcapEntry(src, CFSTR("selectedFunctionalUnitType"),
+                &sel.has_functional_unit, &sel.functional_unit);
+  if (!sel.has_functional_unit) {
+    ReadIcapEntry(dict, CFSTR("selectedFunctionalUnitType"),
+                  &sel.has_functional_unit, &sel.functional_unit);
+  }
+  if (!CopyBoolParam(src, CFSTR("duplex"), &sel.duplex)) {
+    CopyBoolParam(dict, CFSTR("duplex"), &sel.duplex);
   }
 
-  // Scan area: echoed as a userScanArea sub-dict of offset + extent (pixels).
-  CFDictionaryRef areaDict = GetSubDict(dict, CFSTR("userScanArea"));
-  if (areaDict) {
-    int offsetX = 0, offsetY = 0, width = 0, height = 0;
-    CopyIntParam(areaDict, CFSTR("offsetX"), &offsetX);
-    CopyIntParam(areaDict, CFSTR("offsetY"), &offsetY);
-    CopyIntParam(areaDict, CFSTR("width"), &width);
-    CopyIntParam(areaDict, CFSTR("height"), &height);
-    brscan::Area corners{};
-    if (brscan::ica::CornersFromUserScanArea(offsetX, offsetY, width, height,
-                                             &corners)) {
-      req.has_area = true;
-      req.area_x0 = corners.x0;
-      req.area_y0 = corners.y0;
-      req.area_x1 = corners.x1;
-      req.area_y1 = corners.y1;
-    }
-  }
+  // Scan rectangle offset/extent. The exact key spellings are device-in-the-loop
+  // (the live log truncated before them); probe the likeliest names. The full
+  // dump above is the ground truth that confirms them for a follow-up.
+  ReadIcapEntry(src, CFSTR("offsetX"), &sel.has_offset_x, &sel.offset_x);
+  ReadIcapEntry(src, CFSTR("offsetY"), &sel.has_offset_y, &sel.offset_y);
+  ReadIcapEntry(src, CFSTR("width"), &sel.has_width, &sel.width);
+  ReadIcapEntry(src, CFSTR("height"), &sel.has_height, &sel.height);
+
+  brscan::ica::ScanRequest req = brscan::ica::ScanRequestFromIcap(sel);
+
+  os_log(Log(),
+         "ReadScanRequest: parsed xres=%d(has=%d) yres=%d pixeltype=%d(has=%d) "
+         "bitdepth=%d units=%d funit=%d(has=%d) area=%d(%d,%d,%d,%d)",
+         sel.x_resolution, sel.has_x_resolution, sel.y_resolution,
+         sel.pixel_type, sel.has_pixel_type, sel.bit_depth, sel.units,
+         sel.functional_unit, sel.has_functional_unit, req.has_area,
+         req.area_x0, req.area_y0, req.area_x1, req.area_y1);
   return req;
 }
 
@@ -619,90 +629,80 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 //   - ICASendNotificationPB { header; notificationDictionary; replyCode; }
 //     (ICAApplication.h) + ICDSendNotification / ICDSendNotificationAndWaitForReply
 //     (ICADevices.h) push it to icdd.
-//   - kICANotificationTypeScannerPageDone / kICANotificationTypeScannerScanDone,
-//     keyed by kICANotificationTypeKey, with kICANotificationDeviceICAObjectKey
-//     (ICAApplication.h), are the scanner page/complete signals.
+//   - kICANotificationTypeScanProgressStatus (band payload),
+//     kICANotificationTypeScannerPageDone / kICANotificationTypeScannerScanDone,
+//     keyed by kICANotificationTypeKey, each referencing the scanned object under
+//     kICANotificationICAObjectKey (ICAApplication.h) -- see the orchestration
+//     note below for which notification carries the pixels.
 // All of these symbols are exported by ICADevices.tbd, so the module links.
 //
-// CLEAN-ROOM / DEVICE-IN-THE-LOOP UNKNOWNS (public headers do not pin these
-// down; only a live icdd trace can, see the task report): the exact
-// orchestration -- whether the host also needs a freshly created image ICAObject
-// (ICDNewObject) referenced in kICANotificationICAObjectKey, whether it pulls
-// via ICD_ScannerReadFileData after a page notification instead of consuming the
-// band inline, the meaning of replyCode, and the host's 1-bit polarity
-// expectation. We push the most-evidenced path (one full-height band per page in
-// a ScannerPageDone, then a final ScannerScanDone) defensively; if a re-test
-// shows the host ignores the bands, that orchestration is the task-7b spike.
-
-// Creates a fresh image ICAObject as a child of the device object, for a scanned
-// page to be handed back under. ICDNewObject (ICADevice.h) is the public
-// device-module API to mint an object icdd tracks; the page notification then
-// references it via kICANotificationICAObjectKey. Returns 0 on failure, so the
-// caller can fall back to referencing the device object.
+// HAND-BACK ORCHESTRATION (Task 11, corrected against the ICADevices reference
+// modules -- interface facts only, clean-room):
+//   - The pixels are delivered INLINE as one full-height band in a
+//     kICANotificationTypeScanProgressStatus notification (via
+//     ICDAddBandInfoToNotificationDictionary), NOT in the page-done notification.
+//     Confirmed by Apple's VirtualScanner (Sources/VirtualScanner.m): its
+//     "scan data" transfer mode packs the band into a ScanProgressStatus and
+//     sends it with ICDSendNotificationAndWaitForReply (the replyCode carries a
+//     user cancel); page-done in that mode carries no data.
+//   - EVERY scanner notification references the device/scanner object's
+//     framework-assigned ICAObject (ScannerObjectInfo::icaObject, which for a
+//     scan is ICD_ScannerStartPB::object) under kICANotificationICAObjectKey.
+//     VirtualScanner sets this on every ScanProgressStatus / ScannerPageDone /
+//     ScannerScanDone; it does NOT use kICANotificationDeviceICAObjectKey here.
+//   - kICANotificationTypeScannerPageDone then signals the page is complete, and
+//     a final kICANotificationTypeScannerScanDone ends the job -- both carrying
+//     the same device ICAObject and no pixel payload.
 //
-// CLEAN-ROOM / device-in-the-loop: the public headers confirm ICDNewObject and
-// that the page notification dictionary carries kICANotificationICAObjectKey
-// ("An object associated with the notification", CFNumberRef, ICAApplication.h),
-// but not whether the host requires a per-page freshly created object here
-// versus reusing the enumerated scan object. We create one per page (the most
-// evidenced path); the live re-test confirms it (see the task report).
-ICAObject CreateScannedImageObject(ICAObject deviceObject) {
-  ICD_NewObjectPB pb = {};
-  pb.parentObject = deviceObject;
-  pb.objectInfo.objectType = kICAFile;
-  pb.objectInfo.objectSubtype = kICAFileImage;
-  // ICDNewObject, like the rest of the ICADevices device-module API this module
-  // is built on, is marked deprecated since 10.7; it remains the only public way
-  // to mint an object icdd tracks, so use it intentionally and quiet the note.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  ICAError err = ICDNewObject(&pb, nullptr);  // Synchronous (completion NULL).
-#pragma clang diagnostic pop
-  if (err != noErr) {
-    os_log_error(Log(), "CreateScannedImageObject: ICDNewObject failed err=%d",
-                 err);
-    return 0;
-  }
-  os_log(Log(),
-         "CreateScannedImageObject: new image object=0x%08x (parent=0x%08x)",
-         pb.object, deviceObject);
-  return pb.object;
-}
+// WHY THE TASK-7 BUILD SHOWED NOTHING (two defects, both fixed here):
+//   1. It sent the band inside a ScannerPageDone, not a ScanProgressStatus, so
+//      the host treated the page as complete-with-no-data and dropped the pixels.
+//   2. It never set kICANotificationICAObjectKey: it tried to mint a per-page
+//      object with ICDNewObject (ICADevice.h), which returns unimpErr (-4) in the
+//      scanner-module runtime -- ICDNewObject is the legacy generic object API
+//      and is not serviced for scanner modules. The scanner-specific creator is
+//      ICDScannerNewObjectInfoCreated (ICD_ScannerCalls.h), used by VirtualScanner
+//      ONLY for its file-based network-transfer mode (paired with a
+//      kICANotificationTypeObjectAdded and a kICANotificationScannerDocumentNameKey
+//      file path), NOT for the in-memory band path this module uses. So no object
+//      is minted here; the band path references the existing device ICAObject.
+//
+// CLEAN-ROOM: reimplemented from the ICADevices public headers and the observed
+// key/notification-type usage; no reference source copied. If a live re-test
+// shows the host still ignores the bands, the fallback is VirtualScanner's
+// file-based mode: write each page to a temp file, mint an object with
+// ICDScannerNewObjectInfoCreated, and reference the file via
+// kICANotificationScannerDocumentNameKey (see the task report).
 
-// Sets the keys common to every scanner notification and pushes it to the host,
-// waiting for the reply so the page buffer stays alive until icdd has consumed
-// it. `scannedObject` (0 if none) is the page image object the notification is
-// about; it is added under kICANotificationICAObjectKey when present, alongside
-// the always-present device object. Returns the framework's ICAError.
+// Sets the type + the device/scanner ICAObject (under kICANotificationICAObjectKey,
+// the key every scanner notification carries) and pushes the dictionary to the
+// host. `waitForReply` uses ICDSendNotificationAndWaitForReply (so the band
+// buffer stays alive until icdd has copied it, and a user cancel surfaces in
+// replyCode) for the data-bearing ScanProgressStatus; the page/scan-done signals
+// are fire-and-forget. Returns the framework's ICAError.
 ICAError SendScannerNotification(CFMutableDictionaryRef dict,
-                                 ICAObject deviceObject, ICAObject scannedObject,
-                                 CFStringRef type) {
+                                 ICAObject icaObject, CFStringRef type,
+                                 bool waitForReply) {
   if (dict == nullptr) return kICADeviceInvalidParamErr;
   CFDictionarySetValue(dict, kICANotificationTypeKey, type);
-  CFNumberRef devNum =
-      CFNumberCreate(nullptr, kCFNumberSInt32Type, &deviceObject);
-  if (devNum) {
-    CFDictionarySetValue(dict, kICANotificationDeviceICAObjectKey, devNum);
-    CFRelease(devNum);
-  }
-  if (scannedObject != 0) {
-    CFNumberRef objNum =
-        CFNumberCreate(nullptr, kCFNumberSInt32Type, &scannedObject);
-    if (objNum) {
-      CFDictionarySetValue(dict, kICANotificationICAObjectKey, objNum);
-      CFRelease(objNum);
-    }
+  CFNumberRef objNum =
+      CFNumberCreate(nullptr, kCFNumberSInt32Type, &icaObject);
+  if (objNum) {
+    CFDictionarySetValue(dict, kICANotificationICAObjectKey, objNum);
+    CFRelease(objNum);
   }
   ICASendNotificationPB pb = {};
   pb.notificationDictionary = dict;
-  return ICDSendNotificationAndWaitForReply(&pb);
+  return waitForReply ? ICDSendNotificationAndWaitForReply(&pb)
+                      : ICDSendNotification(&pb);
 }
 
-// Hands one decoded page back as a single full-height band. `bytes` must point
-// at `byteCount` host-ready bytes: interleaved 24-bit RGB (post-DecodeJpeg) for
-// kRgb, raw 8-bit gray for kGray, packed 1-bpp for kBitonal. Returns true if the
-// framework accepted the band and the notification.
-bool PostPage(ICAObject deviceObject, brscan::PixelFormat format,
+// Hands one decoded page back as a single full-height band, then signals the page
+// complete. `bytes` must point at `byteCount` host-ready bytes: interleaved
+// 24-bit RGB (post-DecodeJpeg) for kRgb, raw 8-bit gray for kGray, packed 1-bpp
+// for kBitonal. `icaObject` is the device/scanner object (ICD_ScannerStartPB::
+// object). Returns true if the band was accepted and both notifications sent.
+bool PostPage(ICAObject icaObject, brscan::PixelFormat format,
               const uint8_t* bytes, size_t byteCount, int width, int height,
               int pageIndex) {
   std::optional<brscan::ica::BufferDescriptor> d =
@@ -732,34 +732,45 @@ bool PostPage(ICAObject deviceObject, brscan::PixelFormat format,
       break;
   }
 
-  CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+  // 1) Deliver the pixels: one full-height band in a ScanProgressStatus, waiting
+  //    for the reply so `bytes` outlives the copy and a cancel is observed.
+  CFMutableDictionaryRef bandDict = CFDictionaryCreateMutable(
       nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
-  if (dict == nullptr) return false;
+  if (bandDict == nullptr) return false;
 
   ICAError addErr = ICDAddBandInfoToNotificationDictionary(
-      dict, static_cast<UInt32>(width), static_cast<UInt32>(height),
+      bandDict, static_cast<UInt32>(width), static_cast<UInt32>(height),
       static_cast<UInt32>(d->bits_per_pixel), bitsPerComponent,
       static_cast<UInt32>(d->samples_per_pixel), /*endianness=*/0,
       pixelDataType, static_cast<UInt32>(d->bytes_per_row),
       /*dataStartRow=*/0, /*dataNumberOfRows=*/static_cast<UInt32>(height),
       static_cast<UInt32>(byteCount), const_cast<uint8_t*>(bytes));
 
-  // The page notification must identify the scanned object it delivers; mint one
-  // as a child of the device object and carry it in kICANotificationICAObjectKey.
-  ICAObject scannedObject = CreateScannedImageObject(deviceObject);
+  ICAError bandErr = SendScannerNotification(
+      bandDict, icaObject, kICANotificationTypeScanProgressStatus,
+      /*waitForReply=*/true);
+  CFRelease(bandDict);
 
-  ICAError sendErr = SendScannerNotification(
-      dict, deviceObject, scannedObject, kICANotificationTypeScannerPageDone);
-  CFRelease(dict);
+  // 2) Signal the page complete (no payload).
+  CFMutableDictionaryRef pageDict = CFDictionaryCreateMutable(
+      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  ICAError pageErr = kICADeviceInvalidParamErr;
+  if (pageDict) {
+    pageErr = SendScannerNotification(pageDict, icaObject,
+                                      kICANotificationTypeScannerPageDone,
+                                      /*waitForReply=*/false);
+    CFRelease(pageDict);
+  }
 
   os_log(Log(),
          "PostPage[%d]: %dx%d bpp=%d spp=%lld stride=%lld bytes=%zu "
-         "scannedObject=0x%08x addBandInfo=%d sendPageDone=%d",
+         "icaObject=0x%08x addBandInfo=%d sendProgressBand=%d sendPageDone=%d",
          pageIndex, width, height, d->bits_per_pixel,
          (long long)d->samples_per_pixel, (long long)d->bytes_per_row,
-         byteCount, scannedObject, addErr, sendErr);
-  return addErr == noErr && sendErr == noErr;
+         byteCount, icaObject, addErr, bandErr, pageErr);
+  return addErr == noErr && bandErr == noErr && pageErr == noErr;
 }
 
 // The background scan worker. Owns its TcpTransport on the stack; publishes it to
@@ -783,8 +794,23 @@ void RunScanWorker(DeviceContext* ctx, brscan::Params params,
   }
 
   ICAError finalErr = noErr;
-  const brscan::Status connectStatus = transport.Connect();
-  os_log(Log(), "ScanWorker: transport connect -> %d", (int)connectStatus);
+  // Bounded connect retry (Task 11): the Brother device allows a single scan
+  // connection, so a lingering socket from a prior session can lose the first
+  // race (observed live: connect -> 1, then success on retry). Try up to
+  // kConnectAttempts times, ~kConnectBackoff apart, bailing early on a cancel.
+  constexpr int kConnectAttempts = 3;
+  constexpr auto kConnectBackoff = std::chrono::milliseconds(500);
+  brscan::Status connectStatus = brscan::Status::kIoError;
+  for (int attempt = 1; attempt <= kConnectAttempts; ++attempt) {
+    if (ctx->cancelRequested.load()) break;
+    connectStatus = transport.Connect();
+    os_log(Log(), "ScanWorker: transport connect attempt %d/%d -> %d", attempt,
+           kConnectAttempts, (int)connectStatus);
+    if (connectStatus == brscan::Status::kOk) break;
+    if (attempt < kConnectAttempts && !ctx->cancelRequested.load()) {
+      std::this_thread::sleep_for(kConnectBackoff);
+    }
+  }
 
   if (connectStatus != brscan::Status::kOk) {
     finalErr = kICADeviceInternalErr;
@@ -854,8 +880,8 @@ void RunScanWorker(DeviceContext* ctx, brscan::Params params,
       }
     }
     ICAError sendErr = SendScannerNotification(
-        done, deviceObject, /*scannedObject=*/0,
-        kICANotificationTypeScannerScanDone);
+        done, deviceObject, kICANotificationTypeScannerScanDone,
+        /*waitForReply=*/false);
     CFRelease(done);
     os_log(Log(), "ScanWorker: ScannerScanDone sent err=%d (finalErr=%d)",
            sendErr, finalErr);

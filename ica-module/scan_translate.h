@@ -92,6 +92,62 @@ struct ScanRequest {
   int area_y1 = 0;
 };
 
+// TWAIN ICAP_UNITS raw value for pixels (TWUN_PIXELS). The host's live
+// SetParameters trace (Plan 2 Task 11) reports ICAP_UNITS = 5, and the scan-area
+// offset/extent are expressed in this unit; a non-pixel unit is not honoured for
+// the area (the request falls back to the full offered area).
+inline constexpr int kIcapUnitsPixels = 5;
+
+// The raw ICAP_* scan selection the host nests inside its `userScanArea`
+// dictionary (Plan 2 Task 11 live trace: one top-level `userScanArea` whose
+// entries are TWAIN {type, value[, current]} sub-dicts, e.g. ICAP_XRESOLUTION,
+// ICAP_YRESOLUTION, ICAP_PIXELTYPE, ICAP_BITDEPTH, ICAP_UNITS). module_main.mm
+// does the CoreFoundation traversal -- reading each entry's `value` (falling
+// back to `current`) into the plain integers below -- and this pure helper turns
+// them into a ScanRequest, so the mapping stays hermetically unit-testable with
+// no Foundation. Every field is presence-aware: an absent capability leaves the
+// corresponding ScanRequest flag false, so TranslateScanParams applies the
+// design default rather than a meaningful zero.
+struct IcapScanSelection {
+  bool has_x_resolution = false;
+  int x_resolution = 0;  // ICAP_XRESOLUTION.value (dpi).
+  bool has_y_resolution = false;
+  int y_resolution = 0;  // ICAP_YRESOLUTION.value (dpi).
+
+  bool has_pixel_type = false;
+  int pixel_type = 0;  // ICAP_PIXELTYPE.value: 0=BW, 1=Gray, 2=RGB.
+
+  bool has_bit_depth = false;
+  int bit_depth = 0;  // ICAP_BITDEPTH.value (captured for the trace/future use).
+
+  bool has_units = false;
+  int units = 0;  // ICAP_UNITS.value; kIcapUnitsPixels (5) == pixels.
+
+  bool has_functional_unit = false;
+  int functional_unit = 0;  // 0=Flatbed, 3=DocumentFeeder.
+
+  bool duplex = false;
+
+  // Scan rectangle in ICAP_UNITS (offset + extent). Presence-aware per bound:
+  // the area is honoured only when all four are present and positive.
+  bool has_offset_x = false;
+  int offset_x = 0;
+  bool has_offset_y = false;
+  int offset_y = 0;
+  bool has_width = false;
+  int width = 0;
+  bool has_height = false;
+  int height = 0;
+};
+
+// Turns the raw nested ICAP selection into a ScanRequest. Pure. Resolution
+// prefers ICAP_XRESOLUTION and falls back to ICAP_YRESOLUTION; pixel type and
+// functional unit map straight through; the offset+extent become the scan area
+// (via CornersFromUserScanArea) only when the full positive rectangle is present
+// AND the units are pixels (or unspecified). Missing selections stay absent so
+// TranslateScanParams applies the defaults.
+ScanRequest ScanRequestFromIcap(const IcapScanSelection& sel);
+
 // Bounds the module advertises to the host, used to clamp the request so a
 // translated Params can never ask the device for an impossible value. `max_dpi`
 // is the largest resolution the offer table advertises (PLAN-2-DESIGN.md: clamp
