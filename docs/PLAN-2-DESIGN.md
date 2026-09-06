@@ -172,7 +172,9 @@ Each decision lists the options considered, the recommendation, and why.
   every decoded page in memory, then feed the host bands/file data from the
   buffer. (2) Refactor `libbrscan` to stream bands incrementally as the device
   sends them, matching ICA's band model natively.
-- **Recommendation.** Buffer-then-feed (1) for Plan 2.
+- **Recommendation (corrected, Task 16).** Buffer-then-feed (1) for the page
+  model, but run the whole thing **synchronously on icdd's callback thread**
+  inside `ICD_ScannerStart`, not on a background thread.
 - **Why.** `RunScan` is synchronous and job-shaped: it does greeting → session
   init → source select → negotiate → execute → full page readout, returning a
   `std::vector<ScanResult>` (one per ADF page). Reusing it whole means Plan 2
@@ -180,9 +182,29 @@ Each decision lists the options considered, the recommendation, and why.
   memory: a full multi-page ADF color job is buffered before delivery. That is
   acceptable for a first release; streaming is a later optimization, and item 4
   (the band-delivery contract) has to be pinned down before streaming is even
-  designable. The module must run `RunScan` off the host's calling thread and
-  post progress/completion back through the framework's notification path so the
-  scan UI stays responsive and cancellable.
+  designable.
+- **Threading — reversed in Task 16 (the original recommendation was wrong for
+  this API).** The initial design ran `RunScan` on a background `std::thread`
+  and posted notifications from it, on the theory that blocking icdd's callback
+  thread would freeze the scan UI. Device-in-the-loop testing proved the
+  opposite: ICA notification delivery/reply is bound to the icdd connection
+  runloop **on the callback thread**, so every `ICDSendNotification*` from the
+  worker returned `noErr` yet nothing reached the host — the overview never
+  rendered, the UI stuck on "Scanner is warming up", and the scan never
+  completed (all one cause). The four reference modules (Apple `VirtualScanner`
+  and its modern copy, `scansnaps1500m` shipping on Tahoe, and `SaneNetScanner`)
+  all perform the entire scan synchronously inside `ICD_ScannerStart` on the
+  callback thread, sending every notification inline, and return only after
+  `ScannerScanDone`. Blocking `Start` for the whole scan is correct and expected
+  by icdd. `Start` therefore now connects, runs `RunScan`, hands every page back
+  (`ScanProgressStatus`/`ScannerPageDone`, or a file write), and sends
+  `ScannerScanDone` all inline; the background thread, its join, and the per-job
+  `ScanJob` snapshot are removed (SetParameters and Start alternate on the one
+  thread, so the transfer settings are plain locals with no cross-thread race).
+  Cancel is handled at a page boundary: a `ScanProgressStatus` reply of
+  `userCanceledErr` stops further pages and finishes with a clean
+  `ScannerScanDone` (there is no mid-`RunScan` cancel, since `RunScan` is
+  monolithic).
 
 ### E. Paper-size enumeration
 
@@ -339,15 +361,19 @@ prefers the nested `userScanArea`, falls back to the top-level dict, and probes 
 
 The module diverged from Apple's canonical module→host notification protocol
 (pinned from `ICADevices.framework` `ICAApplication.h` + `ICD_ScannerCalls.h`
-plus reference modules, interface facts only). The corrected sequence, in order:
+plus reference modules, interface facts only). The corrected sequence, in order (all posted inline on the callback thread by
+the synchronous `Start`, Task 16):
 
-1. **Warm-up.** Two `kICANotificationTypeDeviceStatusInfo` notifications, the
-   first carrying `kICANotificationSubTypeKey = kICANotificationSubTypeWarmUpStarted`,
-   the second `kICANotificationSubTypeWarmUpDone` (`ICAApplication.h`), before any
-   scan pass. The worker posts these right after a successful connect.
+1. **Warm-up — removed (Task 16).** Task 15 opened each scan with two
+   `kICANotificationTypeDeviceStatusInfo` warm-up notifications
+   (`kICANotificationSubTypeWarmUpStarted` / `…WarmUpDone`). The shipping Tahoe
+   fork sends none, and ours — posted from the background worker thread — is what
+   left the UI stuck on "Scanner is warming up"; `PostWarmUp` and its calls are
+   removed. The scan now opens directly with the first progress notification.
 2. **`kICANotificationTypeScanProgressStatus`** (per pass) — overview pixels via
    `ICDAddImageInfoToNotificationDictionary`; sent with
-   `ICDSendNotificationAndWaitForReply` (a cancel is `replyCode == userCanceledErr`).
+   `ICDSendNotificationAndWaitForReply` (a cancel is `replyCode == userCanceledErr`,
+   which ends the scan at that page boundary with a clean `ScannerScanDone`).
 3. **`kICANotificationTypeScannerPageDone`** — plain `ICDSendNotification`; on
    file transfer it carries the exact written path under
    `kICANotificationScannerDocumentNameKey`.
@@ -361,9 +387,9 @@ builds passed `ICD_ScannerStartPB::object` (the trigger, observed as `0x02000001
 in logs); the host keys its scan session on the **device** object, so
 notifications against the trigger left Image Capture on "Scanning document"
 forever and never rendered the overview. The device object is captured in
-`OpenSession`/`Start` from `deviceObjectInfo->icaObject` and snapshotted into each
-`ScanJob`; `Start` logs `deviceObjectInfo->icaObject` vs `pb->object` once so a
-re-test confirms which is right.
+`OpenSession`/`Start` from `deviceObjectInfo->icaObject` and passed to the
+synchronous scan (Task 16); `Start` logs `deviceObjectInfo->icaObject` vs
+`pb->object` so a re-test confirms which is right.
 
 **Overview image-info args must match the buffer exactly.**
 `ICDAddImageInfoToNotificationDictionary(dict, width, height, bytesPerRow,
@@ -412,12 +438,12 @@ public `VirtualScanner` sample module, interface facts only):
 
 - **Overview / preview → in-memory image.** The request carries
   `"scan mode" = overview`, `progressNotificationWithData = 1`, and **no**
-  destination. The module posts the warm-up pair (Task 15), then pushes the
-  decoded page as one full-height chunk via
+  destination. The module pushes the decoded page as one full-height chunk via
   `ICDAddImageInfoToNotificationDictionary` (the Task-14 Defect-A fix + the
   Task-15 device-object/arg fixes; see the authoritative sequence above) in a
   `kICANotificationTypeScanProgressStatus`, then `ScannerPageDone`, then
-  `ScannerScanDone` — all against the device object.
+  `ScannerScanDone` — all against the device object, all inline on the callback
+  thread (Task 16; no warm-up pair).
 
 - **Final scan → file-based transfer.** The request carries a security-scoped
   destination folder under `ICSecurityScopedWrappedURL` (a modern icdd key not
