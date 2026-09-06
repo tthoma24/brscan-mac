@@ -18,15 +18,18 @@
 //     CAP_FEEDERENABLED, CAP_DUPLEX,          // source / duplex controls.
 //     functionalUnits : {
 //       availableFunctionalUnitTypes : [0, 3],  // flatbed, documentFeeder.
-//       selectedFunctionalUnitType   : 0,       // flatbed.
+//       selectedFunctionalUnitType   : <tracked>,  // 0 flatbed / 3 feeder.
 //     }
 //   }
 // where each ICAP_*/CAP_* capability is a TWAIN-style container
 //   { "type": "TWON_ENUMERATION" | "TWON_ONEVALUE",
 //     "value": <array | scalar>, "current": <v>, "default": <v> }.
-// The flat entries describe the selected (flatbed) unit; per-unit switching on a
-// host reselection is a follow-up (both unit types are already advertised, which
-// is what makes the source picker appear).
+// The flat entries describe the SELECTED unit and selectedFunctionalUnitType
+// echoes the host's tracked choice (BuildScannerParameters' argument): selecting
+// the document feeder makes the host set selectedFunctionalUnitType=3 in
+// SetParameters and re-call GetParameters, so answering with the tracked unit
+// (not always the flatbed) is what stops the host re-selecting in a loop. Both
+// unit types are always advertised, which is what makes the source picker appear.
 //
 // Ground-truth paper geometry comes from daemon/paper_size.{h,cpp} (the single
 // source of truth per PROVENANCE.md and PLAN-2-DESIGN.md decision E); paper
@@ -56,6 +59,15 @@ namespace brscan::ica {
 // `device` dict described above (flat ICAP_*/CAP_* entries for the selected unit
 // plus a functionalUnits sub-dict). Adds the `device` key only; never clears the
 // dictionary.
-void BuildScannerParameters(CFMutableDictionaryRef dict);
+//
+// `selectedFunctionalUnitType` is the ICScannerFunctionalUnitType the host has
+// currently selected (0 = flatbed, 3 = document feeder; the module tracks it
+// across SetParameters). The flat capabilities describe THAT unit and
+// functionalUnits.selectedFunctionalUnitType echoes it, so a host that selects
+// the feeder reads its selection back unchanged instead of looping on a
+// flatbed-only answer. Any value other than the document feeder is treated as
+// the flatbed.
+void BuildScannerParameters(CFMutableDictionaryRef dict,
+                            int selectedFunctionalUnitType);
 
 }  // namespace brscan::ica

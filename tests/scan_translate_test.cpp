@@ -205,6 +205,33 @@ TEST(DocumentTypeForPaperTokenTest, UnknownTokenIsNone) {
   EXPECT_EQ(DocumentTypeForPaperToken(""), kDocumentTypeNone);
 }
 
+// The JIS B5 / JIS B4 ICScannerDocumentType values the module adds to
+// ICAP_SUPPORTEDSIZES to match the Brother driver's flatbed list. They carry no
+// daemon/paper_size.cpp geometry (the ICA host supplies the scan rectangle per
+// document type), so they are advertised as raw enum values, not via a paper
+// token; this pins those values to the non-contiguous SDK enum. JIS B5 is the
+// base ICScannerDocumentTypeB5 = 2 (documented "B5/JIS B5"); JIS B4 is
+// ICScannerDocumentTypeJISB4 = 38 (ICScannerFunctionalUnits.h).
+TEST(DocumentTypeSizeConstantsTest, JisValuesMatchSdkEnum) {
+  EXPECT_EQ(kDocumentTypeJISB5, 2);
+  EXPECT_EQ(kDocumentTypeJISB4, 38);
+}
+
+// The JIS additions must not collide with any of the standard token-mapped
+// sizes or the platten default (a duplicate would drop a size from the dropdown).
+TEST(DocumentTypeSizeConstantsTest, JisValuesDistinctFromExistingSizes) {
+  const int values[] = {
+      kDocumentTypeDefault,     kDocumentTypeA4,     kDocumentTypeUSLetter,
+      kDocumentTypeUSLegal,     kDocumentTypeA5,     kDocumentTypeUSLedger,
+      kDocumentTypeUSExecutive, kDocumentTypeA3,     kDocumentTypeJISB5,
+      kDocumentTypeJISB4};
+  for (size_t i = 0; i < std::size(values); ++i) {
+    for (size_t j = i + 1; j < std::size(values); ++j) {
+      EXPECT_NE(values[i], values[j]) << "collision at " << i << "," << j;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Host userScanArea (offset + extent, pixels) -> corner-bounded Area.
 TEST(CornersFromUserScanAreaTest, PositiveRectConverts) {
