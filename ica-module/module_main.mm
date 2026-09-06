@@ -596,8 +596,9 @@ ICAError CloseSession(const ScannerObjectInfo* deviceObjectInfo,
   if (ctx) {
     // With a synchronous Start (Task 16) there is no worker to stop: a scan has
     // fully completed (ScannerScanDone sent) before Start returns, so the host
-    // only ever reaches CloseSession between scans. Host cancel is handled at a
-    // page boundary inside the scan via the progress replyCode instead.
+    // only ever reaches CloseSession between scans. Host cancel is handled
+    // mid-scan inside RunScan via the per-band progress replyCode instead
+    // (Task 18b).
     ctx->sessionOpen = false;
   }
   if (pb) pb->header.err = noErr;
@@ -941,28 +942,33 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 //   returning only after ScanDone. Blocking Start for the whole scan is correct
 //   and expected by icdd (all four reference modules do exactly this).
 //
-// HAND-BACK ORCHESTRATION (Task 14, corrected against a working ICA scanner
-// module's convention -- interface facts only, clean-room, no source copied):
+// HAND-BACK ORCHESTRATION (Task 18b -- LIVE bands; supersedes the Task-14
+// whole-page hand-back. Interface facts only, clean-room, no source copied):
 //   - WARM-UP: dropped in Task 16. The shipping Tahoe fork sends no warm-up
 //     notifications; ours (posted from the worker thread) is what left the UI
 //     stuck on "Scanner is warming up", so PostWarmUp and its calls are removed.
-//   - The in-memory (overview/preview) pixels are delivered INLINE in a
-//     kICANotificationTypeScanProgressStatus notification packed with
+//   - The pixels stream back LIVE, one decoded band at a time, via
+//     brscan::RunScan's 4-argument streaming overload (an on_band callback that
+//     fires as rows decode off the wire). Each band is delivered INLINE in a
+//     kICANotificationTypeScanProgressStatus packed with
 //     ICDAddImageInfoToNotificationDictionary -- the IMAGE-info packer, NOT the
-//     BAND-info packer. A working module (SANE-backed ICA scanner) sends every
-//     data-bearing progress chunk this way: it populates the notification's
-//     kICANotificationImage* keys (image data + width/height/bytesPerRow/
-//     startRow/numberOfRows, documented in ICAApplication.h) that the host
-//     accumulates into the overview/preview image (ICScannerFunctionalUnit's
-//     overviewImage). Task 11 used ICDAddBandInfoToNotificationDictionary
-//     instead; the host accepted the notification (replyCode ok) but never
-//     rendered the overview, because its preview accumulator consumes the
-//     Image-info keys, not the Band-info keys -- THIS is Defect A.
-//   - We send the whole page as one Image-info chunk (dataStartRow=0,
-//     dataNumberOfRows=height); the packer accepts a single full-height chunk
-//     exactly as it accepts a running series (startRow advancing by chunk).
-//   - ICDSendNotificationAndWaitForReply keeps `bytes` alive until icdd copies
-//     it and surfaces a user cancel in replyCode.
+//     BAND-info packer: it populates the notification's kICANotificationImage*
+//     keys (image data + width/height/bytesPerRow/startRow/numberOfRows,
+//     documented in ICAApplication.h) that the host accumulates into the
+//     overview/preview image (ICScannerFunctionalUnit's overviewImage). A band
+//     carries the FULL page width/height with this band's dataStartRow /
+//     dataNumberOfRows, so the preview fills top-to-bottom with a moving
+//     progress bar DURING the scan. Task 11 used the BAND-info packer instead;
+//     the host accepted the notification (replyCode ok) but never rendered the
+//     overview, because its preview accumulator consumes the Image-info keys,
+//     not the Band-info keys -- THIS was Defect A. Task 14 then sent the whole
+//     page as one full-height Image-info chunk (dataStartRow=0), which rendered
+//     only at the very end; Task 18b restores true progressive delivery.
+//   - ICDSendNotificationAndWaitForReply keeps each band's bytes alive until
+//     icdd copies them and surfaces a user cancel in replyCode; a cancel makes
+//     the on_band callback return false, so RunScan stops reading promptly and
+//     returns Status::kCancelled -- a true mid-scan cancel, not the old
+//     page-boundary-only cancel.
 //   - EVERY scanner notification references the framework-assigned DEVICE object
 //     (ScannerObjectInfo::icaObject, marked "Apple" in ICD_ScannerCalls.h) under
 //     kICANotificationICAObjectKey. Task 15 corrected this: prior builds used
@@ -970,20 +976,22 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 //     its scan session on the device object -- never completed the scan
 //     ("Scanning document" hang) nor rendered the overview. The device object is
 //     captured in OpenSession/Start from deviceObjectInfo->icaObject.
-//     The reference sets this on every ScanProgressStatus / ScannerPageDone /
-//     ScannerScanDone; it does NOT use kICANotificationDeviceICAObjectKey here.
-//   - kICANotificationTypeScannerPageDone then signals the page is complete, and
-//     a final kICANotificationTypeScannerScanDone ends the job -- both carrying
-//     the same device ICAObject and no pixel payload.
+//     It does NOT use kICANotificationDeviceICAObjectKey here.
+//   - MEMORY / overview path: the bands ARE the complete delivery. There is no
+//     end-of-scan whole-image ScanProgressStatus and no per-page
+//     ScannerPageDone; a single kICANotificationTypeScannerScanDone ends the job.
+//   - FILE / final path: the same bands stream back to drive the progress bar,
+//     AND RunScan still accumulates each whole page into `out`, so after RunScan
+//     returns the finished page is encoded to the destination file and a
+//     kICANotificationTypeScannerPageDone carrying the file path (under
+//     kICANotificationScannerDocumentNameKey) is posted, then a single
+//     ScannerScanDone (Task 12 file write, unchanged). Bands = progress; the
+//     file write + PageDone = the actual delivery.
 //
-// The FINAL (file-transfer) path is unchanged (Task 12): it writes each page to
-// the destination and posts ScannerPageDone with the file path under
-// kICANotificationScannerDocumentNameKey. Only the in-memory overview path uses
-// the Image-info notification above.
-//
-// DIAGNOSTIC: PostPage logs the full notification dictionary it sends so a
-// device-in-the-loop re-test can confirm the host consumes the Image-info keys
-// (the overview render is host-side and cannot be verified from the module).
+// LOGGING: band granularity is 16 rows, so a page produces hundreds of bands.
+// PostBand logs the first band's image-info args once (logArgs); the loop logs a
+// final per-page band count. Nothing is logged per band, so the unified log does
+// not flood.
 
 // userCanceledErr (MacErrors.h, -128) as it arrives in the UInt32 replyCode of a
 // waited-for notification: the host sets it when the user cancels the scan.
@@ -1021,84 +1029,66 @@ ICAError SendScannerNotification(CFMutableDictionaryRef dict,
   return err;
 }
 
-// Logs the notification dictionary's keys and the image geometry it carries,
-// WITHOUT dumping the raw pixel bytes (kICANotificationImageDataKey holds the
-// whole image). This is the Defect-A follow-up hook: a device-in-the-loop
-// re-test reads this line to confirm which Image-info keys the host received.
-void LogNotificationDict(const char* label, CFDictionaryRef dict) {
-  if (dict == nullptr) return;
-  NSMutableArray<NSString*>* keys = [NSMutableArray array];
-  for (NSString* k in (__bridge NSDictionary*)dict) {
-    [keys addObject:k];
-  }
-  os_log(Log(), "%{public}s: notification keys=[%{public}@]", label,
-         [keys componentsJoinedByString:@", "]);
-}
-
-// Hands one decoded page (overview/preview, in-memory) back as a single
-// full-height IMAGE-info chunk in a ScanProgressStatus, then signals the page
-// complete. `bytes` must point at `byteCount` host-ready bytes: interleaved
-// 24-bit RGB (post-DecodeJpeg) for kRgb, raw 8-bit gray for kGray, packed 1-bpp
-// for kBitonal. `icaObject` is the DEVICE object (Task 15). Returns kOk if the
-// image was accepted and both notifications sent, kCanceled if the host replied
-// userCanceledErr to the progress notification (host cancel at this page
-// boundary), or kError on bad geometry / a failed send.
-PageResult PostPage(ICAObject icaObject, brscan::PixelFormat format,
-                    const uint8_t* bytes, size_t byteCount, int width,
-                    int height, int pageIndex) {
-  std::optional<brscan::ica::BufferDescriptor> d =
-      brscan::ica::DescribeBuffer(format, width, height);
-  if (!d) {
-    os_log_error(Log(), "PostPage[%d]: invalid geometry %dx%d", pageIndex,
-                 width, height);
-    return PageResult::kError;
-  }
-
-  // The IMAGE-info packer copies exactly `dataSize` bytes starting at `bytes`
-  // and describes the buffer with `bytesPerRow`; a silent mismatch between these
-  // and the real pixel buffer renders nothing (Task 15 bug 3). The
-  // authoritative dataSize is the geometric buffer size (stride * height =
-  // DescribeBuffer's expected_byte_count), which must not exceed the pixels we
-  // actually hold. Verify and log the exact args before packing.
-  const int64_t dataSize = d->expected_byte_count;  // stride * height.
-  const int spp = d->samples_per_pixel;
-  const char* colorSpace = (d->color_space == brscan::ica::ColorSpace::kDeviceRGB)
-                               ? "DeviceRGB"
-                               : (d->color_space ==
-                                          brscan::ica::ColorSpace::kDeviceGray
-                                      ? "DeviceGray"
-                                      : "BlackWhite1Bit");
-  os_log(Log(),
-         "PostPage[%d]: image-info args width=%d height=%d bytesPerRow=%lld "
-         "dataStartRow=0 dataNumberOfRows=%d dataSize=%lld bpp=%d components=%d "
-         "colorspace=%{public}s bufferBytes=%zu (match=%d)",
-         pageIndex, width, height, (long long)d->bytes_per_row, height,
-         (long long)dataSize, d->bits_per_pixel, spp, colorSpace, byteCount,
-         byteCount >= static_cast<size_t>(dataSize));
-  if (bytes == nullptr || byteCount < static_cast<size_t>(dataSize)) {
+// Hands ONE live band back as an IMAGE-info chunk in a ScanProgressStatus
+// (Plan 2 Task 18b). `band.data` points at `band.size` host-ready bytes for the
+// band's `num_rows` rows -- interleaved 24-bit RGB for kRgb, raw 8-bit gray for
+// kGray, packed 1-bpp for kBitonal -- already decoded by RunScan's streaming
+// overload (the module does NOT decode a band). The image-info args come from
+// DescribeBand, which enforces the per-band stride guard (band.size must equal
+// DescribeBuffer stride * num_rows; a mismatch renders nothing, so it is
+// rejected). `icaObject` is the DEVICE object (Task 15). The send waits for the
+// reply so the band buffer outlives icdd's copy and a user cancel surfaces in
+// replyCode. `logArgs` gates the verbose per-band arg line: at 16-row band
+// granularity a page has hundreds of bands, so the caller logs only the first
+// band + a final count and passes false otherwise. Returns kOk if the band was
+// accepted, kCanceled if the host replied userCanceledErr (host cancel), or
+// kError on bad geometry / stride mismatch / a failed send.
+PageResult PostBand(ICAObject icaObject, const brscan::ScanBand& band,
+                    bool logArgs) {
+  std::optional<brscan::ica::BandImageInfo> info = brscan::ica::DescribeBand(
+      band.format, band.full_width, band.full_height, band.start_row,
+      band.num_rows, band.size);
+  if (!info) {
     os_log_error(Log(),
-                 "PostPage[%d]: buffer too small for image-info (%zu < %lld); "
-                 "not sending",
-                 pageIndex, byteCount, (long long)dataSize);
+                 "PostBand[p%d]: bad band geometry/stride full=%dx%d "
+                 "start=%d rows=%d size=%zu (dropped)",
+                 band.page_index, band.full_width, band.full_height,
+                 band.start_row, band.num_rows, band.size);
+    return PageResult::kError;
+  }
+  if (band.data == nullptr) {
+    os_log_error(Log(), "PostBand[p%d]: null band data", band.page_index);
     return PageResult::kError;
   }
 
-  // 1) Deliver the pixels via the IMAGE-info packer (Defect A): populate the
-  //    kICANotificationImage* keys the host's overview/preview accumulator
-  //    consumes -- one full-height chunk (dataStartRow=0, rows=height). Wait for
-  //    the reply so `bytes` outlives the copy and a user cancel is observed.
+  // Log the first band's exact image-info args once per scan so the unified log
+  // is not flooded by the hundreds of 16-row bands a page produces.
+  if (logArgs) {
+    os_log(Log(),
+           "PostBand[p%d]: first-band image-info args width=%lld height=%lld "
+           "bytesPerRow=%lld dataStartRow=%lld dataNumberOfRows=%lld "
+           "dataSize=%lld format=%{public}s",
+           band.page_index, (long long)info->width, (long long)info->height,
+           (long long)info->bytes_per_row, (long long)info->data_start_row,
+           (long long)info->data_number_of_rows, (long long)info->data_size,
+           PixelFormatName(band.format));
+  }
+
+  // Populate the kICANotificationImage* keys the host's overview/preview
+  // accumulator consumes -- the full page width/height with this band's row
+  // offset/count -- so the preview fills top-to-bottom as bands arrive.
   CFMutableDictionaryRef imageDict = CFDictionaryCreateMutable(
       nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
   if (imageDict == nullptr) return PageResult::kError;
 
   ICAError addErr = ICDAddImageInfoToNotificationDictionary(
-      imageDict, static_cast<UInt32>(width), static_cast<UInt32>(height),
-      static_cast<UInt32>(d->bytes_per_row),
-      /*dataStartRow=*/0, /*dataNumberOfRows=*/static_cast<UInt32>(height),
-      static_cast<UInt32>(dataSize), const_cast<uint8_t*>(bytes));
-
-  LogNotificationDict("PostPage.progress", imageDict);
+      imageDict, static_cast<UInt32>(info->width),
+      static_cast<UInt32>(info->height),
+      static_cast<UInt32>(info->bytes_per_row),
+      static_cast<UInt32>(info->data_start_row),
+      static_cast<UInt32>(info->data_number_of_rows),
+      static_cast<UInt32>(info->data_size), const_cast<uint8_t*>(band.data));
 
   UInt32 replyCode = 0;
   ICAError imageErr = SendScannerNotification(
@@ -1106,38 +1096,20 @@ PageResult PostPage(ICAObject icaObject, brscan::PixelFormat format,
       /*waitForReply=*/true, &replyCode);
   CFRelease(imageDict);
 
-  // Host cancel: the progress reply carries userCanceledErr. Stop here without
-  // sending a page-done -- the caller ends the scan cleanly (cancel takes effect
-  // at this page boundary, not mid-RunScan).
   if (replyCode == kUserCanceledReplyCode) {
     os_log(Log(),
-           "PostPage[%d]: host cancel (progress replyCode=userCanceledErr)",
-           pageIndex);
+           "PostBand[p%d]: host cancel (progress replyCode=userCanceledErr) at "
+           "startRow=%d",
+           band.page_index, band.start_row);
     return PageResult::kCanceled;
   }
-
-  // 2) Signal the page complete (no payload).
-  CFMutableDictionaryRef pageDict = CFDictionaryCreateMutable(
-      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
-      &kCFTypeDictionaryValueCallBacks);
-  ICAError pageErr = kICADeviceInvalidParamErr;
-  if (pageDict) {
-    pageErr = SendScannerNotification(pageDict, icaObject,
-                                      kICANotificationTypeScannerPageDone,
-                                      /*waitForReply=*/false);
-    CFRelease(pageDict);
+  if (addErr != noErr || imageErr != noErr) {
+    os_log_error(Log(),
+                 "PostBand[p%d]: send failed addImageInfo=%d sendProgress=%d",
+                 band.page_index, addErr, imageErr);
+    return PageResult::kError;
   }
-
-  os_log(Log(),
-         "PostPage[%d]: %dx%d format=%{public}s bpp=%d stride=%lld bytes=%zu "
-         "icaObject=0x%08x addImageInfo=%d sendProgressImage=%d replyCode=%u "
-         "sendPageDone=%d",
-         pageIndex, width, height, PixelFormatName(format), d->bits_per_pixel,
-         (long long)d->bytes_per_row, byteCount, icaObject, addErr, imageErr,
-         replyCode, pageErr);
-  return (addErr == noErr && imageErr == noErr && pageErr == noErr)
-             ? PageResult::kOk
-             : PageResult::kError;
+  return PageResult::kOk;
 }
 
 // ---------------------------------------------------------------------------
@@ -1374,23 +1346,61 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
     finalErr = kICADeviceInternalErr;
   } else {
     std::vector<brscan::ScanResult> pages;
-    const brscan::Status scanStatus =
-        brscan::RunScan(transport, params, &pages);
-    os_log(Log(), "SyncScan: RunScan -> status=%d pages=%zu", (int)scanStatus,
-           pages.size());
 
-    if (scanStatus != brscan::Status::kOk) {
+    // Live band streaming (Task 18b): every decoded band is pushed to the host
+    // as an IMAGE-info ScanProgressStatus for BOTH transfer modes -- that is
+    // what fills the overview top-to-bottom and drives the progress bar DURING
+    // the scan. RunScan's streaming overload also accumulates each whole page
+    // into `pages`, so the file path can still encode+write the finished page
+    // after the scan. The callback runs inline on this (icdd callback) thread,
+    // so its notifications are delivered on the connection runloop; returning
+    // false makes RunScan stop reading promptly and return kCancelled (a true
+    // mid-scan cancel). To avoid flooding the unified log at 16-row band
+    // granularity, PostBand logs only the first band's args (logArgs) and a
+    // per-scan band count is logged once RunScan returns.
+    bool loggedFirstBand = false;
+    long bandCount = 0;
+    const brscan::BandCallback onBand =
+        [&](const brscan::ScanBand& band) -> bool {
+      const bool logArgs = !loggedFirstBand;
+      loggedFirstBand = true;
+      ++bandCount;
+      const PageResult r = PostBand(deviceObject, band, logArgs);
+      if (r == PageResult::kCanceled) {
+        canceled = true;
+        return false;  // Host cancel -> RunScan returns kCancelled.
+      }
+      return true;  // kOk, or a single dropped band -- keep scanning.
+    };
+
+    const brscan::Status scanStatus =
+        brscan::RunScan(transport, params, &pages, onBand);
+    os_log(Log(),
+           "SyncScan: RunScan -> status=%d pages=%zu bands=%ld canceled=%d",
+           (int)scanStatus, pages.size(), bandCount, canceled);
+
+    if (scanStatus == brscan::Status::kCancelled) {
+      // Clean host cancel: the bands already delivered stay on the host; write
+      // no file and end with a clean ScannerScanDone (Start releases the scoped
+      // URL, and transport is disconnected below -- nothing leaks).
+      canceled = true;
+    } else if (scanStatus != brscan::Status::kOk) {
       finalErr = kICADeviceInternalErr;
-    } else {
+    } else if (fileTransfer) {
+      // FILE path only: the bands drove the progress bar; now encode each whole
+      // page to the destination file and post ScannerPageDone(path). The MEMORY
+      // path needs no post-processing -- its bands were the complete delivery,
+      // so it sends only the final ScannerScanDone below.
       int idx = 0;
       for (const brscan::ScanResult& page : pages) {
-        os_log(Log(), "SyncScan: page %d %dx%d format=%{public}s payload=%zu",
+        os_log(Log(), "SyncScan: file page %d %dx%d format=%{public}s payload=%zu",
                idx, page.width, page.height, PixelFormatName(page.format),
                page.data.size());
 
-        // Normalise the page to host-ready bytes: color arrives as baseline
-        // JPEG and is decoded to interleaved RGB; gray/bitonal pass through.
-        // `img` must outlive the hand-back call below (it backs the RGB bytes).
+        // Normalise the page to host-ready bytes: color pages arrive in `pages`
+        // as baseline JPEG (bands were decoded separately) and are decoded to
+        // interleaved RGB here for the file encode; gray/bitonal pass through.
+        // `img` must outlive PostFilePage (it backs the RGB bytes).
         brscan::Image img;
         const uint8_t* bytes = nullptr;
         size_t byteCount = 0;
@@ -1418,23 +1428,9 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         }
 
         if (ready) {
-          // Task 12: a FINAL scan writes the page to the host's destination
-          // file; an overview/preview scan pushes it back as an in-memory image.
-          const PageResult result =
-              fileTransfer
-                  ? PostFilePage(securityScopedURL, documentFolderPath,
-                                 transferPlan, deviceObject, outFormat, bytes,
-                                 byteCount, outWidth, outHeight, idx)
-                  : PostPage(deviceObject, outFormat, bytes, byteCount, outWidth,
-                             outHeight, idx);
-          if (result == PageResult::kCanceled) {
-            // Host cancel at this page boundary (Task 16): stop sending further
-            // pages and finish with a clean ScannerScanDone. Cancel is observed
-            // between pages, not mid-RunScan (RunScan is monolithic).
-            os_log(Log(), "SyncScan: host cancel at page %d; stopping", idx);
-            canceled = true;
-            break;
-          }
+          PostFilePage(securityScopedURL, documentFolderPath, transferPlan,
+                       deviceObject, outFormat, bytes, byteCount, outWidth,
+                       outHeight, idx);
         }
         ++idx;
       }
