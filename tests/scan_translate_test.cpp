@@ -194,9 +194,18 @@ TEST(DocumentTypeForPaperTokenTest, StandardValuesAreDistinct) {
   }
 }
 
-TEST(DocumentTypeForPaperTokenTest, PhotoAndBusinessCardHaveNoStandardType) {
-  EXPECT_EQ(DocumentTypeForPaperToken("PHOTO"), kDocumentTypeNone);
-  EXPECT_EQ(DocumentTypeForPaperToken("BCARD"), kDocumentTypeNone);
+// PHOTO (4x6) and BCARD (business card) map to the SDK's photo/card document
+// types so they render as named flatbed sizes (verified against the SDK header:
+// ICScannerDocumentType4R = 62, ICScannerDocumentTypeBusinessCard = 53). They
+// stay flatbed-only in the capability advertisement -- both are under the 148 mm
+// ADF minimum -- but that split lives in scan_parameters.mm (BuildUnit); the
+// token mapping itself is size-agnostic.
+TEST(DocumentTypeForPaperTokenTest, PhotoMapsTo4R) {
+  EXPECT_EQ(DocumentTypeForPaperToken("PHOTO"), kDocumentType4R);  // 62
+}
+
+TEST(DocumentTypeForPaperTokenTest, BusinessCardMapsToBusinessCard) {
+  EXPECT_EQ(DocumentTypeForPaperToken("BCARD"), kDocumentTypeBusinessCard);  // 53
 }
 
 TEST(DocumentTypeForPaperTokenTest, UnknownTokenIsNone) {
@@ -215,6 +224,83 @@ TEST(DocumentTypeForPaperTokenTest, UnknownTokenIsNone) {
 TEST(DocumentTypeSizeConstantsTest, JisValuesMatchSdkEnum) {
   EXPECT_EQ(kDocumentTypeJISB5, 2);
   EXPECT_EQ(kDocumentTypeJISB4, 38);
+}
+
+// The 4R (4x6 photo) and Business Card values match the non-contiguous SDK enum
+// (ICScannerFunctionalUnits.h: ICScannerDocumentType4R = 62 in the photo region
+// E=60/3R=61/4R=62/5R=63; ICScannerDocumentTypeBusinessCard = 53).
+TEST(DocumentTypeSizeConstantsTest, PhotoAndCardValuesMatchSdkEnum) {
+  EXPECT_EQ(kDocumentType4R, 62);
+  EXPECT_EQ(kDocumentTypeBusinessCard, 53);
+}
+
+// The flatbed-only additions must not collide with the standard/JIS sizes or the
+// platten default (a duplicate would drop a size from the dropdown).
+TEST(DocumentTypeSizeConstantsTest, PhotoAndCardValuesDistinctFromExistingSizes) {
+  const int values[] = {
+      kDocumentTypeDefault,     kDocumentTypeA4,     kDocumentTypeUSLetter,
+      kDocumentTypeUSLegal,     kDocumentTypeA5,     kDocumentTypeUSLedger,
+      kDocumentTypeUSExecutive, kDocumentTypeA3,     kDocumentTypeJISB5,
+      kDocumentTypeJISB4,       kDocumentType4R,     kDocumentTypeBusinessCard};
+  for (size_t i = 0; i < std::size(values); ++i) {
+    for (size_t j = i + 1; j < std::size(values); ++j) {
+      EXPECT_NE(values[i], values[j]) << "collision at " << i << "," << j;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-unit ICAP_SUPPORTEDSIZES membership. The capability advertisement lives in
+// scan_parameters.mm (BuildUnit), which needs Foundation; these pure tests pin
+// the INTENDED per-unit sets so a regression there is caught without a device.
+// The ADF feeds 148-297 mm wide x 148-431.8 mm long (Brother spec), so the
+// feeder carries the full document set A5-up (no platten Default, no 4R/Business
+// Card -- both under 148 mm); the flatbed carries that set plus Default, 4R, and
+// Business Card.
+
+// Every document type the feeder advertises fits the ADF envelope.
+TEST(SupportedSizesPerUnitTest, FeederSet) {
+  const int feeder[] = {
+      kDocumentTypeUSLetter,    kDocumentTypeUSLegal, kDocumentTypeA4,
+      kDocumentTypeUSLedger,    kDocumentTypeA3,      kDocumentTypeA5,
+      kDocumentTypeUSExecutive, kDocumentTypeJISB5,   kDocumentTypeJISB4};
+  auto contains = [&](int v) {
+    for (int x : feeder)
+      if (x == v) return true;
+    return false;
+  };
+  // A5, Executive, JIS B5, JIS B4 are present (the sizes this task adds).
+  EXPECT_TRUE(contains(kDocumentTypeA5));
+  EXPECT_TRUE(contains(kDocumentTypeUSExecutive));
+  EXPECT_TRUE(contains(kDocumentTypeJISB5));
+  EXPECT_TRUE(contains(kDocumentTypeJISB4));
+  // The platten default and the sub-148 mm sizes are NOT on the feeder.
+  EXPECT_FALSE(contains(kDocumentTypeDefault));
+  EXPECT_FALSE(contains(kDocumentType4R));
+  EXPECT_FALSE(contains(kDocumentTypeBusinessCard));
+}
+
+// The flatbed set is the feeder set plus the platten default, 4R, and Business
+// Card.
+TEST(SupportedSizesPerUnitTest, FlatbedSet) {
+  const int flatbed[] = {
+      kDocumentTypeDefault,     kDocumentTypeUSLetter, kDocumentTypeUSLegal,
+      kDocumentTypeA4,          kDocumentTypeUSLedger, kDocumentTypeA3,
+      kDocumentTypeA5,          kDocumentTypeUSExecutive, kDocumentType4R,
+      kDocumentTypeBusinessCard, kDocumentTypeJISB5,   kDocumentTypeJISB4};
+  auto contains = [&](int v) {
+    for (int x : flatbed)
+      if (x == v) return true;
+    return false;
+  };
+  EXPECT_TRUE(contains(kDocumentTypeDefault));
+  EXPECT_TRUE(contains(kDocumentType4R));
+  EXPECT_TRUE(contains(kDocumentTypeBusinessCard));
+  // The flatbed is a superset of the feeder's A5-up additions.
+  EXPECT_TRUE(contains(kDocumentTypeA5));
+  EXPECT_TRUE(contains(kDocumentTypeUSExecutive));
+  EXPECT_TRUE(contains(kDocumentTypeJISB5));
+  EXPECT_TRUE(contains(kDocumentTypeJISB4));
 }
 
 // The JIS additions must not collide with any of the standard token-mapped

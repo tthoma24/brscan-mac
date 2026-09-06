@@ -20,9 +20,9 @@ constexpr int kFeederFunctionalUnit = 3;
 }  // namespace
 
 int DocumentTypeForPaperToken(const std::string& token) {
-  // Tokens are the exact, upper-case daemon/paper_size.cpp names. PHOTO and
-  // BCARD have no clean ICScannerDocumentType case, so they map to "none" and
-  // are offered only as a custom scan area, per PLAN-2-DESIGN.md.
+  // Tokens are the exact, upper-case daemon/paper_size.cpp names. PHOTO (4x6)
+  // and BCARD (business card) map to the SDK's ICScannerDocumentType4R and
+  // ICScannerDocumentTypeBusinessCard so they render as named flatbed sizes.
   if (token == "LETTER") return kDocumentTypeUSLetter;
   if (token == "LEGAL") return kDocumentTypeUSLegal;
   if (token == "A4") return kDocumentTypeA4;
@@ -30,6 +30,8 @@ int DocumentTypeForPaperToken(const std::string& token) {
   if (token == "A3") return kDocumentTypeA3;
   if (token == "A5") return kDocumentTypeA5;
   if (token == "EXECUTIVE") return kDocumentTypeUSExecutive;
+  if (token == "PHOTO") return kDocumentType4R;
+  if (token == "BCARD") return kDocumentTypeBusinessCard;
   return kDocumentTypeNone;
 }
 

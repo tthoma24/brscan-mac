@@ -52,6 +52,15 @@ inline constexpr int kDocumentTypeA3 = 11;
 // JIS B4 = ICScannerDocumentTypeJISB4 = 38, documented "JIS B4, 257.00 mm x
 // 364.00 mm" (ICScannerFunctionalUnits.h enum line 239, doc comment line 160).
 inline constexpr int kDocumentTypeJISB4 = 38;
+// Business Card = ICScannerDocumentTypeBusinessCard = 53, documented "Business
+// Card, 90.00 mm x 55.00 mm" (ICScannerFunctionalUnits.h enum line 254). Our
+// BCARD paper token maps here (flatbed only -- under the 148 mm ADF minimum).
+inline constexpr int kDocumentTypeBusinessCard = 53;
+// 4R = ICScannerDocumentType4R = 62, documented "4R, 4\" x 6\", 101.60 mm x
+// 152.40 mm" (ICScannerFunctionalUnits.h enum line 258; the 4R/5R photo region
+// is E=60, 3R=61, 4R=62, 5R=63). Our PHOTO (4x6) paper token maps here (flatbed
+// only -- 101.6 mm is under the 148 mm ADF minimum).
+inline constexpr int kDocumentType4R = 62;
 
 // Maps a daemon/paper_size.cpp paper token to its ICScannerDocumentType value,
 // or kDocumentTypeNone for tokens with no clean standard case (PHOTO, BCARD --

@@ -75,11 +75,12 @@ theDict["device"] = {
   "ICAP_PIXELTYPE":    { ... },   // 0=BW, 1=gray, 2=RGB
   "ICAP_PHYSICALWIDTH":  { ... }, // TWON_ONEVALUE, INCHES (see Geometry)
   "ICAP_PHYSICALHEIGHT": { ... },
-  "ICAP_SUPPORTEDSIZES": { ... }, // array of ICScannerDocumentType values
+  "ICAP_SUPPORTEDSIZES": { ... }, // array of ICScannerDocumentType (per-unit set)
   "ICAP_UNITS":        { ... },   // measurement unit; inches=0 … pixels=5
   "CAP_FEEDERENABLED": { ... },   // TWON_ONEVALUE; tracks the selected unit
-  "CAP_DUPLEX":        { ... },   // feeder: TWON_ENUMERATION [0,1]; flatbed: fixed 0
-  "CAP_DUPLEXENABLED": { ... },   // feeder only: TWON_ENUMERATION [0,1] toggle
+  "CAP_DUPLEX":        { ... },   // feeder: TWON_ONEVALUE nonzero; flatbed: 0
+  "CAP_DUPLEXENABLED": { ... },   // feeder only: TWON_ONEVALUE 0 (host-writable)
+  "CAP_AUTOFEED":      { ... },   // feeder only: TWON_ONEVALUE 1
   "functionalUnits": {            // ONLY these two keys
     "availableFunctionalUnitTypes": [ 0, 3 ],
     "selectedFunctionalUnitType": 0
@@ -105,6 +106,25 @@ Client mapping (`icdd` translates the module dict into the typed
 guaranteed 1:1 key identity): `ICAP_XRESOLUTION` → `supportedResolutions` /
 `resolution`; `ICAP_BITDEPTH` → `bitDepth`; `ICAP_SUPPORTEDSIZES` →
 `supportedDocumentTypes`; `ICAP_UNITS` → `measurementUnit`.
+
+### Per-unit supported sizes (`ICAP_SUPPORTEDSIZES`)
+
+The size set is scoped to the selected unit (`scan_parameters.mm::BuildUnit`).
+The Brother ADF feeds 148–297 mm wide × 148–431.8 mm long (A5 up through
+A3/Ledger), so:
+
+- **Feeder** — the full document set that fits that envelope: `USLetter (3)`,
+  `USLegal (4)`, `A4 (1)`, `USLedger (9)`, `A3 (11)`, `A5 (5)`,
+  `USExecutive (10)`, `JISB5 (2)`, `JISB4 (38)`. No platten `Default`; no
+  `4R`/`BusinessCard` (both under the 148 mm ADF minimum).
+- **Flatbed** — that set plus the platten `Default (0)`, `4R (62)` (4×6 photo,
+  from the `PHOTO` token) and `BusinessCard (53)` (from the `BCARD` token).
+
+`DocumentTypeForPaperToken` maps `PHOTO → 4R (62)` and `BCARD → BusinessCard
+(53)`; those two tokens are advertised on the flatbed only. `JISB5`/`JISB4`
+carry no `daemon/paper_size.cpp` geometry (the host supplies the scan rectangle
+per document type) and are advertised on both units. (A5/Executive/JIS B4 on the
+*feeder* are inferred from the spec envelope, not from a live capture.)
 
 ## Scan request (`ICD_ScannerSetParameters`)
 
@@ -141,13 +161,23 @@ Duplex is a document-feeder capability only. The SDK models it on
 and `duplexScanningEnabled` (readwrite) — `ICScannerFunctionalUnits.h` lines
 802–811 — which map onto the TWAIN-derived dict as `CAP_DUPLEX` (duplexer type;
 `TWDX_NONE=0`, `TWDX_1PASSDUPLEX=1`, `TWDX_2PASSDUPLEX=2`) and `CAP_DUPLEXENABLED`
-(the enable toggle). To make a 2-sided control render, the **feeder** advertises
-both as `TWON_ENUMERATION [0,1]` (current 0); the flatbed advertises a fixed
-`CAP_DUPLEX = 0` (no control). The exact key the host echoes back on the scan
-request is not yet confirmed live, so the read side (`ScanRequestFromIcap`) treats
-any of `duplex` (bool), `CAP_DUPLEX != 0`, or `CAP_DUPLEXENABLED != 0` as
-2-sided; the full request dict is logged so the actual key can be pinned in a
-follow-up. Duplex is honoured only when the resolved source is the feeder.
+(the enable toggle).
+
+**The container shape is load-bearing.** Advertising these as
+`TWON_ENUMERATION [0,1]` with current 0 renders **no** control: an enumeration
+resolves to `value[current] = 0 = TWDX_NONE`, so the framework sets
+`supportsDuplexScanning = NO`. A 2-sided toggle appears only when they are
+`TWON_ONEVALUE`. So the **feeder** advertises `CAP_DUPLEX = OneValue(2)` — the
+NONZERO value is what maps to `supportsDuplexScanning = YES` (2 =
+`TWDX_2PASSDUPLEX`; 1-vs-2 is immaterial to the flag) — and
+`CAP_DUPLEXENABLED = OneValue(0)`, the read/write toggle the host flips to 1
+(→ `duplexScanningEnabled`), plus `CAP_AUTOFEED = OneValue(1)`. The **flatbed**
+has no duplexer, so it keeps `CAP_DUPLEX = OneValue(0)` (no control).
+
+On the scan request the host echoes `CAP_DUPLEXENABLED != 0`; the read side
+(`ScanRequestFromIcap`) treats any of `duplex` (bool), `CAP_DUPLEX != 0`, or
+`CAP_DUPLEXENABLED != 0` as 2-sided. Duplex is honoured only when the resolved
+source is the feeder.
 
 ### Transfer mode (host-selected, per scan)
 

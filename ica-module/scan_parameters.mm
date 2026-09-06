@@ -71,17 +71,25 @@ constexpr int kFunctionalUnitFeeder = 3;
 // BOOL) -- ICScannerFunctionalUnits.h lines 802-811 -- which map onto the
 // TWAIN-derived capability dict Image Capture consumes as CAP_DUPLEX (the
 // duplexer type / "supported") and CAP_DUPLEXENABLED (the read/write on-off
-// toggle). To surface a 2-sided control we advertise BOTH for the feeder: a
-// CAP_DUPLEX enumeration [0, 1] (0=TWDX_NONE, 1=TWDX_1PASSDUPLEX; current 0) and
-// a CAP_DUPLEXENABLED enumeration [0, 1] (current 0). The exact key the host
-// echoes back on the scan request is not yet observed live (the control did not
-// render before this task), so both are advertised and the read side honours
-// whichever appears; module_main.mm logs the full request dict to confirm it.
-// The flatbed advertises a fixed CAP_DUPLEX = TWDX_NONE (no control).
-constexpr int kDuplexNone = 0;         // TWDX_NONE.
-constexpr int kDuplexOnePass = 1;      // TWDX_1PASSDUPLEX.
-constexpr int kDuplexEnabledOff = 0;
-constexpr int kDuplexEnabledOn = 1;
+// toggle).
+//
+// The 2-sided control renders only when these are advertised as TWON_ONEVALUE,
+// not TWON_ENUMERATION: an enumeration [0, 1] with current 0 resolves to
+// value[current] = 0 = no-duplex, so the framework sets supportsDuplexScanning =
+// NO and draws no toggle. A live duplex-ADF module advertises them as ONEVALUE,
+// so the FEEDER unit does the same: CAP_DUPLEX = OneValue(2) -- a NONZERO value
+// is the load-bearing part (maps to supportsDuplexScanning = YES; 2 =
+// TWDX_2PASSDUPLEX, as the reference uses; 1-vs-2 is immaterial to the flag) --
+// and CAP_DUPLEXENABLED = OneValue(0), the read/write toggle the host flips to 1
+// (maps to duplexScanningEnabled). The read side (scan_translate) already treats
+// CAP_DUPLEXENABLED != 0 as 2-sided, so the host echoing it back on the scan
+// request yields Params.duplex. CAP_AUTOFEED = OneValue(1) advertises the ADF's
+// auto-feed, as the reference module does. The FLATBED has no duplexer, so it
+// keeps a fixed CAP_DUPLEX = OneValue(0) (TWDX_NONE; no control) and no toggle.
+constexpr int kDuplexNone = 0;         // TWDX_NONE (flatbed: fixed, no control).
+constexpr int kDuplexTwoPass = 2;      // TWDX_2PASSDUPLEX (feeder: nonzero flag).
+constexpr int kDuplexEnabledOff = 0;   // CAP_DUPLEXENABLED toggle, host-writable.
+constexpr int kAutoFeedOn = 1;         // CAP_AUTOFEED (feeder auto-feed on).
 constexpr int kFeederDisabled = 0;
 constexpr int kFeederEnabled = 1;
 
@@ -100,17 +108,18 @@ NSString* const kKeyCurrent = @"current";
 NSString* const kKeyDefault = @"default";
 
 // The nine standard sizes we know geometry for, split by whether the document
-// feeder can take them. daemon/paper_size.cpp documents that
-// LETTER/LEGAL/A4/LEDGER/A3 feed through the ADF, while A5/EXECUTIVE/PHOTO/BCARD
-// register on the flatbed only.
+// feeder can take them. The ADF feeds sheets 148-297 mm wide x 148-431.8 mm long
+// (Brother spec), i.e. A5 up through A3/Ledger, so LETTER/LEGAL/A4/LEDGER/A3/A5/
+// EXECUTIVE all feed through it. Only PHOTO (4x6) and BCARD (business card) are
+// flatbed-only -- both are under the 148 mm ADF minimum.
 struct PaperChoice {
   const char* token;  // Exact daemon/paper_size.cpp token.
   bool flatbedOnly;
 };
 constexpr PaperChoice kPaperChoices[] = {
     {"LETTER", false}, {"LEGAL", false},    {"A4", false},
-    {"LEDGER", false}, {"A3", false},       {"A5", true},
-    {"EXECUTIVE", true}, {"PHOTO", true},   {"BCARD", true},
+    {"LEDGER", false}, {"A3", false},       {"A5", false},
+    {"EXECUTIVE", false}, {"PHOTO", true},  {"BCARD", true},
 };
 
 NSNumber* Int(int v) { return [NSNumber numberWithInt:v]; }
@@ -182,18 +191,18 @@ NSDictionary* BuildUnit(bool feeder) {
     if (docType != kDocumentTypeNone) [supportedSizes addObject:Int(docType)];
   }
 
-  // JIS B5 and JIS B4 round out the Brother driver's flatbed size list (A4, JIS
+  // JIS B5 and JIS B4 round out the Brother driver's document size list (A4, JIS
   // B5, US Letter, US Legal, A5, US Ledger, US Executive, A3, JIS B4). They have
   // no daemon/paper_size.cpp geometry tuple and none is needed: for ICA the host
   // supplies the scan rectangle (userScanArea) for the selected document type,
   // so advertising the ICScannerDocumentType value alone makes the size
   // selectable and scannable. Both fit inside the advertised platen extent (JIS
   // B4 is 257x364 mm, smaller than A3/Ledger), so the physical bounds computed
-  // above from the paper tokens do not regress. Flatbed only, matching Brother.
-  if (!feeder) {
-    [supportedSizes addObject:Int(kDocumentTypeJISB5)];
-    [supportedSizes addObject:Int(kDocumentTypeJISB4)];
-  }
+  // above from the paper tokens do not regress. Advertised on BOTH units: JIS B4
+  // (257x364 mm) and JIS B5 (182x257 mm) sit inside the ADF envelope, so the
+  // feeder lists them too, matching the Brother driver.
+  [supportedSizes addObject:Int(kDocumentTypeJISB5)];
+  [supportedSizes addObject:Int(kDocumentTypeJISB4)];
 
   // Current/default supported size: the platten for the flatbed, else the first
   // feeder size (US Letter). Both are guaranteed present in supportedSizes.
@@ -270,18 +279,17 @@ void BuildScannerParameters(CFMutableDictionaryRef dict,
 
   // Source (flatbed vs feeder) and duplex controls for the selected unit.
   // CAP_FEEDERENABLED tracks the selection. Duplex is a feeder-only capability:
-  // the feeder advertises a changeable CAP_DUPLEX / CAP_DUPLEXENABLED enumeration
-  // so Image Capture renders a 2-sided toggle; the flatbed advertises a fixed
-  // CAP_DUPLEX = TWDX_NONE (no control). See the constants note above.
+  // the feeder advertises CAP_DUPLEX / CAP_DUPLEXENABLED as TWON_ONEVALUE (a
+  // nonzero CAP_DUPLEX -> supportsDuplexScanning = YES, so Image Capture renders
+  // a 2-sided toggle; CAP_DUPLEXENABLED = 0 is the read/write toggle the host
+  // flips to 1) plus CAP_AUTOFEED. The flatbed has no duplexer, so it advertises
+  // a fixed CAP_DUPLEX = TWDX_NONE (no control). See the constants note above.
   deviceDict[@"CAP_FEEDERENABLED"] =
       OneValue(feeder ? kFeederEnabled : kFeederDisabled);
   if (feeder) {
-    deviceDict[@"CAP_DUPLEX"] =
-        Enumeration(@[ Int(kDuplexNone), Int(kDuplexOnePass) ], kDuplexNone,
-                    kDuplexNone);
-    deviceDict[@"CAP_DUPLEXENABLED"] =
-        Enumeration(@[ Int(kDuplexEnabledOff), Int(kDuplexEnabledOn) ],
-                    kDuplexEnabledOff, kDuplexEnabledOff);
+    deviceDict[@"CAP_DUPLEX"] = OneValue(kDuplexTwoPass);
+    deviceDict[@"CAP_DUPLEXENABLED"] = OneValue(kDuplexEnabledOff);
+    deviceDict[@"CAP_AUTOFEED"] = OneValue(kAutoFeedOn);
   } else {
     deviceDict[@"CAP_DUPLEX"] = OneValue(kDuplexNone);
   }
