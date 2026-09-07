@@ -234,6 +234,54 @@ TEST(RotatePortraitTest, RgbSwapsDimsAndMovesMarkerToTopRight) {
 }
 
 // ---------------------------------------------------------------------
+// kRgb JPEG quality: a lower quality reaches ImageIO as a smaller encode.
+// ---------------------------------------------------------------------
+
+// Builds a kRgb page whose raster is a per-pixel gradient/checker mix -- busy
+// enough that JPEG quality visibly changes the encoded size (a solid fill
+// would compress to nearly the same bytes at any quality).
+brscan::ScanResult MakeBusyRgbPage(int width, int height) {
+  std::vector<uint8_t> rgb(static_cast<size_t>(width) * height * 3);
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      const size_t base = (static_cast<size_t>(y) * width + x) * 3;
+      rgb[base + 0] = static_cast<uint8_t>((x * 7 + y * 3) & 0xFF);
+      rgb[base + 1] = static_cast<uint8_t>((x * 3 + y * 11) & 0xFF);
+      rgb[base + 2] = static_cast<uint8_t>(((x ^ y) * 5) & 0xFF);
+    }
+  }
+  brscan::ScanResult page;
+  page.format = brscan::PixelFormat::kRgb;
+  page.width = width;
+  page.height = height;
+  page.data = EncodeRgbAsJpeg(rgb, width, height);
+  return page;
+}
+
+TEST(RotatePortraitTest, LowerJpegQualityRotatesToFewerBytes) {
+  constexpr int kW = 64, kH = 96;
+  const brscan::ScanResult page = MakeBusyRgbPage(kW, kH);
+
+  const std::optional<brscan::ScanResult> low = RotatePortrait(page, 20);
+  const std::optional<brscan::ScanResult> high = RotatePortrait(page, 95);
+  ASSERT_TRUE(low.has_value());
+  ASSERT_TRUE(high.has_value());
+  ASSERT_FALSE(low->data.empty());
+  ASSERT_FALSE(high->data.empty());
+
+  // The quality actually reaches ImageIO's lossy-compression setting: the same
+  // rotated image encodes to strictly fewer bytes at quality 20 than at 95.
+  EXPECT_LT(low->data.size(), high->data.size())
+      << "low=" << low->data.size() << " high=" << high->data.size();
+
+  // Both are still valid JPEGs of the rotated (swapped) dimensions.
+  EXPECT_EQ(low->width, kH);
+  EXPECT_EQ(low->height, kW);
+  EXPECT_EQ(high->width, kH);
+  EXPECT_EQ(high->height, kW);
+}
+
+// ---------------------------------------------------------------------
 // Failure handling.
 // ---------------------------------------------------------------------
 

@@ -134,6 +134,13 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   std::cout << "[handle_event] FUNC=" << event.func
              << ": starting button scan\n";
 
+  // JPEG quality is a computer-side-only setting (no Touch-Panel wire field --
+  // see daemon/config.h's JpegQualityForFunc), so resolve it once here,
+  // straight from the config, and thread it into both JPEG encode sites: the
+  // high-speed rotation's color re-encode (RotatePortrait) and the JPEG
+  // output writer (the OutputSettings handed to WriteConfiguredOutput).
+  const int jpeg_quality = JpegQualityForFunc(cfg, event.func);
+
   // PlanButtonScan (daemon/button_plan.h) decides -- from the printer's
   // pushed config-command frame, this FUNC, and cfg -- both the Params to
   // scan with (the Touch-Panel precedence rule: the printer's own LCD-set
@@ -206,7 +213,8 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
                << (pages.size() == 1 ? " page" : " pages")
                << " back to portrait\n";
     for (brscan::ScanResult& page : pages) {
-      if (std::optional<brscan::ScanResult> rotated = RotatePortrait(page)) {
+      if (std::optional<brscan::ScanResult> rotated =
+              RotatePortrait(page, jpeg_quality)) {
         page = std::move(*rotated);
       } else {
         std::cerr << "[handle_event] FUNC=" << event.func
@@ -272,7 +280,11 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   }
 
   // `settings` was already decided by PlanButtonScan, above (including the
-  // OCR->searchable-PDF promotion -- see daemon/button_plan.cpp).
+  // OCR->searchable-PDF promotion -- see daemon/button_plan.cpp). JPEG quality
+  // is not part of that Touch-Panel plan (it is computer-side-only), so stamp
+  // the config-resolved value onto the settings the writer uses -- it takes
+  // effect only when the chosen format is JPEG.
+  settings.jpeg_quality = jpeg_quality;
   std::vector<std::string> written;
   const Status write_status =
       WriteConfiguredOutput(pages, settings, path, &written);

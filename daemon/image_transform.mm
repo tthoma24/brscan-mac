@@ -10,6 +10,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -89,9 +90,11 @@ std::vector<uint8_t> RotateToGray8(CGImageRef src, int in_width, int in_height,
 }
 
 // Re-encodes `image` as a baseline JPEG (the on-the-wire form of a kRgb
-// ScanResult, decoded by CreateCGImageFromScanResult's kRgb branch). Returns
-// std::nullopt on any ImageIO failure.
-std::optional<std::vector<uint8_t>> EncodeJpeg(CGImageRef image) {
+// ScanResult, decoded by CreateCGImageFromScanResult's kRgb branch) at
+// `quality` (0-100), passed to ImageIO as
+// kCGImageDestinationLossyCompressionQuality = quality/100.0. `quality` is
+// clamped to 0-100 defensively. Returns std::nullopt on any ImageIO failure.
+std::optional<std::vector<uint8_t>> EncodeJpeg(CGImageRef image, int quality) {
   CFMutableDataRef data = CFDataCreateMutable(kCFAllocatorDefault, 0);
   if (data == nullptr) return std::nullopt;
   CGImageDestinationRef dest =
@@ -100,7 +103,18 @@ std::optional<std::vector<uint8_t>> EncodeJpeg(CGImageRef image) {
     CFRelease(data);
     return std::nullopt;
   }
-  CGImageDestinationAddImage(dest, image, nullptr);
+  const int clamped = std::clamp(quality, 0, 100);
+  const CGFloat quality_fraction = static_cast<CGFloat>(clamped) / 100.0;
+  CFNumberRef quality_number =
+      CFNumberCreate(kCFAllocatorDefault, kCFNumberCGFloatType, &quality_fraction);
+  const void* keys[] = {kCGImageDestinationLossyCompressionQuality};
+  const void* values[] = {quality_number};
+  CFDictionaryRef props = CFDictionaryCreate(
+      kCFAllocatorDefault, keys, values, 1, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  CGImageDestinationAddImage(dest, image, props);
+  CFRelease(props);
+  CFRelease(quality_number);
   const bool finalized = CGImageDestinationFinalize(dest);
   CFRelease(dest);
   if (!finalized) {
@@ -114,11 +128,13 @@ std::optional<std::vector<uint8_t>> EncodeJpeg(CGImageRef image) {
   return out;
 }
 
-// Rotates `src` into a fresh RGBA bitmap and re-encodes it as JPEG.
+// Rotates `src` into a fresh RGBA bitmap and re-encodes it as JPEG at
+// `quality` (0-100; see EncodeJpeg).
 std::optional<std::vector<uint8_t>> RotateRgbToJpeg(CGImageRef src,
                                                     int in_width, int in_height,
                                                     int out_width,
-                                                    int out_height) {
+                                                    int out_height,
+                                                    int quality) {
   CGColorSpaceRef colorspace = CGColorSpaceCreateDeviceRGB();
   CGContextRef ctx = CGBitmapContextCreate(
       /*data=*/nullptr, static_cast<size_t>(out_width),
@@ -136,7 +152,7 @@ std::optional<std::vector<uint8_t>> RotateRgbToJpeg(CGImageRef src,
   CGImageRef rotated = CGBitmapContextCreateImage(ctx);
   CGContextRelease(ctx);
   if (rotated == nullptr) return std::nullopt;
-  std::optional<std::vector<uint8_t>> jpeg = EncodeJpeg(rotated);
+  std::optional<std::vector<uint8_t>> jpeg = EncodeJpeg(rotated, quality);
   CGImageRelease(rotated);
   return jpeg;
 }
@@ -167,8 +183,8 @@ std::vector<uint8_t> PackGray8ToBitonal(const std::vector<uint8_t>& gray,
 
 }  // namespace
 
-std::optional<brscan::ScanResult> RotatePortrait(
-    const brscan::ScanResult& page) {
+std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
+                                                 int jpeg_quality) {
   if (page.width <= 0 || page.height <= 0) return std::nullopt;
 
   CGImageRef src = brscan::CreateCGImageFromScanResult(page);
@@ -189,8 +205,8 @@ std::optional<brscan::ScanResult> RotatePortrait(
 
   switch (page.format) {
     case brscan::PixelFormat::kRgb: {
-      std::optional<std::vector<uint8_t>> jpeg =
-          RotateRgbToJpeg(src, in_width, in_height, out_width, out_height);
+      std::optional<std::vector<uint8_t>> jpeg = RotateRgbToJpeg(
+          src, in_width, in_height, out_width, out_height, jpeg_quality);
       CGImageRelease(src);
       if (!jpeg) {
         std::cerr << "[image_transform] could not re-encode rotated color "

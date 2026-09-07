@@ -325,6 +325,96 @@ TEST(WriteConfiguredOutputTest, PngSinglePageIsNotNumbered) {
 }
 
 // ---------------------------------------------------------------------
+// JPEG quality (OutputSettings::jpeg_quality).
+// ---------------------------------------------------------------------
+
+// A kGray page with busy per-pixel content, so JPEG quality visibly changes
+// the encoded file size (a solid fill would compress near-identically at any
+// quality).
+brscan::ScanResult MakeBusyGrayPage(int width, int height) {
+  std::vector<uint8_t> data(static_cast<size_t>(width) * height);
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      data[static_cast<size_t>(y) * width + x] =
+          static_cast<uint8_t>((x * 13 + y * 7) ^ (x * 5) & 0xFF);
+    }
+  }
+  return brscan::ScanResult{brscan::PixelFormat::kGray, width, height, data};
+}
+
+std::uintmax_t FileSize(const std::string& path) {
+  std::error_code ec;
+  const std::uintmax_t size = std::filesystem::file_size(path, ec);
+  return ec ? 0 : size;
+}
+
+TEST(WriteConfiguredOutputTest, LowJpegQualityWritesSmallerFileThanHigh) {
+  const std::vector<brscan::ScanResult> pages = {MakeBusyGrayPage(96, 64)};
+
+  OutputSettings low_settings;
+  low_settings.format = OutputFormat::kJpeg;
+  low_settings.jpeg_quality = 20;
+  std::vector<std::string> low_written;
+  ASSERT_EQ(WriteConfiguredOutput(pages, low_settings,
+                                  TempPath("q_low.jpg").string(), &low_written),
+            brscan::Status::kOk);
+  ASSERT_EQ(low_written.size(), 1u);
+
+  OutputSettings high_settings;
+  high_settings.format = OutputFormat::kJpeg;
+  high_settings.jpeg_quality = 95;
+  std::vector<std::string> high_written;
+  ASSERT_EQ(WriteConfiguredOutput(pages, high_settings,
+                                  TempPath("q_high.jpg").string(),
+                                  &high_written),
+            brscan::Status::kOk);
+  ASSERT_EQ(high_written.size(), 1u);
+
+  // The quality actually reaches ImageIO: the same page encodes to strictly
+  // fewer bytes at quality 20 than at 95.
+  const std::uintmax_t low_size = FileSize(low_written[0]);
+  const std::uintmax_t high_size = FileSize(high_written[0]);
+  EXPECT_GT(low_size, 0u);
+  EXPECT_GT(high_size, 0u);
+  EXPECT_LT(low_size, high_size)
+      << "low=" << low_size << " high=" << high_size;
+
+  RemoveAll(low_written);
+  RemoveAll(high_written);
+}
+
+TEST(WriteConfiguredOutputTest, PngIgnoresJpegQuality) {
+  // PNG is lossless: jpeg_quality has no effect on it, so a low- and a
+  // high-quality PNG write of the same page produce identical bytes.
+  const std::vector<brscan::ScanResult> pages = {MakeBusyGrayPage(96, 64)};
+
+  OutputSettings low_settings;
+  low_settings.format = OutputFormat::kPng;
+  low_settings.jpeg_quality = 20;
+  std::vector<std::string> low_written;
+  ASSERT_EQ(WriteConfiguredOutput(pages, low_settings,
+                                  TempPath("png_low.jpg").string(),
+                                  &low_written),
+            brscan::Status::kOk);
+
+  OutputSettings high_settings;
+  high_settings.format = OutputFormat::kPng;
+  high_settings.jpeg_quality = 95;
+  std::vector<std::string> high_written;
+  ASSERT_EQ(WriteConfiguredOutput(pages, high_settings,
+                                  TempPath("png_high.jpg").string(),
+                                  &high_written),
+            brscan::Status::kOk);
+
+  ASSERT_EQ(low_written.size(), 1u);
+  ASSERT_EQ(high_written.size(), 1u);
+  EXPECT_EQ(FileSize(low_written[0]), FileSize(high_written[0]));
+
+  RemoveAll(low_written);
+  RemoveAll(high_written);
+}
+
+// ---------------------------------------------------------------------
 // Document separation (kEveryImage / kEveryPage).
 // ---------------------------------------------------------------------
 

@@ -61,15 +61,30 @@ enum class TiffCompression { kLzw, kG3, kG4 };
 // the same as kEveryImage, rather than guessing at sheet-grouping.
 enum class OutputSeparation { kCombine, kEveryImage, kEveryPage };
 
+// The default JPEG quality (0-100) when no `<dest>.jpeg_quality` key is set,
+// mirroring the vendor driver's "File Size" slider sitting near its high-
+// quality end. Shared by OutputSettings::jpeg_quality below, the config
+// parser's per-dest fields, and image_transform.h's rotation re-encode, so a
+// JPEG the daemon writes and a JPEG it re-encodes after a high-speed rotation
+// use the same quality absent an override. Maps to ImageIO's
+// kCGImageDestinationLossyCompressionQuality as `jpeg_quality / 100.0`.
+constexpr int kDefaultJpegQuality = 90;
+
 // One destination's output settings (see daemon/config.h, which parses the
 // per-FUNC keys into these). Defaults match the config parser's defaults:
-// native format, LZW, combine-all.
+// native format, LZW, combine-all, default JPEG quality.
 struct OutputSettings {
   OutputFormat format = OutputFormat::kNative;
   TiffCompression tiff_compression = TiffCompression::kLzw;
   OutputSeparation separation = OutputSeparation::kCombine;
   int separate_n = 1;       // Used when separation != kCombine (>= 1).
   bool searchable = false;  // PDF only: lay a Vision OCR text layer.
+
+  // JPEG lossy-compression quality (0-100), applied only when `format` is
+  // kJpeg -- TIFF/PNG/PDF/native ignore it. Passed to ImageIO as
+  // kCGImageDestinationLossyCompressionQuality = `jpeg_quality / 100.0`. See
+  // kDefaultJpegQuality above.
+  int jpeg_quality = kDefaultJpegQuality;
 };
 
 // Writes `pages` to disk as `settings.format`, deriving each output path
@@ -92,7 +107,8 @@ struct OutputSettings {
 //   - kJpeg / kPng: one file per page, numbered `-NNN` when there is more
 //     than one page (via brscan::cli::PagePath). Separation does not apply
 //     to these per-page formats -- kEveryImage/kEveryPage behave like
-//     kCombine.
+//     kCombine. kJpeg encodes at `settings.jpeg_quality` (0-100); kPng, a
+//     lossless format, ignores it.
 //   - kText / kHtml / kRtf: one `.txt` / `.html` / `.rtf` file holding the
 //     Vision-recognized text of every page (see daemon/action_ocr.h's
 //     WriteRecognizedText). Single-file output, like kNative -- document

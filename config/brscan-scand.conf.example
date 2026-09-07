@@ -162,6 +162,22 @@
 
 # file.skip_blank = on
 
+# --- Per-destination JPEG quality --------------------------------------------
+#
+# The JPEG lossy-compression quality per destination, like the vendor driver's
+# "File Size: Small ... High Quality" slider. Applies only to JPEG output
+# (<dest>.format = jpeg) and to the color re-encode done when rotating a
+# high-speed page back to portrait -- tiff/png/pdf/native ignore it. Higher is
+# larger and less lossy. Unlike the toggles above, this is a purely
+# computer-side setting: the printer's LCD has no JPEG-quality field, so it is
+# always taken from here (there is no Touch-Panel ON/OFF precedence). An
+# integer out of range clamps to 0-100; a non-integer value is ignored and
+# leaves the default.
+#
+#   <dest>.jpeg_quality   integer 0-100 (default 90)
+
+# image.jpeg_quality = 85
+
 # --- Destination action settings --------------------------------------------
 
 # IMAGE destination: the app that opens the saved scan, as `open -a <app>`.

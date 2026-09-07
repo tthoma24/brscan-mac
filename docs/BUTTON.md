@@ -130,6 +130,19 @@ Touch-Panel ON the panel's `W=` drives it; with Touch-Panel OFF the
 cannot be decoded is treated as non-blank (never dropped), and if *every*
 page looks blank one page is kept so the scan still produces output.
 
+**JPEG quality is computer-side only.** The `<dest>.jpeg_quality` config key
+(integer `0-100`, default `90`) sets the JPEG lossy-compression quality --
+like the vendor driver's "File Size: Small ... High Quality" slider. It
+applies to JPEG output (`<dest>.format = jpeg`) and to the color re-encode of
+a high-speed rotated page (`daemon/image_transform.h`'s `RotatePortrait`);
+tiff/png/pdf/native ignore it. Unlike the toggles above, there is **no**
+Touch-Panel counterpart: the LCD config vocabulary carries no quality key, so
+this is always taken from the config with no ON/OFF precedence. The daemon
+resolves it once per event (`JpegQualityForFunc`) and maps it to ImageIO's
+`kCGImageDestinationLossyCompressionQuality` as `jpeg_quality / 100.0`. An
+out-of-range integer clamps to `0-100`; a non-integer value is ignored and
+leaves the default.
+
 ## How it works
 
 The Scan button uses Brother's own registration-and-notification mechanism,

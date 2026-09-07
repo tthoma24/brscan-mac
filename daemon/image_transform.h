@@ -4,6 +4,7 @@
 
 #include "brscan/scanner.h"
 #include "brscan/types.h"
+#include "output_writer.h"  // brscan::scand::kDefaultJpegQuality
 
 // Host-side page rotation for the scan-button "ADF High Speed" mode (the
 // config command's `X=1`; see reference/protocol-notes-button-options.md and
@@ -32,10 +33,18 @@ namespace brscan::scand {
 // confirm which. If real pages come out upside-down, flip that one constant
 // from clockwise to counter-clockwise -- nothing else changes.
 //
+// A kRgb page is re-encoded as JPEG after rotation (its on-the-wire form),
+// at `jpeg_quality` (0-100) -- so the high-speed rotation's second-generation
+// JPEG loss honors the destination's `<dest>.jpeg_quality` (see
+// output_writer.h's kDefaultJpegQuality) rather than ImageIO's unspecified
+// default. kGray/kBitonal pages re-encode losslessly and ignore it. The value
+// is clamped to 0-100 defensively.
+//
 // Returns std::nullopt on any decode or re-encode failure (an unreadable
 // page, an unsupported bitmap configuration, a JPEG encode that fails). The
 // caller logs and leaves the original page in place rather than failing the
 // whole job over one page that could not be rotated.
-std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page);
+std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
+                                                 int jpeg_quality = kDefaultJpegQuality);
 
 }  // namespace brscan::scand
