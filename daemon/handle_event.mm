@@ -1,5 +1,6 @@
 #include "handle_event.h"
 
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
@@ -306,22 +307,59 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     pages = std::move(kept);
   }
 
-  // Best-effort: if save_dir already exists (the common case after the
-  // first scan) this is a no-op; if it can't be created, WriteOutput below
-  // will fail to open the file and report that instead.
-  std::error_code ec;
-  std::filesystem::create_directories(cfg.save_dir, ec);
+  // Where this scan is written. FILE/IMAGE/OCR write to save_dir, where the
+  // file *is* the deliverable. EMAIL keeps no persistent copy there (issue
+  // #20): its scan is written to a private, per-press temporary directory,
+  // attached to a Mail draft from there, and removed once Mail has ingested
+  // it (PerformEmailAction, daemon/actions.cpp, removes the file(s); the
+  // now-empty temp directory is removed below). `output_dir` is what every
+  // path-building and save_dir-containment step below uses, so the same
+  // untrusted-field sanitization and escape checks apply to the temp
+  // directory too.
+  const bool is_email = (event.func == kFuncEmail);
+  std::filesystem::path email_temp_dir;
+  std::string output_dir = cfg.save_dir;
+  if (is_email) {
+    std::error_code tmp_ec;
+    const std::filesystem::path tmp_base =
+        std::filesystem::temp_directory_path(tmp_ec);
+    if (tmp_ec) {
+      std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
+                 << ": no temp directory available for EMAIL: "
+                 << tmp_ec.message() << "\n";
+      return Status::kIoError;
+    }
+    // mkdtemp needs a mutable, NUL-terminated "XXXXXX" template buffer; it
+    // creates the directory (mode 0700) and rewrites the template in place
+    // with the unique name.
+    std::string tmpl = (tmp_base / "brscan-email-XXXXXX").string();
+    std::vector<char> tmpl_buf(tmpl.begin(), tmpl.end());
+    tmpl_buf.push_back('\0');
+    if (::mkdtemp(tmpl_buf.data()) == nullptr) {
+      std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
+                 << ": could not create a temp directory for EMAIL\n";
+      return Status::kIoError;
+    }
+    email_temp_dir = std::string(tmpl_buf.data());
+    output_dir = email_temp_dir.string();
+  }
 
-  const std::string path =
-      BuildOutputPath(cfg.save_dir, event, pages[0].format);
+  // Best-effort: if output_dir already exists (the common case after the
+  // first scan; always true for EMAIL's just-created temp dir) this is a
+  // no-op; if it can't be created, WriteOutput below will fail to open the
+  // file and report that instead.
+  std::error_code ec;
+  std::filesystem::create_directories(output_dir, ec);
+
+  const std::string path = BuildOutputPath(output_dir, event, pages[0].format);
 
   // Second, independent check on top of BuildOutputPath()'s own
   // sanitization (see its doc comment in handle_event.h): confirm the
-  // fully-built, resolved path actually lands inside save_dir before
+  // fully-built, resolved path actually lands inside output_dir before
   // writing anything there.
-  if (!IsPathWithinDirectory(path, cfg.save_dir)) {
-    std::cerr << "[handle_event] refusing to write outside save_dir: '"
-               << path << "' is not under '" << cfg.save_dir << "'\n";
+  if (!IsPathWithinDirectory(path, output_dir)) {
+    std::cerr << "[handle_event] refusing to write outside output dir: '"
+               << path << "' is not under '" << output_dir << "'\n";
     return Status::kIoError;
   }
 
@@ -356,32 +394,60 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   // re-validate each returned path rather than trusting that derivation
   // blindly.
   for (const std::string& file : written) {
-    if (!IsPathWithinDirectory(file, cfg.save_dir)) {
-      std::cerr << "[handle_event] refusing to act on output outside "
-                    "save_dir: '"
-                 << file << "' is not under '" << cfg.save_dir << "'\n";
+    if (!IsPathWithinDirectory(file, output_dir)) {
+      std::cerr << "[handle_event] refusing to act on output outside the "
+                    "output dir: '"
+                 << file << "' is not under '" << output_dir << "'\n";
       return Status::kIoError;
     }
   }
 
-  *saved_path = written.front();
   const char* const precedence = touch_panel_on ? "touch-panel" : "config";
-  if (written.size() == 1) {
-    std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": wrote "
-               << written.front() << " (" << precedence << " settings)\n";
+  if (is_email) {
+    // EMAIL keeps no copy in save_dir (issue #20): these paths are in a
+    // throwaway temp directory, so don't log them as "wrote <save_dir
+    // path>". PerformEmailAction below attaches them to a Mail draft and
+    // removes them; it logs the "no copy kept" confirmation.
+    std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": scanned "
+               << written.size() << (written.size() == 1 ? " file" : " files")
+               << " to a temp directory for emailing (" << precedence
+               << " settings)\n";
   } else {
-    // List every written path (not just the first) so the daemon log
-    // reflects everything a multi-page/every:N-separated scan actually
-    // produced.
-    std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": wrote "
-               << written.size() << " files (" << precedence
-               << " settings):\n";
-    for (const std::string& file : written) {
-      std::cout << "  " << file << "\n";
+    *saved_path = written.front();
+    if (written.size() == 1) {
+      std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": wrote "
+                 << written.front() << " (" << precedence << " settings)\n";
+    } else {
+      // List every written path (not just the first) so the daemon log
+      // reflects everything a multi-page/every:N-separated scan actually
+      // produced.
+      std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": wrote "
+                 << written.size() << " files (" << precedence
+                 << " settings):\n";
+      for (const std::string& file : written) {
+        std::cout << "  " << file << "\n";
+      }
     }
   }
 
-  return PerformAction(event.func, written, cfg, runner);
+  const Status action_status = PerformAction(event.func, written, cfg, runner);
+
+  // EMAIL cleanup: on success, PerformEmailAction has removed the temp
+  // attachment file(s), so remove the now-empty temp directory too and
+  // leave saved_path empty -- there is no persisted file to point at (issue
+  // #20). On failure, PerformEmailAction kept the file(s); leave the temp
+  // directory in place and point saved_path at the first so the scan stays
+  // discoverable.
+  if (is_email) {
+    if (action_status == Status::kOk) {
+      std::error_code rm_ec;
+      std::filesystem::remove(email_temp_dir, rm_ec);
+    } else {
+      *saved_path = written.front();
+    }
+  }
+
+  return action_status;
 }
 
 }  // namespace brscan::scand
