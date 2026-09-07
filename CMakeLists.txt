@@ -9,6 +9,11 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
+# Shared ad-hoc code-signing helper (brscan_adhoc_sign), used by both macOS
+# bundle targets below: the ICA module and the Plan 1e config app.
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+include(BrscanCodesign)
+
 # The scanner protocol core. Front ends (CLI, ICA module, SANE backend) link
 # against this and never talk to a socket or the ICA framework directly.
 add_library(brscan
@@ -215,13 +220,65 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
   # Ad-hoc code signature: sufficient for the developer-built module. A module
   # in /Library/Image Capture/Devices/ is loaded into an Apple host; ad-hoc
   # signing is enough for a local/dev install (Developer-ID + notarization is a
-  # documented future step for redistribution — see the runbook's Signing
-  # section). Ad-hoc costs nothing and lets every local iteration be a plain
-  # rebuild.
-  add_custom_command(TARGET brscan-ica POST_BUILD
-    COMMAND codesign --force --sign - --timestamp=none
-      $<TARGET_BUNDLE_DIR:brscan-ica>
-    COMMENT "Ad-hoc signing the ICA module bundle")
+  # documented future step for redistribution — see docs/DISTRIBUTION.md).
+  # Ad-hoc costs nothing and lets every local iteration be a plain rebuild. The
+  # shared brscan_adhoc_sign helper signs *and* verifies the bundle.
+  brscan_adhoc_sign($<TARGET_BUNDLE_DIR:brscan-ica> DEPENDS brscan-ica)
+endif()
+
+# Plan 1e — the "Brscan Config" GUI, packaged as a double-clickable `.app`.
+#
+# The GUI is two SwiftPM packages under gui/ (BrscanConfigCore, a library, and
+# BrscanConfigApp, the SwiftUI app). They build and test on their own with
+# `swift build`/`swift test`; this target wraps `swift build -c release` in a
+# CMake custom target so the repo keeps its single `cmake --build build` story
+# and the app is bundled + ad-hoc signed alongside the ICA module. Guarded by an
+# option (mirroring BRSCAN_BUILD_ICA_MODULE) so a non-APPLE or opt-out build is
+# unaffected; ON by default on Apple.
+option(BRSCAN_BUILD_CONFIG_APP "Build the config GUI .app bundle" ON)
+if(APPLE AND BRSCAN_BUILD_CONFIG_APP)
+  set(CONFIG_APP_MIN_MACOS "13.0")           # matches Package.swift .macOS(.v13)
+  set(CONFIG_APP_BUNDLE "${CMAKE_BINARY_DIR}/gui/Brscan Config.app")
+
+  # `swift` drives the SwiftPM build; required, like the module's frameworks.
+  find_program(SWIFT_EXECUTABLE swift REQUIRED)
+
+  # Fill the min-OS placeholder into a concrete Info.plist, and emit the
+  # Contents/PkgInfo (APPL????) the same way the ICA target does.
+  configure_file(
+    ${CMAKE_SOURCE_DIR}/gui/BrscanConfigApp/Info.plist.in
+    ${CMAKE_BINARY_DIR}/gui/Info.plist
+    @ONLY)
+  file(WRITE ${CMAKE_BINARY_DIR}/gui/PkgInfo "APPL????")
+
+  # Build the app in release with its SwiftPM scratch tree kept under build/
+  # (--scratch-path), never in the source tree, then hand-assemble the bundle:
+  # Contents/{MacOS/BrscanConfigApp, Info.plist, PkgInfo, Resources/}. SwiftPM
+  # leaves a `release` symlink in the scratch dir pointing at the arch-specific
+  # bin dir, so the release binary is at <scratch>/release/BrscanConfigApp.
+  set(CONFIG_APP_SCRATCH "${CMAKE_BINARY_DIR}/gui/swiftpm")
+  add_custom_target(brscan-config-app ALL
+    COMMAND ${SWIFT_EXECUTABLE} build -c release
+      --package-path ${CMAKE_SOURCE_DIR}/gui/BrscanConfigApp
+      --scratch-path ${CONFIG_APP_SCRATCH}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+      "${CONFIG_APP_BUNDLE}/Contents/MacOS"
+      "${CONFIG_APP_BUNDLE}/Contents/Resources"
+    COMMAND ${CMAKE_COMMAND} -E copy
+      ${CONFIG_APP_SCRATCH}/release/BrscanConfigApp
+      "${CONFIG_APP_BUNDLE}/Contents/MacOS/BrscanConfigApp"
+    COMMAND ${CMAKE_COMMAND} -E copy
+      ${CMAKE_BINARY_DIR}/gui/Info.plist
+      "${CONFIG_APP_BUNDLE}/Contents/Info.plist"
+    COMMAND ${CMAKE_COMMAND} -E copy
+      ${CMAKE_BINARY_DIR}/gui/PkgInfo
+      "${CONFIG_APP_BUNDLE}/Contents/PkgInfo"
+    COMMENT "Building + assembling Brscan Config.app"
+    VERBATIM)
+
+  # Ad-hoc sign + verify the assembled bundle with the same shared helper the
+  # ICA module uses (no duplicated codesign line).
+  brscan_adhoc_sign("${CONFIG_APP_BUNDLE}" DEPENDS brscan-config-app)
 endif()
 
 # Tests.

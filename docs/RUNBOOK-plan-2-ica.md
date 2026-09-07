@@ -344,50 +344,14 @@ The definitive pass is visual and cannot be automated:
 Record which happened. A rejection is a finding, not a failure — it tells us the
 real bar (schema fix, or Developer-ID + notarization) before Plan 2 continues.
 
-## Signing: what we can and cannot verify here
+## Signing and distribution
 
-- **Verified locally:** the bundle builds, links `ICADevices`, and takes a valid
-  ad-hoc signature (`codesign --verify --strict` passes).
-- **Needs a real device / privileged install to answer:** whether icdd loads an
-  **ad-hoc** module, or enforces library validation and demands a
-  **Developer-ID-signed + notarized** bundle even to load. Apple's own module in
-  the system directory carries the `library-validation` flag and is Team-signed,
-  which is a strong hint the bar is high — but only the install test on the
-  target OS confirms it. This project has no Developer-ID certificate available
-  in this environment, so the notarization path cannot be exercised here; if the
-  ad-hoc install does not load, that is where the effort estimate changes (every
-  load test becomes a notarization round trip) and Plan 3 becomes the better bet.
-
-## Distribution: Developer-ID + notarization (documented, NOT wired)
-
-**Not required for a local/dev install — ad-hoc signing suffices for the
-developer-built module** (the CMake POST_BUILD ad-hoc signs it, and
-`ica-module/install.sh` copies it into `/Library/Image Capture/Devices/`). This
-section is a forward-looking note for redistributing the module to other
-machines, and is deliberately **not** part of the build: it needs a paid Apple
-Developer account and credentials, which this project does not wire into CMake.
-
-To ship the bundle to another Mac, replace the ad-hoc signature with a
-Developer-ID one and notarize it (all manual, run by a human with credentials):
-
-```bash
-# 1. Re-sign with a Developer ID Application cert (hardened runtime).
-codesign --force --options runtime --timestamp \
-  --sign "Developer ID Application: <Name> (<TEAMID>)" \
-  "build/BrScan Mac ICA.app"
-
-# 2. Submit to Apple's notary service and wait for the result.
-ditto -c -k --keepParent "build/BrScan Mac ICA.app" "BrScan Mac ICA.zip"
-xcrun notarytool submit "BrScan Mac ICA.zip" \
-  --apple-id "<apple-id>" --team-id "<TEAMID>" --password "<app-specific-pw>" \
-  --wait
-
-# 3. Staple the notarization ticket into the bundle.
-xcrun stapler staple "build/BrScan Mac ICA.app"
-```
-
-None of the above is added as a CMake step — it would require credentials in the
-build. Ad-hoc signing stays the default and is enough for local development.
+Signing (the ad-hoc signature that ships today) and the future Developer-ID +
+notarization path are documented once, shared with the config app, in
+[DISTRIBUTION.md](DISTRIBUTION.md). Module-load specific note: ad-hoc is
+*verified locally* (the bundle builds, links `ICADevices`, and passes
+`codesign --verify --strict`), but whether icdd *loads* an ad-hoc module or
+enforces library validation is the open A-question the re-test above settles.
 
 ## What this runbook does NOT cover
 
