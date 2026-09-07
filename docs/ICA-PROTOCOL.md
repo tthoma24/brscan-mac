@@ -281,6 +281,43 @@ every notification so the host correlates them to the session; using the Start
 trigger object instead is a likely cause of a scan that never completes in the
 UI.
 
+### ADF feeder empty (no-pages mapping) — Task 23
+
+When the **feeder** is the source and `RunScan` returns with **no page** and a
+status of `Status::kNoPaper` or `Status::kTimeout`, the module treats it as a
+clean **feeder-empty** outcome instead of a generic failure (the pure decision is
+`brscan::ica::ClassifyScanOutcome` in `ica-module/scan_outcome.h`, unit-tested in
+`tests/scan_outcome_test.cpp`). It then:
+
+1. Posts a `kICANotificationTypeDeviceStatusInfo` carrying
+   `kICANotificationSubTypeKey` = `kICANotificationSubTypeDocumentNotLoaded`
+   (device object, plain `ICDSendNotification`). This is the module-side path
+   behind the client's readonly
+   `ICScannerFunctionalUnitDocumentFeeder.documentLoaded`
+   (`ImageCaptureCore/ICScannerFunctionalUnits.h`: it changes "if the scanner
+   module has the capability to detect this state"), mirroring the documented
+   `WarmUp*` status notifications that ride the same key + type.
+2. Ends the scan with `ScannerScanDone` whose `kICAErrorKey` is
+   **`-9931`** (`ICReturnScannerFailedToCompleteScan`,
+   `ImageCaptureCore/ImageCaptureConstants.h`) rather than the generic
+   `kICADeviceInternalErr` (`-9912`, `ICADevices/ICAApplication.h`). **Neither
+   the module-side `ICAError` enum nor the client-facing `ICReturn` enum defines
+   a dedicated "no documents in the feeder" / paper-empty code**; `-9931` is the
+   closest — the scan-did-not-complete code Image Capture surfaces on the scanner
+   path — and is strictly more specific than `-9912`. The `kICAErrorKey` value
+   flows through to the client by number.
+
+**Flatbed is unchanged** (`kTimeout`/`kNoPaper` there still map to
+`kICADeviceInternalErr`), as is any scan that produced at least one page.
+
+**Not fixed here:** the module does **not** shorten the scan timeout, so an empty
+feeder still hangs ~24 s before this clean outcome is reported. *Fast* empty-ADF
+detection in `libbrscan` is a separate follow-up pending an empty-ADF wire
+capture. **Unverified (device-in-the-loop):** that Image Capture renders `-9931`
+and `DocumentNotLoaded` as a user-visible "feeder empty" message (rather than a
+generic scan failure) is inferred from the public header names and must be
+confirmed on the device — see the re-test loop below.
+
 ### Object registration
 
 `ICDScannerNewObjectInfoCreated(deviceObjectInfo, 0, &newObj)`

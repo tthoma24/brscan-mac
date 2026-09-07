@@ -59,6 +59,7 @@
 #include "buffer_descriptor.h"
 #include "decode_jpeg.h"  // libbrscan private header (on the libbrscan inc dir).
 #include "file_transfer.h"
+#include "scan_outcome.h"
 #include "scan_parameters.h"
 #include "scan_translate.h"
 
@@ -1064,6 +1065,20 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 // waited-for notification: the host sets it when the user cancels the scan.
 constexpr UInt32 kUserCanceledReplyCode = static_cast<UInt32>(-128);
 
+// ADF feeder-empty outcome, reported in the ScannerScanDone kICAErrorKey when an
+// ADF scan produced no page (see RunScanSynchronous). Neither the module-side
+// ICAError enum (ICADevices/ICAApplication.h: kICACommunicationErr = -9900 …
+// kICASecureSessionRequired = -9923) nor the client-facing ICReturn enum
+// (ImageCaptureCore/ImageCaptureConstants.h) defines a "no documents in the
+// feeder" / paper-empty code. The closest is ICReturnScannerFailedToCompleteScan
+// (ImageCaptureConstants.h, -9931) -- the scan-did-not-complete code Image
+// Capture surfaces on the scanner path -- which is strictly more specific than
+// the generic kICADeviceInternalErr (-9912) the module reported for every non-OK
+// status. The kICAErrorKey value flows through to the client by number (the
+// -9912 baseline confirms this), so it is used as a value only, not imported
+// (matching kUserCanceledReplyCode above; ICADevices does not declare it).
+constexpr ICAError kAdfFeederEmptyError = -9931;  // ICReturnScannerFailedToCompleteScan
+
 // Outcome of handing one page back: delivered, host cancelled at this page
 // boundary (progress replyCode == userCanceledErr), or a delivery/encode error.
 enum class PageResult { kOk, kCanceled, kError };
@@ -1094,6 +1109,38 @@ ICAError SendScannerNotification(CFMutableDictionaryRef dict,
                                     : ICDSendNotification(&pb);
   if (outReplyCode) *outReplyCode = pb.replyCode;
   return err;
+}
+
+// Reports the document feeder as empty to the host: posts a
+// kICANotificationTypeDeviceStatusInfo carrying kICANotificationSubTypeKey =
+// kICANotificationSubTypeDocumentNotLoaded, referenced to the DEVICE object like
+// every scanner notification (Task 15). This is the module-side path behind the
+// client's readonly ICScannerFunctionalUnitDocumentFeeder.documentLoaded, which
+// ImageCaptureCore/ICScannerFunctionalUnits.h documents as changing "if the
+// scanner module has the capability to detect this state". The subtype-key
+// mechanism mirrors the documented WarmUp* status notifications
+// (kICANotificationSubTypeWarmUpStarted/Done ride the same key + type); all four
+// symbols resolve from ICADevices.
+//
+// CLEAN-ROOM / UNVERIFIED: that the host maps DocumentNotLoaded onto
+// documentLoaded = NO (and surfaces a feeder-empty message) is inferred from the
+// public header names, not confirmed against a live icdd trace -- see the
+// device-in-the-loop re-test in docs/ICA-PROTOCOL.md.
+void NotifyDocumentFeederEmpty(ICAObject deviceObject) {
+  CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  if (dict == nullptr) return;
+  CFDictionarySetValue(dict, kICANotificationSubTypeKey,
+                       kICANotificationSubTypeDocumentNotLoaded);
+  const ICAError err = SendScannerNotification(
+      dict, deviceObject, kICANotificationTypeDeviceStatusInfo,
+      /*waitForReply=*/false);
+  CFRelease(dict);
+  os_log(Log(),
+         "SyncScan: posted DeviceStatusInfo/DocumentNotLoaded (feeder empty) "
+         "err=%d",
+         err);
 }
 
 // Hands ONE live band back as an IMAGE-info chunk in a ScanProgressStatus
@@ -1446,12 +1493,31 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
            "SyncScan: RunScan -> status=%d pages=%zu bands=%ld canceled=%d",
            (int)scanStatus, pages.size(), bandCount, canceled);
 
-    if (scanStatus == brscan::Status::kCancelled) {
+    // Classify the finished scan (pure; unit-tested in scan_outcome_test).
+    const brscan::ica::ScanOutcome outcome = brscan::ica::ClassifyScanOutcome(
+        params.source, /*produced_pages=*/!pages.empty(), scanStatus);
+
+    if (outcome == brscan::ica::ScanOutcome::kCanceled) {
       // Clean host cancel: the bands already delivered stay on the host; write
       // no file and end with a clean ScannerScanDone (Start releases the scoped
       // URL, and transport is disconnected below -- nothing leaks).
       canceled = true;
-    } else if (scanStatus != brscan::Status::kOk) {
+    } else if (outcome == brscan::ica::ScanOutcome::kAdfFeederEmpty) {
+      // ADF with an empty feeder: no page ever came off the feeder (kNoPaper),
+      // or the wait elapsed with nothing fed (kTimeout -- the ~24 s hang until
+      // fast empty-ADF detection lands in libbrscan from a wire capture; the
+      // timeout is deliberately NOT shortened here). Report a clean feeder-empty
+      // outcome instead of the generic kICADeviceInternalErr: tell the host the
+      // feeder has no document loaded (so the client's readonly documentLoaded
+      // reflects it) and end the scan with the feeder-empty error. Flatbed, and
+      // any scan that produced pages, are unaffected.
+      NotifyDocumentFeederEmpty(deviceObject);
+      finalErr = kAdfFeederEmptyError;
+      os_log(Log(),
+             "SyncScan: ADF empty (status=%d, pages=0) -> feeder-empty err=%d "
+             "(ICReturnScannerFailedToCompleteScan)",
+             (int)scanStatus, finalErr);
+    } else if (outcome == brscan::ica::ScanOutcome::kFailed) {
       finalErr = kICADeviceInternalErr;
     } else if (fileTransfer) {
       // FILE path only: the bands drove the progress bar; now encode each whole

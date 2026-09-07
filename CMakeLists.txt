@@ -276,6 +276,7 @@ if(BUILD_TESTING)
     tests/scan_translate_test.cpp
     ica-module/file_transfer.cpp
     tests/file_transfer_test.cpp
+    tests/scan_outcome_test.cpp
   )
   target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests daemon tools
