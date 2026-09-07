@@ -127,6 +127,20 @@ struct Config {
   bool ocr_skip_blank = false;
   bool email_skip_blank = false;
 
+  // Per-FUNC JPEG quality (0-100; see output_writer.h's kDefaultJpegQuality),
+  // like the vendor driver's "File Size: Small ... High Quality" slider.
+  // Applies only to the routes that emit JPEG (file/image/email as
+  // `<dest>.format = jpeg`, and the high-speed rotation's color re-encode --
+  // see daemon/image_transform.h). Unlike the toggles above this is a purely
+  // computer-side setting: there is no Touch-Panel wire field for JPEG quality
+  // (the LCD config vocabulary carries no quality key), so it is ALWAYS read
+  // from this config via JpegQualityForFunc, with no Touch-Panel ON/OFF
+  // precedence. Defaults to kDefaultJpegQuality (90).
+  int file_jpeg_quality = kDefaultJpegQuality;
+  int image_jpeg_quality = kDefaultJpegQuality;
+  int ocr_jpeg_quality = kDefaultJpegQuality;
+  int email_jpeg_quality = kDefaultJpegQuality;
+
   // OCR-destination output sub-format (see daemon/action_ocr.h's
   // OcrTextFormat and output_writer.h's OutputFormat text sinks): the file
   // the OCR destination produces when its scan-button `T=` sub-format is
@@ -241,6 +255,13 @@ Config DefaultConfig();
 //                        IsBlankPage judges empty before writing.
 //                        Touch-Panel-ON ignores this key and uses the
 //                        printer's own config command's W= instead.
+//   <dest>.jpeg_quality  integer 0-100 (default 90). The JPEG lossy-
+//                        compression quality for JPEG output (`<dest>.format
+//                        = jpeg`) and for the high-speed rotation's color
+//                        re-encode. Out-of-range values clamp to 0-100; a
+//                        non-integer value leaves the default. Computer-side
+//                        only -- there is no Touch-Panel field for it, so it
+//                        has no ON/OFF precedence (always read from config).
 // where <dest> is one of file, image, ocr, email.
 Config ParseConfig(const std::string& text);
 
@@ -314,6 +335,15 @@ bool HighSpeedForFunc(const Config& cfg, const std::string& func);
 // mirroring ParamsForFunc's FILE-as-safe-fallback behavior. False means off
 // (no `<dest>.skip_blank` configured, or explicitly configured off).
 bool SkipBlankForFunc(const Config& cfg, const std::string& func);
+
+// The configured `<dest>.jpeg_quality` (0-100; see Config::file_jpeg_quality
+// above) for a button event's FUNC (FILE/IMAGE/OCR/EMAIL, matched
+// case-sensitively per the wire protocol -- see daemon/button_listener.h's
+// ButtonEvent::func). Returns cfg.file_jpeg_quality for any other string,
+// mirroring ParamsForFunc's FILE-as-safe-fallback behavior. Unlike the other
+// per-FUNC accessors this has no Touch-Panel counterpart: JPEG quality is a
+// computer-side-only setting, always taken from this config.
+int JpegQualityForFunc(const Config& cfg, const std::string& func);
 
 // True if `func` is one of the four known FUNCs (kFuncFile/kFuncImage/
 // kFuncOcr/kFuncEmail above), false for anything else. `func` comes

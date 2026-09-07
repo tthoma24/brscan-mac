@@ -649,6 +649,82 @@ TEST(SkipBlankForFuncTest, FallsBackToFileForUnknownFunc) {
   EXPECT_TRUE(SkipBlankForFunc(cfg, "BOGUS"));
 }
 
+// ---------------------------------------------------------------------
+// JPEG quality (`<dest>.jpeg_quality`).
+// ---------------------------------------------------------------------
+
+TEST(DefaultConfigTest, JpegQualityDefaultsTo90) {
+  const Config cfg = DefaultConfig();
+  EXPECT_EQ(cfg.file_jpeg_quality, kDefaultJpegQuality);
+  EXPECT_EQ(cfg.image_jpeg_quality, kDefaultJpegQuality);
+  EXPECT_EQ(cfg.ocr_jpeg_quality, kDefaultJpegQuality);
+  EXPECT_EQ(cfg.email_jpeg_quality, kDefaultJpegQuality);
+  EXPECT_EQ(kDefaultJpegQuality, 90);
+}
+
+TEST(ParseConfigTest, AppliesJpegQualityForEachDest) {
+  const Config cfg = ParseConfig(
+      "file.jpeg_quality=10\n"
+      "image.jpeg_quality=50\n"
+      "ocr.jpeg_quality=75\n"
+      "email.jpeg_quality=100\n");
+  EXPECT_EQ(cfg.file_jpeg_quality, 10);
+  EXPECT_EQ(cfg.image_jpeg_quality, 50);
+  EXPECT_EQ(cfg.ocr_jpeg_quality, 75);
+  EXPECT_EQ(cfg.email_jpeg_quality, 100);
+}
+
+TEST(ParseConfigTest, JpegQualityAcceptsBoundaryValues) {
+  EXPECT_EQ(ParseConfig("file.jpeg_quality=0\n").file_jpeg_quality, 0);
+  EXPECT_EQ(ParseConfig("file.jpeg_quality=100\n").file_jpeg_quality, 100);
+}
+
+TEST(ParseConfigTest, JpegQualityClampsOutOfRange) {
+  // Out-of-range integers clamp to the nearest end of 0-100 rather than being
+  // rejected (see ParseJpegQuality).
+  EXPECT_EQ(ParseConfig("file.jpeg_quality=150\n").file_jpeg_quality, 100);
+  EXPECT_EQ(ParseConfig("file.jpeg_quality=-5\n").file_jpeg_quality, 0);
+}
+
+TEST(ParseConfigTest, MissingJpegQualityKeyLeavesDefault) {
+  const Config cfg = ParseConfig("file.mode=gray\n");
+  EXPECT_EQ(cfg.file_jpeg_quality, kDefaultJpegQuality);
+}
+
+TEST(ParseConfigTest, GarbageJpegQualityLeavesDefault) {
+  // A non-integer value leaves the field at its default (90), per
+  // ParseConfig's tolerant contract -- it doesn't disturb a prior value.
+  EXPECT_EQ(ParseConfig("file.jpeg_quality=high\n").file_jpeg_quality,
+            kDefaultJpegQuality);
+  EXPECT_EQ(ParseConfig("file.jpeg_quality=\n").file_jpeg_quality,
+            kDefaultJpegQuality);
+  EXPECT_EQ(ParseConfig("file.jpeg_quality=80x\n").file_jpeg_quality,
+            kDefaultJpegQuality);
+  const Config cfg = ParseConfig(
+      "image.jpeg_quality=40\n"
+      "image.jpeg_quality=oops\n");
+  EXPECT_EQ(cfg.image_jpeg_quality, 40);  // second line ignored, first stands.
+}
+
+TEST(JpegQualityForFuncTest, MapsEachKnownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_jpeg_quality = 10;
+  cfg.image_jpeg_quality = 40;
+  cfg.ocr_jpeg_quality = 70;
+  cfg.email_jpeg_quality = 100;
+
+  EXPECT_EQ(JpegQualityForFunc(cfg, "FILE"), 10);
+  EXPECT_EQ(JpegQualityForFunc(cfg, "IMAGE"), 40);
+  EXPECT_EQ(JpegQualityForFunc(cfg, "OCR"), 70);
+  EXPECT_EQ(JpegQualityForFunc(cfg, "EMAIL"), 100);
+}
+
+TEST(JpegQualityForFuncTest, FallsBackToFileForUnknownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_jpeg_quality = 33;
+  EXPECT_EQ(JpegQualityForFunc(cfg, "BOGUS"), 33);
+}
+
 TEST(DefaultConfigPathTest, EndsWithExpectedFilename) {
   const std::string path = DefaultConfigPath();
   const std::string suffix = ".config/brscan-scand.conf";

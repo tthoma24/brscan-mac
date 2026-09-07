@@ -181,10 +181,26 @@ brscan::Status WriteMultipageTiff(
   }
 }
 
+// The ImageIO properties dict for a JPEG write at `quality` (0-100), i.e.
+// { kCGImageDestinationLossyCompressionQuality: quality/100.0 }. Returns nil
+// for a non-JPEG `uti` (PNG is lossless -- CoreGraphics ignores the key there,
+// so there is nothing to pass). `quality` is clamped to 0-100 defensively.
+NSDictionary* JpegImageProperties(CFStringRef uti, int quality) {
+  if (!CFEqual(uti, CFSTR("public.jpeg"))) return nil;
+  const int clamped = std::clamp(quality, 0, 100);
+  return @{
+    (__bridge NSString*)kCGImageDestinationLossyCompressionQuality :
+        @(static_cast<double>(clamped) / 100.0)
+  };
+}
+
 // Writes `page` as a single-image file of type `uti` (e.g. "public.jpeg",
-// "public.png") at `path`. Returns kIoError on decode/encode failure.
+// "public.png") at `path`. For a JPEG, `quality` (0-100) sets the lossy
+// compression quality (see JpegImageProperties); it is ignored for the
+// lossless PNG path. Returns kIoError on decode/encode failure.
 brscan::Status WriteSingleImageFile(const brscan::ScanResult& page,
-                                    CFStringRef uti, const std::string& path) {
+                                    CFStringRef uti, const std::string& path,
+                                    int quality) {
   @autoreleasepool {
     CGImageRef image = CreateCGImageFromScanResult(page);
     if (image == nullptr) return brscan::Status::kIoError;
@@ -195,7 +211,8 @@ brscan::Status WriteSingleImageFile(const brscan::ScanResult& page,
       CGImageRelease(image);
       return brscan::Status::kIoError;
     }
-    CGImageDestinationAddImage(dest, image, nullptr);
+    NSDictionary* props = JpegImageProperties(uti, quality);
+    CGImageDestinationAddImage(dest, image, (__bridge CFDictionaryRef)props);
     const bool finalized = CGImageDestinationFinalize(dest);
     CFRelease(dest);
     CGImageRelease(image);
@@ -274,16 +291,17 @@ brscan::Status WriteContainers(const std::vector<brscan::ScanResult>& pages,
 
 // Writes one JPEG or PNG file per page, numbered `-NNN` when there is more
 // than one page (via brscan::cli::PagePath). Document separation does not
-// apply -- the per-file numbering already keeps the pages distinct.
+// apply -- the per-file numbering already keeps the pages distinct. `quality`
+// (0-100) is the JPEG lossy-compression quality; it is ignored for PNG.
 brscan::Status WritePerPageImages(const std::vector<brscan::ScanResult>& pages,
                                   CFStringRef uti,
-                                  const std::string& image_base,
+                                  const std::string& image_base, int quality,
                                   std::vector<std::string>* written) {
   const int total = static_cast<int>(pages.size());
   for (int i = 0; i < total; ++i) {
     const std::string path = brscan::cli::PagePath(image_base, i + 1, total);
     const brscan::Status status =
-        WriteSingleImageFile(pages[static_cast<size_t>(i)], uti, path);
+        WriteSingleImageFile(pages[static_cast<size_t>(i)], uti, path, quality);
     if (status != brscan::Status::kOk) return status;
     written->push_back(path);
   }
@@ -353,11 +371,13 @@ brscan::Status WriteConfiguredOutput(
 
     case OutputFormat::kJpeg:
       return WritePerPageImages(pages, CFSTR("public.jpeg"),
-                                ReplaceExtension(base_path, ".jpg"), written);
+                                ReplaceExtension(base_path, ".jpg"),
+                                settings.jpeg_quality, written);
 
     case OutputFormat::kPng:
       return WritePerPageImages(pages, CFSTR("public.png"),
-                                ReplaceExtension(base_path, ".png"), written);
+                                ReplaceExtension(base_path, ".png"),
+                                settings.jpeg_quality, written);
 
     case OutputFormat::kText:
       return WriteRecognizedTextOutput(pages, OcrTextFormat::kPlain,

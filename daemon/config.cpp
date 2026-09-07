@@ -50,6 +50,28 @@ std::optional<int> ParsePositiveInt(const std::string& s) {
   }
 }
 
+// Parses a `<dest>.jpeg_quality` value into a 0-100 quality int. A parseable
+// integer is clamped into range (e.g. 150 -> 100, -5 -> 0) rather than
+// rejected, so a user who overshoots the slider's ends still gets the nearest
+// valid quality. A value that is not an integer at all (e.g. "high", "") is
+// rejected as nullopt, so the caller leaves the default (kDefaultJpegQuality)
+// in place, per ParseConfig()'s tolerant-parse contract. Distinct from
+// ParsePositiveInt, which rejects out-of-range and non-positive values
+// outright -- here they clamp, and 0 is a valid (lowest) quality.
+std::optional<int> ParseJpegQuality(const std::string& s) {
+  if (s.empty()) return std::nullopt;
+  try {
+    size_t consumed = 0;
+    const int value = std::stoi(s, &consumed);
+    if (consumed != s.size()) return std::nullopt;
+    if (value < 0) return 0;
+    if (value > 100) return 100;
+    return value;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 std::optional<OutputFormat> ParseFormatString(const std::string& s) {
   if (s == "pdf") return OutputFormat::kPdf;
   if (s == "tiff") return OutputFormat::kTiff;
@@ -229,6 +251,17 @@ bool* SkipBlankForDestPrefix(Config* cfg, const std::string& dest) {
   return nullptr;
 }
 
+// Returns the JPEG-quality field this key's <dest> prefix names, or nullptr
+// for anything else -- the counterpart to SkipBlankForDestPrefix for the
+// `<dest>.jpeg_quality` key.
+int* JpegQualityForDestPrefix(Config* cfg, const std::string& dest) {
+  if (dest == "file") return &cfg->file_jpeg_quality;
+  if (dest == "image") return &cfg->image_jpeg_quality;
+  if (dest == "ocr") return &cfg->ocr_jpeg_quality;
+  if (dest == "email") return &cfg->email_jpeg_quality;
+  return nullptr;
+}
+
 // Applies one already-trimmed, non-empty `key`/`value` pair to `cfg`.
 // Unrecognized keys and values that fail to parse are silently ignored --
 // see ParseConfig()'s doc comment for why.
@@ -334,6 +367,16 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
     if (skip_blank != nullptr) {
       if (const auto parsed_skip_blank = ParseBoolString(value)) {
         *skip_blank = *parsed_skip_blank;
+      }
+    }
+    return;
+  }
+
+  if (field == "jpeg_quality") {
+    int* const quality = JpegQualityForDestPrefix(cfg, dest);
+    if (quality != nullptr) {
+      if (const auto parsed_quality = ParseJpegQuality(value)) {
+        *quality = *parsed_quality;
       }
     }
     return;
@@ -468,6 +511,13 @@ bool SkipBlankForFunc(const Config& cfg, const std::string& func) {
   if (func == kFuncOcr) return cfg.ocr_skip_blank;
   if (func == kFuncEmail) return cfg.email_skip_blank;
   return cfg.file_skip_blank;  // kFuncFile, and the safe fallback otherwise.
+}
+
+int JpegQualityForFunc(const Config& cfg, const std::string& func) {
+  if (func == kFuncImage) return cfg.image_jpeg_quality;
+  if (func == kFuncOcr) return cfg.ocr_jpeg_quality;
+  if (func == kFuncEmail) return cfg.email_jpeg_quality;
+  return cfg.file_jpeg_quality;  // kFuncFile, and the safe fallback otherwise.
 }
 
 bool IsKnownFunc(const std::string& func) {
