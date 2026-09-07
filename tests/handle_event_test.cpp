@@ -556,6 +556,87 @@ TEST_F(HandleButtonEventTest, EmailFuncWithSeparationAttachesAllProducedFiles) {
   EXPECT_EQ(script.find("send"), std::string::npos);
 }
 
+// Skip-blank end to end (`<dest>.skip_blank`, Touch-Panel-OFF): a 3-page
+// gray scan whose middle page is all-white must write only the two
+// non-blank pages. The pages are uniform-fill gray rasters -- 0x11 (dark ->
+// ink -> not blank) for pages 1 and 3, 0xff (white -> no ink -> blank) for
+// page 2 -- so daemon/blank_detect.h's IsBlankPage drops exactly the middle
+// one before the write.
+TEST_F(HandleButtonEventTest, SkipBlankDropsBlankMiddlePageOfThree) {
+  brscan::FakeTransport t;
+  QueueButtonPreamble(&t, "FILE", "300,300,2,292,4,427,3,");
+
+  const int height = DefaultAutoAreaHeightAt(100);
+  const auto queue_page = [&](uint8_t fill, uint8_t pidx, bool last) {
+    auto block = EncodeBlockHeader(4);
+    const std::vector<uint8_t> raw(4 * static_cast<size_t>(height), fill);
+    block.insert(block.end(), raw.begin(), raw.end());
+    t.QueueRead(block);
+    t.QueueRead(last ? EncodeJobFinalTerminator(pidx)
+                     : EncodeEndOfPageMarker(pidx));
+  };
+  queue_page(0x11, 1, /*last=*/false);  // dark -> not blank
+  queue_page(0xff, 2, /*last=*/false);  // white -> blank (dropped)
+  queue_page(0x11, 3, /*last=*/true);   // dark -> not blank
+
+  Config cfg = DefaultConfig();
+  cfg.file_params.mode = brscan::ScanMode::kGray;
+  cfg.file_params.x_dpi = 100;
+  cfg.file_params.y_dpi = 100;
+  cfg.file_skip_blank = true;
+  cfg.save_dir = save_dir_;
+
+  const ButtonEvent event = MakeEvent("FILE", "1818");
+  std::string saved_path;
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_FALSE(saved_path.empty());
+  // Two pages survive the blank filter -> two numbered native-gray files.
+  EXPECT_EQ(CountFilesIn(save_dir_), 2u);
+}
+
+// Skip-blank graceful degradation: when every page looks blank, the write
+// path still needs at least one page, so HandleButtonEvent keeps a single
+// page rather than handing the writer an empty vector (option (a) in the
+// task 1e.18 brief). An all-white 2-page scan therefore still writes one
+// file and reports kOk.
+TEST_F(HandleButtonEventTest, SkipBlankAllBlankKeepsOnePage) {
+  brscan::FakeTransport t;
+  QueueButtonPreamble(&t, "FILE", "300,300,2,292,4,427,3,");
+
+  const int height = DefaultAutoAreaHeightAt(100);
+  const auto queue_page = [&](uint8_t pidx, bool last) {
+    auto block = EncodeBlockHeader(4);
+    const std::vector<uint8_t> raw(4 * static_cast<size_t>(height), 0xff);
+    block.insert(block.end(), raw.begin(), raw.end());
+    t.QueueRead(block);
+    t.QueueRead(last ? EncodeJobFinalTerminator(pidx)
+                     : EncodeEndOfPageMarker(pidx));
+  };
+  queue_page(1, /*last=*/false);  // white -> blank
+  queue_page(2, /*last=*/true);   // white -> blank
+
+  Config cfg = DefaultConfig();
+  cfg.file_params.mode = brscan::ScanMode::kGray;
+  cfg.file_params.x_dpi = 100;
+  cfg.file_params.y_dpi = 100;
+  cfg.file_skip_blank = true;
+  cfg.save_dir = save_dir_;
+
+  const ButtonEvent event = MakeEvent("FILE", "1919");
+  std::string saved_path;
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_FALSE(saved_path.empty());
+  // Exactly one page is kept, so exactly one file is written -- the scan
+  // never produces zero output.
+  EXPECT_EQ(CountFilesIn(save_dir_), 1u);
+}
+
 // Touch-Panel-ON precedence, end to end: when the printer's config frame
 // is the full LCD-set form (carries R=), its own settings drive the scan
 // and the output format, overriding this daemon's configured FILE

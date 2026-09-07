@@ -453,6 +453,61 @@ TEST(PlanButtonScanTest, HighSpeedDefaultsToFalse) {
 }
 
 // ---------------------------------------------------------------------
+// Skip-blank (W=): plan.skip_blank by ON/OFF precedence.
+// ---------------------------------------------------------------------
+
+TEST(PlanButtonScanTest, TouchPanelOnSkipBlankSetsPlanSkipBlank) {
+  // The skip-blank wire fixture from
+  // reference/protocol-notes-button-options.md:115 (W=1). R= is present, so
+  // this is Touch-Panel-ON and plan.skip_blank comes from the parsed W=.
+  const std::string payload =
+      "F=FILE\nD=SIN\nE=LON\nR=300\nM=CGRAY\nP=LETTER\nA=0\n"
+      "T=PDF(Image)\nW=1\nG=0\nX=0\n";
+  const Config cfg = DefaultConfig();
+  const auto plan = PlanButtonScan(BuildFrame(payload), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_TRUE(plan->touch_panel_on);
+  EXPECT_TRUE(plan->skip_blank);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOnSkipBlankOffLeavesPlanSkipBlankFalse) {
+  // Baseline (W=0) Touch-Panel-ON: skip_blank stays false even if the
+  // daemon's config would have enabled it (the ON branch ignores the key).
+  Config cfg = DefaultConfig();
+  cfg.file_skip_blank = true;  // deliberately unused on the ON branch.
+  const auto plan =
+      PlanButtonScan(BuildFrame(kColorLetterPayload), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_TRUE(plan->touch_panel_on);
+  EXPECT_FALSE(plan->skip_blank);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOffSkipBlankFromConfiguredDest) {
+  // A no-R= (Touch-Panel-OFF) frame takes skip_blank from the daemon's
+  // `<dest>.skip_blank` config key via SkipBlankForFunc.
+  const std::string short_form = "F=FILE\nD=SIN\nE=LON\n";
+  Config cfg = DefaultConfig();
+  cfg.file_skip_blank = true;
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->touch_panel_on);
+  EXPECT_TRUE(plan->skip_blank);
+}
+
+TEST(PlanButtonScanTest, SkipBlankDefaultsToFalse) {
+  // Neither the wire (W=0) nor the config enables it -> false.
+  const std::string short_form = "F=FILE\nD=SIN\nE=LON\n";
+  const Config cfg = DefaultConfig();
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->skip_blank);
+}
+
+// ---------------------------------------------------------------------
 // button_flow is always true, in every branch.
 // ---------------------------------------------------------------------
 

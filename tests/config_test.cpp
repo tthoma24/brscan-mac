@@ -582,6 +582,73 @@ TEST(HighSpeedForFuncTest, FallsBackToFileForUnknownFunc) {
   EXPECT_TRUE(HighSpeedForFunc(cfg, "BOGUS"));
 }
 
+// ---------------------------------------------------------------------
+// Skip-blank (`<dest>.skip_blank`).
+// ---------------------------------------------------------------------
+
+TEST(DefaultConfigTest, SkipBlankDefaultsToOff) {
+  const Config cfg = DefaultConfig();
+  EXPECT_FALSE(cfg.file_skip_blank);
+  EXPECT_FALSE(cfg.image_skip_blank);
+  EXPECT_FALSE(cfg.ocr_skip_blank);
+  EXPECT_FALSE(cfg.email_skip_blank);
+}
+
+TEST(ParseConfigTest, AppliesSkipBlankForEachDest) {
+  const Config cfg = ParseConfig(
+      "file.skip_blank=on\n"
+      "image.skip_blank=off\n"
+      "ocr.skip_blank=on\n"
+      "email.skip_blank=off\n");
+  EXPECT_TRUE(cfg.file_skip_blank);
+  EXPECT_FALSE(cfg.image_skip_blank);
+  EXPECT_TRUE(cfg.ocr_skip_blank);
+  EXPECT_FALSE(cfg.email_skip_blank);
+}
+
+TEST(ParseConfigTest, SkipBlankAcceptsTolerantSpellings) {
+  // ParseBoolString tolerates the common bool spellings, case-insensitively.
+  EXPECT_TRUE(ParseConfig("file.skip_blank=TRUE\n").file_skip_blank);
+  EXPECT_TRUE(ParseConfig("file.skip_blank=Yes\n").file_skip_blank);
+  EXPECT_TRUE(ParseConfig("file.skip_blank=1\n").file_skip_blank);
+  EXPECT_FALSE(ParseConfig("file.skip_blank=No\n").file_skip_blank);
+  EXPECT_FALSE(ParseConfig("file.skip_blank=0\n").file_skip_blank);
+}
+
+TEST(ParseConfigTest, MissingSkipBlankKeyLeavesOffDefault) {
+  const Config cfg = ParseConfig("file.mode=gray\n");
+  EXPECT_FALSE(cfg.file_skip_blank);
+}
+
+TEST(ParseConfigTest, UnknownSkipBlankValueLeavesOffDefault) {
+  // An unparsable value leaves the field at its default (off), per
+  // ParseConfig's tolerant contract -- it doesn't flip a configured value.
+  EXPECT_FALSE(ParseConfig("file.skip_blank=maybe\n").file_skip_blank);
+  const Config cfg = ParseConfig(
+      "image.skip_blank=on\n"
+      "image.skip_blank=whoops\n");
+  EXPECT_TRUE(cfg.image_skip_blank);  // second line ignored, first stands.
+}
+
+TEST(SkipBlankForFuncTest, MapsEachKnownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_skip_blank = true;
+  cfg.image_skip_blank = false;
+  cfg.ocr_skip_blank = true;
+  cfg.email_skip_blank = false;
+
+  EXPECT_TRUE(SkipBlankForFunc(cfg, "FILE"));
+  EXPECT_FALSE(SkipBlankForFunc(cfg, "IMAGE"));
+  EXPECT_TRUE(SkipBlankForFunc(cfg, "OCR"));
+  EXPECT_FALSE(SkipBlankForFunc(cfg, "EMAIL"));
+}
+
+TEST(SkipBlankForFuncTest, FallsBackToFileForUnknownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_skip_blank = true;
+  EXPECT_TRUE(SkipBlankForFunc(cfg, "BOGUS"));
+}
+
 TEST(DefaultConfigPathTest, EndsWithExpectedFilename) {
   const std::string path = DefaultConfigPath();
   const std::string suffix = ".config/brscan-scand.conf";
