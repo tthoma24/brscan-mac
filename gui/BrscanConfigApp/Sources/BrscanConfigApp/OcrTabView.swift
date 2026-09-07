@@ -3,13 +3,13 @@ import SwiftUI
 
 /// The **OCR** tab's editor `Form`, bound to an `OcrRouteViewModel` (task
 /// 1e.8) -- a specialization of `RouteEditorView` (task 1e.7) for how the
-/// daemon actually treats OCR output: always a searchable PDF, never a free
-/// format choice. So this view shows scan params (mode/source/dpi/paper)
-/// and separation exactly like `RouteEditorView`, but its "Output format"
-/// section has no format picker and no `tiff_compression` control -- just a
-/// non-editable "Output: Searchable PDF" row plus notes (Google Developer
-/// Style Guide sentence case) explaining why, and the same Touch-Panel
-/// banner every route tab shows.
+/// daemon treats OCR output. So this view shows scan params
+/// (mode/source/dpi/paper) and separation exactly like `RouteEditorView`,
+/// but its "Output format" section offers the OCR-specific sub-format picker
+/// (`OptionValueSets.ocrFormat`: pdf/txt/html/rtf, the daemon's
+/// `ocr.ocr_format` key) instead of the image-format + `tiff_compression`
+/// controls -- with a searchable-PDF note shown only for the `pdf` choice --
+/// plus the same Touch-Panel banner every route tab shows.
 struct OcrTabView: View {
   @ObservedObject var viewModel: OcrRouteViewModel
 
@@ -50,15 +50,17 @@ struct OcrTabView: View {
       }
 
       Section("Output format") {
-        LabeledContent("Output", value: "Searchable PDF")
+        Picker("Output", selection: $viewModel.format) {
+          ForEach(OptionValueSets.ocrFormat.options, id: \.self) { option in
+            Text(option).tag(option)
+          }
+        }
 
-        Text(OcrRouteViewModel.Notes.searchablePdf)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-
-        Text(OcrRouteViewModel.Notes.subFormatsNotProduced)
-          .font(.caption)
-          .foregroundStyle(.secondary)
+        if viewModel.isSearchablePdf {
+          Text(OcrRouteViewModel.Notes.searchablePdf)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
       }
 
       Section("Multi-page output") {

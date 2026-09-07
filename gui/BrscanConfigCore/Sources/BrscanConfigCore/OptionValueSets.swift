@@ -26,7 +26,7 @@ public struct OptionValueSet: Equatable {
   }
 }
 
-/// The five closed-enumeration `<dest>.*` value sets, one per key.
+/// The closed-enumeration `<dest>.*` value sets, one per key.
 public enum OptionValueSets {
   /// `<dest>.mode` -- daemon/config.cpp's `ParseModeString`.
   public static let mode = OptionValueSet(options: OptionSets.mode)
@@ -44,4 +44,10 @@ public enum OptionValueSets {
 
   /// `<dest>.paper` -- daemon/paper_size.h's `IsKnownPaper`/`kPaperTable`.
   public static let paper = OptionValueSet(options: OptionSets.paper)
+
+  /// `ocr.ocr_format` -- daemon/config.cpp's `ParseOcrFormatString`. OCR-only
+  /// (honored solely under the `ocr` dest prefix): the OCR route's output
+  /// sub-format, `pdf` (searchable PDF) or one of the `txt`/`html`/`rtf`
+  /// text sinks. A distinct vocabulary from `format` above.
+  public static let ocrFormat = OptionValueSet(options: OptionSets.ocrFormat)
 }

@@ -51,6 +51,13 @@ TOKEN_SETS = [
         "ParseTiffCompressionString).",
     ),
     (
+        "ocr_format",
+        "ocrFormat",
+        "`ocr.ocr_format` tokens (daemon/config.cpp's ParseOcrFormatString). "
+        "OCR-only: the OCR route's output sub-format (searchable pdf, or the "
+        "txt/html/rtf text sinks).",
+    ),
+    (
         "separation_mode",
         "separationMode",
         "`<dest>.separation` *modes* -- combine/off take no suffix; image/page "

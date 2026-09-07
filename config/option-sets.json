@@ -21,6 +21,11 @@
     "tokens": ["lzw", "g3", "g4"]
   },
 
+  "ocr_format": {
+    "_comment": "ocr.ocr_format -- daemon/config.cpp's ParseOcrFormatString(). OCR-only (honored solely under the `ocr` dest prefix): the OCR route's output sub-format. pdf -> the searchable PDF OCR has always produced; txt/html/rtf -> the recognized-text sinks. Distinct vocabulary from `format` above (OCR can't produce an image format). Default when unset is pdf.",
+    "tokens": ["pdf", "txt", "html", "rtf"]
+  },
+
   "separation_mode": {
     "_comment": "<dest>.separation -- daemon/config.cpp's ParseSeparationString(). These are the *modes*, not full tokens: combine/off take no suffix; image and page each take a ':N' positive-int suffix (e.g. 'image:3', 'page:2'). 'every:N' is also accepted as a backward-compat alias for 'image:N' (same mode, different spelling) -- not a separate mode. Default is combine.",
     "tokens": ["combine", "off", "image", "page"],

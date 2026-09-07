@@ -25,6 +25,9 @@ public enum OptionSets {
   /// `<dest>.tiff_compression` tokens (daemon/config.cpp's ParseTiffCompressionString).
   public static let tiffCompression: [String] = ["lzw", "g3", "g4"]
 
+  /// `ocr.ocr_format` tokens (daemon/config.cpp's ParseOcrFormatString). OCR-only: the OCR route's output sub-format (searchable pdf, or the txt/html/rtf text sinks).
+  public static let ocrFormat: [String] = ["pdf", "txt", "html", "rtf"]
+
   /// `<dest>.separation` *modes* -- combine/off take no suffix; image/page each take a ':N' positive-int suffix (e.g. "image:3"). "every:N" is also accepted by the daemon as a backward-compat alias for "image:N" (same mode, not a separate one), so it isn't listed here.
   public static let separationMode: [String] = ["combine", "off", "image", "page"]
 

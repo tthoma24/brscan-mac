@@ -113,10 +113,18 @@ public struct DaemonConfig: Equatable {
     /// default `""`. `OptionValueSets.paper` is still there for a GUI
     /// picker to validate against before offering a token, per Task 1e.3.
     public var paper: String
+    /// `ocr.ocr_format` -- `pdf | txt | html | rtf`
+    /// (`OptionValueSets.ocrFormat`). OCR-only: `daemon/config.cpp`'s
+    /// `ApplyKey` honors this key solely under the `ocr` dest prefix (a text
+    /// sink only makes sense for OCR -- see `Config::ocr_text_format`), so
+    /// `Route.from`/`apply` read and write it only for `dest == "ocr"`; the
+    /// FILE/IMAGE/EMAIL routes leave it at its default and never emit it.
+    /// Unrecognized/missing -> default (`pdf`, `OutputFormat::kPdf`).
+    public var ocrFormat: String
 
     public init(
       mode: String, source: String, dpi: Int, format: String, tiffCompression: String, separation: Separation,
-      paper: String
+      paper: String, ocrFormat: String = OptionSets.ocrFormat[0]  // "pdf"
     ) {
       self.mode = mode
       self.source = source
@@ -125,6 +133,7 @@ public struct DaemonConfig: Equatable {
       self.tiffCompression = tiffCompression
       self.separation = separation
       self.paper = paper
+      self.ocrFormat = ocrFormat
     }
   }
 
@@ -291,6 +300,14 @@ extension DaemonConfig.Route {
     if let raw = doc.value(for: "\(dest).paper") {
       route.paper = raw
     }
+    // OCR-only: <dest>.ocr_format (pdf|txt|html|rtf). daemon/config.cpp's
+    // ApplyKey honors this key solely under the `ocr` dest, so only the OCR
+    // route reads it; other routes never carry it (see Route.ocrFormat).
+    if dest == "ocr", let raw = doc.value(for: "\(dest).ocr_format"),
+      OptionValueSets.ocrFormat.isValid(raw)
+    {
+      route.ocrFormat = raw
+    }
 
     return route
   }
@@ -303,5 +320,10 @@ extension DaemonConfig.Route {
     doc.setValue(tiffCompression, for: "\(dest).tiff_compression")
     doc.setValue(SeparationCodec.serialize(separation), for: "\(dest).separation")
     doc.setValue(paper, for: "\(dest).paper")
+    // OCR-only: only the OCR route emits ocr.ocr_format -- the daemon
+    // ignores this key under any other dest (see Route.ocrFormat).
+    if dest == "ocr" {
+      doc.setValue(ocrFormat, for: "\(dest).ocr_format")
+    }
   }
 }
