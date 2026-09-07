@@ -60,6 +60,7 @@ final class ConfigStoreTests: XCTestCase {
       "ocr.tiff_compression = lzw",
       "ocr.separation = page:2",
       "ocr.paper = legal",
+      "ocr.ocr_format = pdf",
       "",
       "email.mode = errdiff",
       "email.source = flatbed",

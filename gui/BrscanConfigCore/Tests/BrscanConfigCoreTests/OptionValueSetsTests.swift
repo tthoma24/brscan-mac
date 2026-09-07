@@ -30,6 +30,10 @@ final class OptionValueSetsTests: XCTestCase {
     XCTAssertEqual(OptionValueSets.paper.options, OptionSets.paper)
   }
 
+  func testOcrFormatOptionsComeFromGeneratedOptionSets() {
+    XCTAssertEqual(OptionValueSets.ocrFormat.options, OptionSets.ocrFormat)
+  }
+
   // MARK: isValid -- every generated token validates true
 
   func testEveryModeTokenIsValid() {
@@ -62,6 +66,12 @@ final class OptionValueSetsTests: XCTestCase {
     }
   }
 
+  func testEveryOcrFormatTokenIsValid() {
+    for token in OptionSets.ocrFormat {
+      XCTAssertTrue(OptionValueSets.ocrFormat.isValid(token), "\(token) should be a valid ocr_format")
+    }
+  }
+
   // MARK: isValid -- a sentinel token is rejected everywhere
 
   func testSentinelTokenIsInvalidEverywhere() {
@@ -70,5 +80,6 @@ final class OptionValueSetsTests: XCTestCase {
     XCTAssertFalse(OptionValueSets.format.isValid("ZZZ"))
     XCTAssertFalse(OptionValueSets.tiffCompression.isValid("ZZZ"))
     XCTAssertFalse(OptionValueSets.paper.isValid("ZZZ"))
+    XCTAssertFalse(OptionValueSets.ocrFormat.isValid("ZZZ"))
   }
 }

@@ -210,6 +210,38 @@ TEST(OptionSetsDriftTest, UnknownTiffCompressionTokenFallsBackToDefault) {
 }
 
 // ---------------------------------------------------------------------
+// ocr_format (ocr.ocr_format -- daemon/config.cpp's ParseOcrFormatString,
+// honored solely under the `ocr` dest and stored in Config::ocr_text_format).
+// A distinct, OCR-specific vocabulary from `format` above.
+// ---------------------------------------------------------------------
+
+std::optional<OutputFormat> ExpectedOcrFormat(const std::string& token) {
+  if (token == "pdf") return OutputFormat::kPdf;
+  if (token == "txt") return OutputFormat::kText;
+  if (token == "html") return OutputFormat::kHtml;
+  if (token == "rtf") return OutputFormat::kRtf;
+  return std::nullopt;
+}
+
+TEST(OptionSetsDriftTest, EveryOcrFormatTokenMapsToItsOutputFormat) {
+  const minijson::Value root = LoadOptionSets();
+  for (const std::string& token : TokensFor(root, "ocr_format")) {
+    const std::optional<OutputFormat> expected = ExpectedOcrFormat(token);
+    ASSERT_TRUE(expected.has_value())
+        << "config/option-sets.json lists ocr_format token '" << token
+        << "' that this test doesn't know how to verify -- update "
+           "ExpectedOcrFormat() in tests/option_sets_test.cpp";
+    const Config cfg = ParseConfig("ocr.ocr_format=" + token + "\n");
+    EXPECT_EQ(cfg.ocr_text_format, *expected) << token;
+  }
+}
+
+TEST(OptionSetsDriftTest, UnknownOcrFormatTokenFallsBackToDefault) {
+  const Config cfg = ParseConfig("ocr.ocr_format=ZZZ\n");
+  EXPECT_EQ(cfg.ocr_text_format, OutputFormat::kPdf);  // documented default
+}
+
+// ---------------------------------------------------------------------
 // separation_mode (<dest>.separation -- daemon/config.cpp's
 // ParseSeparationString). config/option-sets.json lists the *modes*
 // (combine/off/image/page); image and page take a positive-int ':N'

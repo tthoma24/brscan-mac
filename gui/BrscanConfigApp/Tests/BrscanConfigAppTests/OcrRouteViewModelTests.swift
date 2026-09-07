@@ -3,47 +3,87 @@ import XCTest
 @testable import BrscanConfigApp
 import BrscanConfigCore
 
-/// Unit tests for `OcrRouteViewModel`: format forced to `"pdf"` with no
-/// format choice offered, separation still applying (container format),
-/// mode/dpi/source/paper editing and round-trip, and the OCR notes' static
-/// content -- per task 1e.8's brief.
+/// Unit tests for `OcrRouteViewModel`: the OCR sub-format picker
+/// (`ocr.ocr_format`: pdf/txt/html/rtf) round-tripping, the image `format`
+/// field pinned to `pdf` (the daemon ignores `ocr.format` for OCR),
+/// separation gating by sub-format, mode/dpi/source/paper editing and
+/// round-trip, and the OCR note's static content.
 final class OcrRouteViewModelTests: XCTestCase {
 
-  // MARK: Format is forced, never a free choice
+  // MARK: OCR sub-format is a real, round-tripping choice (Task 1e.15)
 
-  /// There is no settable `format` property on this type at all (unlike
-  /// `RouteViewModel`, which has a `@Published var format`) -- the type's
-  /// shape itself is "no format choice offered".
-  func testFormatIsAConstantNotAPublishedVar() {
+  func testDefaultSubFormatIsPdf() {
     let viewModel = OcrRouteViewModel()
     XCTAssertEqual(viewModel.format, "pdf")
   }
 
-  func testProducedRouteIsAlwaysPdfRegardlessOfSeedFormat() {
-    // A hand-edited `ocr.format=tiff` (or any other non-pdf token) in the
-    // config file -- the daemon ignores this override for OCR today (see
-    // docs/BUTTON.md), so the view model must not perpetuate it on save.
-    for seedFormat in OptionSets.format {
-      let seed = DaemonConfig.Route(
-        mode: "color", source: "flatbed", dpi: 300, format: seedFormat, tiffCompression: "lzw",
-        separation: .combine, paper: "")
-      let viewModel = OcrRouteViewModel(route: seed)
+  /// Picking `rtf` produces a route whose serialized OCR line is
+  /// `ocr.ocr_format = rtf` -- the daemon's Task 1e.14 key.
+  func testSelectingRtfProducesTheOcrFormatConfigLine() {
+    let viewModel = OcrRouteViewModel()
+    viewModel.format = "rtf"
 
-      XCTAssertEqual(viewModel.route.format, "pdf", "seed format \(seedFormat) leaked into the produced route")
+    XCTAssertEqual(viewModel.route.ocrFormat, "rtf")
+
+    var config = DaemonConfig.default
+    config.ocr = viewModel.route
+    var doc = ConfigDocument()
+    config.apply(to: &doc)
+
+    XCTAssertEqual(doc.value(for: "ocr.ocr_format"), "rtf")
+    XCTAssertTrue(doc.serialized().contains("ocr.ocr_format = rtf"))
+  }
+
+  /// Loading a config document with `ocr.ocr_format = html` selects `html`
+  /// in the view model.
+  func testLoadingHtmlOcrFormatSelectsHtml() {
+    let doc = ConfigDocument(text: "ocr.ocr_format = html\n")
+    let config = DaemonConfig.from(doc)
+
+    let viewModel = OcrRouteViewModel(route: config.ocr)
+    XCTAssertEqual(viewModel.format, "html")
+
+    // The in-place reseed path (ConfigStore reloads) picks it up too.
+    let reseeded = OcrRouteViewModel()
+    reseeded.load(config.ocr)
+    XCTAssertEqual(reseeded.format, "html")
+  }
+
+  /// Every generated OCR sub-format token round-trips through the produced
+  /// route's `ocrFormat`, and the image `format` field stays pinned to
+  /// `pdf` (the daemon ignores `ocr.format` for OCR -- see docs/BUTTON.md).
+  func testEveryOcrFormatRoundTripsAndImageFormatStaysPdf() {
+    for token in OptionSets.ocrFormat {
+      let viewModel = OcrRouteViewModel()
+      viewModel.format = token
+      XCTAssertEqual(viewModel.route.ocrFormat, token)
+      XCTAssertEqual(viewModel.route.format, "pdf", "image format leaked for sub-format \(token)")
     }
   }
 
-  func testDefaultInitProducesPdfFormat() {
-    let viewModel = OcrRouteViewModel()
-    XCTAssertEqual(viewModel.route.format, "pdf")
-  }
-
-  // MARK: Separation still applies (pdf is a container format)
+  // MARK: Separation gating by sub-format
 
   func testSeparationIsEditableSincePdfIsAContainerFormat() {
     let viewModel = OcrRouteViewModel()
     XCTAssertTrue(viewModel.isSeparationEditable)
     XCTAssertTrue(OptionRules.separationApplies(to: viewModel.format))
+  }
+
+  func testSeparationIsNotEditableForTextSinkSubFormats() {
+    let viewModel = OcrRouteViewModel()
+    for token in ["txt", "html", "rtf"] {
+      viewModel.format = token
+      XCTAssertFalse(viewModel.isSeparationEditable, "\(token) is not a container format")
+    }
+  }
+
+  func testSearchablePdfNoteAppliesOnlyToPdf() {
+    let viewModel = OcrRouteViewModel()
+    XCTAssertTrue(viewModel.isSearchablePdf)
+    for token in ["txt", "html", "rtf"] {
+      viewModel.format = token
+      XCTAssertFalse(viewModel.isSearchablePdf, "\(token) has no searchable-PDF text layer")
+    }
   }
 
   func testSwitchingSeparationModesProducesTheExpectedSeparation() {
@@ -139,18 +179,15 @@ final class OcrRouteViewModelTests: XCTestCase {
     XCTAssertFalse(viewModel.isDpiValid)
   }
 
-  // MARK: Notes/caveats static content
+  // MARK: Note static content
 
-  /// A small static-content assertion (per the brief) that the exact notes
+  /// A small static-content assertion (per the brief) that the exact note
   /// `OcrTabView` renders (`OcrRouteViewModel.Notes`, the single source of
-  /// truth both this test and the view read) carry the expected claims --
+  /// truth both this test and the view read) carries the expected claim --
   /// not a UI-rendering test (this package doesn't launch any UI), just
-  /// pinning the key substance so it can't silently drift from what the
-  /// daemon actually does.
-  func testOcrTabNotesDescribeSearchablePdfAndUnproducedSubFormats() {
-    XCTAssertTrue(OcrRouteViewModel.Notes.searchablePdf.contains("searchable PDF"))
+  /// pinning the key substance so it can't silently drift.
+  func testOcrTabSearchablePdfNoteDescribesTheTextLayer() {
+    XCTAssertTrue(OcrRouteViewModel.Notes.searchablePdf.contains("Searchable PDF"))
     XCTAssertTrue(OcrRouteViewModel.Notes.searchablePdf.contains("text layer"))
-    XCTAssertTrue(OcrRouteViewModel.Notes.subFormatsNotProduced.contains("Text, HTML, or RTF"))
-    XCTAssertTrue(OcrRouteViewModel.Notes.subFormatsNotProduced.contains("isn't produced by this daemon yet"))
   }
 }

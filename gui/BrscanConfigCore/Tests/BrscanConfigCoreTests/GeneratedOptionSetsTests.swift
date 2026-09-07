@@ -18,6 +18,7 @@ final class GeneratedOptionSetsTests: XCTestCase {
     XCTAssertFalse(OptionSets.tiffCompression.isEmpty)
     XCTAssertFalse(OptionSets.separationMode.isEmpty)
     XCTAssertFalse(OptionSets.paper.isEmpty)
+    XCTAssertFalse(OptionSets.ocrFormat.isEmpty)
   }
 
   func testPaperHasTheNineDocumentedTokens() {
