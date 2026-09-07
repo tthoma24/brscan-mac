@@ -83,6 +83,17 @@ the full byte-level decode.
 | 10-byte end-of-page marker `82 07 00 <pidx> 00 84 00 00 00 00`, followed by either `80 80` (job-final, forming the 12-byte terminator already documented for the single-page case) or the next page's block header | Delimits pages within one multi-page ADF job (one `ESC X` streams the whole stack) | Capture, `reference/streams/s0_in.bin` tests 7 (ADF simplex, 3 pages) and 8 (ADF duplex, 4 pages): every inter-page boundary in both regions parses cleanly under this shape. Only color/JPEG multi-page is capture-confirmed; gray and RLENGTH multi-page framing is assumed identical (block framing, not payload-specific) but not independently captured |
 | Block-header `pidx` at byte[3] (`64 07 00 <pidx> 00 84 ...`) is the 1-based page index; a **duplex** color feed interleaves the two sides' chunks and tags each with its `pidx` | Lets a reader de-interleave a duplex job by routing each chunk to a per-`pidx` accumulator | Capture, `reference/streams/s0_in.bin` test 8 (ADF duplex): headers alternate `pidx 2,1,2,1,…` up to `EOP(pidx=1)`, then `3,2,3,2,…` up to `EOP(pidx=2)`, etc.; de-multiplexing by `pidx` yields exactly 4 independent baseline JPEGs, all decoding cleanly at 2560×3252. Reading the interleaved stream one page at a time instead concatenates two JPEGs (two `ff d8` SOIs) and fails to decode. Only color/JPEG duplex interleaving is captured; gray/RLENGTH duplex is uncaptured and its interleaving (if any) unconfirmed. The interleaved capture itself stays git-ignored (scanned content); the committed regression uses synthetic interleaved JPEGs |
 
+The constant below is from a black-box diff of two of our own captures,
+`reference/adf-loaded.pcap` (a document in the feeder) vs
+`reference/adf-empty.pcap` (an empty feeder), of a host-initiated ADF scan
+against the printer. Both pcaps stay git-ignored (they carry scanned content
+and LAN identity); the two byte values below carry no device identity, so they
+are committed here and in the synthetic tests.
+
+| Constant | Meaning | Source |
+|---|---|---|
+| ESC D ADF source-select ack: `0x80` = a document is loaded (proceed), `0xc2` = the ADF is empty | Feeder paper-presence signal in the single ack byte the device returns to `ESC D ADF`; on `0xc2` the driver returns `kNoPaper` before `ESC I`/`ESC X` rather than letting the device fall back to the glass (simplex) or hang (duplex) | Capture diff: `adf-loaded.pcap` returns `0x80` at this ack, `adf-empty.pcap` returns `0xc2`. Corroborated by the following `ESC I` offer -- loaded `300,300,1,292,3460,0,0,` (ymax 0 = ADF unknown-length) vs empty `300,300,2,292,3460,427,5052,` (a concrete ymax, i.e. the device about to fall back to the glass). The `ESC Q` capability block is identical in both, so it is not the signal |
+
 The constant below is from `reference/brscan-button.pcap`, our own capture of
 the Scan-button registration/notification traffic between a Mac running
 Brother's driver and the printer (issue #3), taken 2026-09-02. See

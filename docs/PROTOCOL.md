@@ -150,7 +150,15 @@ A typical scan is: `ESC Q` (once per connection), then per scan
    connection goes quiet rather than relying on a byte count.
 3. `ESC S` / `ESC D` reply: a short ack with no fixed length observed --
    2 bytes (`80 00`) in one capture, as little as 1 byte (`80`) live against
-   real hardware. Contents unconfirmed; safe to discard.
+   real hardware. For the flatbed (`ESC S FB`) its contents are unconfirmed
+   and safe to discard. For the feeder (`ESC D ADF`) the **first** ack byte
+   encodes paper presence: `0x80` = a document is loaded (proceed), `0xc2` =
+   the ADF is empty. On `0xc2` the driver returns "no paper" immediately,
+   before `ESC I`/`ESC X` -- otherwise the device proceeds and, on a simplex
+   job, silently falls back to scanning the flatbed glass, or on a duplex job
+   sends nothing and times out (~24 s). This distinction comes from diffing a
+   loaded-feeder capture against an empty-feeder one (see PROVENANCE.md); the
+   two byte values carry no device identity.
 4. `ESC I` reply: `[1-byte status][2-byte little-endian length][ASCII CSV
    text][NUL]`. The status byte was `0x00` in every sample seen and its
    meaning is unconfirmed. The CSV is a comma-terminated offer of the granted

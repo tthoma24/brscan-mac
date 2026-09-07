@@ -46,6 +46,15 @@ constexpr int kScanTimeoutMs = 20000;
 // doc comment for the residual risk this leaves.
 constexpr int kDrainIdleTimeoutMs = 800;
 
+// The single-byte ack the device returns to an ESC D ADF source-select
+// encodes feeder paper presence: 0x80 = a document is loaded (proceed),
+// 0xc2 = the ADF is empty. Sourced from a black-box diff of
+// reference/adf-loaded.pcap vs reference/adf-empty.pcap (see PROVENANCE.md);
+// the two byte values carry no device identity. Only the ADF path inspects
+// this -- the flatbed ESC S ack is not a paper-presence signal.
+constexpr uint8_t kAdfAckLoaded = 0x80;
+constexpr uint8_t kAdfAckEmpty = 0xc2;
+
 // The device caps every payload block at this many bytes. A block header's
 // trailing length field pins at this exact value (0xfff4) as a "more data
 // follows" SENTINEL, NOT as an exact byte count: a chunk may declare
@@ -348,6 +357,22 @@ class Framer {
     if (s != Status::kOk) return s;
     for (;;) {
       s = Fill(idle_timeout_ms);
+      if (s == Status::kTimeout) break;
+      if (s != Status::kOk) return s;
+    }
+    buf_.clear();
+    return Status::kOk;
+  }
+
+  // Like DrainQuiet, but WITHOUT the mandatory first blocking Fill: it drains
+  // whatever is already buffered plus any further chunks until a Fill() times
+  // out, then discards it all. Used to finish consuming a reply whose leading
+  // bytes a Peek has already pulled into the buffer -- there DrainQuiet's
+  // initial Fill would instead read the *next* (or no) chunk and could return
+  // kTimeout spuriously. Same heuristic-not-a-framing caveat as DrainQuiet.
+  Status DrainBufferedQuiet(int idle_timeout_ms) {
+    for (;;) {
+      const Status s = Fill(idle_timeout_ms);
       if (s == Status::kTimeout) break;
       if (s != Status::kOk) return s;
     }
@@ -1090,17 +1115,31 @@ Status RunScan(Transport& transport, const Params& params,
   if (params.source == Source::kAdf) {
     status = send(EncodeSelectAdf());
     if (status != Status::kOk) return status;
-    status = framer.DrainQuiet(kAckTimeoutMs, kDrainIdleTimeoutMs);
+    // Peek the ESC D ADF ack's first byte: it encodes feeder paper presence
+    // (kAdfAckLoaded / kAdfAckEmpty; see the constants above and
+    // PROVENANCE.md). An empty feeder must abandon the scan HERE, before ESC
+    // I / ESC X -- otherwise the device (simplex) falls back to scanning the
+    // glass or (duplex) sends nothing and times out. The flatbed ESC S ack
+    // below carries no such signal, so only this ADF path checks it.
+    std::vector<uint8_t> ack;
+    status = framer.Peek(1, kAckTimeoutMs, &ack);
     if (status == Status::kTimeout) {
-      // No response fixture for the ADF-empty case was ever captured (see
-      // tests/fixtures/README.md: it's listed as a gap); the vendor
-      // driver's own command stream simply stops right after this command
-      // in the no-paper test. Heuristic, not confirmed: map a
-      // source-select ack that doesn't arrive at all -- when every other
-      // observed ack arrived in well under a second -- to kNoPaper rather
-      // than a generic kTimeout.
+      // The ack never arrives at all -- observed when the vendor driver's own
+      // command stream simply stops right after this command in a no-paper
+      // test (see tests/fixtures/README.md, which lists the missing-ack case
+      // as a gap). Every other observed ack arrived in well under a second,
+      // so map this to kNoPaper rather than a generic kTimeout.
       return Status::kNoPaper;
     }
+    if (status != Status::kOk) return status;
+    if (ack[0] == kAdfAckEmpty) {
+      // Feeder empty: stop before negotiating/executing. `out` is already
+      // cleared above (the "out empty on any non-kOk Status" contract).
+      return Status::kNoPaper;
+    }
+    // Document loaded (kAdfAckLoaded): drain the rest of the ack (its exact
+    // length isn't stable -- 2 bytes in one capture, 1 live) and proceed.
+    status = framer.DrainBufferedQuiet(kDrainIdleTimeoutMs);
     if (status != Status::kOk) return status;
   } else {
     status = send(EncodeSelectFlatbed());

@@ -648,6 +648,90 @@ TEST(RunScan, AdfSelectsFeederWithEscDNotFlatbed) {
       << "ADF scan must not issue ESC S FB (it re-selects the flatbed)";
 }
 
+// The ESC D ADF source-select ack encodes feeder paper presence in its
+// single byte: 0x80 = a document is loaded (proceed), 0xc2 = the ADF is
+// empty. On an empty feeder the device otherwise proceeds and (simplex)
+// falls back to scanning the flatbed glass or (duplex) sends nothing and
+// times out -- both wrong. So an ADF scan whose ack is 0xc2 must return
+// kNoPaper immediately, before ESC I / ESC X, with `out` cleared. The
+// two byte values are protocol constants carrying no device identity
+// (see PROVENANCE.md), so this synthetic test is committable.
+TEST(RunScan, AdfEmptyAckReportsNoPaper) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0xc2});  // ESC D ADF ack: feeder empty.
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  EXPECT_EQ(status, brscan::Status::kNoPaper);
+  EXPECT_TRUE(pages.empty());
+
+  // The scan must be abandoned at the source-select ack: no ESC I offer
+  // negotiate and no ESC X execute may go on the wire (which would make the
+  // device fall back to the glass / hang). ESC D (0x1b 0x44) still must.
+  EXPECT_TRUE(Contains(t.written(), {0x1b, 0x44}))
+      << "ADF scan must still issue ESC D ADF";
+  EXPECT_FALSE(Contains(t.written(), {0x1b, 0x49}))
+      << "empty feeder must not reach ESC I negotiate";
+  EXPECT_FALSE(Contains(t.written(), {0x1b, 0x58}))
+      << "empty feeder must not reach ESC X execute";
+}
+
+// Duplex (D=DUP) empty feeder takes the same ESC D ADF ack path: a 0xc2
+// ack returns kNoPaper before ESC I / ESC X, rather than sending ESC X and
+// waiting out the ~24 s no-data timeout the device otherwise imposes on a
+// duplex job with nothing to feed.
+TEST(RunScan, AdfDuplexEmptyAckReportsNoPaper) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0xc2});  // ESC D ADF ack: feeder empty.
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.duplex = true;
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  EXPECT_EQ(status, brscan::Status::kNoPaper);
+  EXPECT_TRUE(pages.empty());
+  EXPECT_FALSE(Contains(t.written(), {0x1b, 0x58}))
+      << "empty duplex feeder must not reach ESC X execute";
+}
+
+// Companion to AdfEmptyAckReportsNoPaper: a 0x80 (document loaded) ack --
+// here as the single-byte reply a live probe saw, not the 2-byte capture
+// form -- must proceed through negotiate and readout to a finished scan.
+// Proves the new ack check gates only on 0xc2 and leaves the loaded path
+// (including a 1-byte ack) fully intact.
+TEST(RunScan, AdfLoadedAckProceedsToScan) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  const auto jpeg = MakeSyntheticJpeg(16, 8);
+  auto payload = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()));
+  payload.insert(payload.end(), jpeg.begin(), jpeg.end());
+  t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].data, jpeg);
+  EXPECT_TRUE(Contains(t.written(), {0x1b, 0x58}))
+      << "loaded feeder must reach ESC X execute";
+}
+
 TEST(RunScan, TruncatedColorPayloadIsErrorNotHang) {
   brscan::FakeTransport t;
   QueuePreamble(&t);
