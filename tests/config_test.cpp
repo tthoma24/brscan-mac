@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -730,6 +731,39 @@ TEST(DefaultConfigPathTest, EndsWithExpectedFilename) {
   const std::string suffix = ".config/brscan-scand.conf";
   ASSERT_GE(path.size(), suffix.size());
   EXPECT_EQ(path.substr(path.size() - suffix.size()), suffix);
+}
+
+// --- register_funcs: which destinations to advertise over SNMP (#22) ---
+
+TEST(ParseConfigTest, RegisterFuncsDefaultsToAllFour) {
+  const Config cfg = ParseConfig("");
+  EXPECT_EQ(cfg.register_funcs,
+            (std::vector<std::string>{kFuncFile, kFuncImage, kFuncOcr,
+                                      kFuncEmail}));
+}
+
+TEST(ParseConfigTest, RegisterFuncsParsesAConfiguredSubset) {
+  const Config cfg = ParseConfig("register_funcs=FILE,EMAIL\n");
+  EXPECT_EQ(cfg.register_funcs,
+            (std::vector<std::string>{kFuncFile, kFuncEmail}));
+}
+
+TEST(ParseConfigTest, RegisterFuncsIsCaseInsensitiveAndOrderNormalized) {
+  // Tokens may be lowercased and given in any order / with stray whitespace;
+  // the result is de-duplicated and held in canonical FILE/IMAGE/OCR/EMAIL
+  // order.
+  const Config cfg = ParseConfig("register_funcs= ocr , file , ocr \n");
+  EXPECT_EQ(cfg.register_funcs,
+            (std::vector<std::string>{kFuncFile, kFuncOcr}));
+}
+
+TEST(ParseConfigTest, RegisterFuncsWithNoKnownTokenKeepsDefault) {
+  // A value naming no known FUNC (including an empty value) leaves the
+  // default in place, so registration is never silently emptied.
+  const Config cfg = ParseConfig("register_funcs=bogus,\n");
+  EXPECT_EQ(cfg.register_funcs,
+            (std::vector<std::string>{kFuncFile, kFuncImage, kFuncOcr,
+                                      kFuncEmail}));
 }
 
 }  // namespace

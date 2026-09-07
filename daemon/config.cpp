@@ -186,6 +186,37 @@ std::optional<OutputSeparation> ParseSeparationString(const std::string& s,
   return std::nullopt;
 }
 
+// Parses a `register_funcs` value: a comma-separated subset of
+// FILE/IMAGE/OCR/EMAIL (case-insensitive, whitespace-tolerant) naming which
+// destinations the daemon advertises to the printer over SNMP (GitHub #22).
+// Returns the recognized FUNCs in the canonical FILE/IMAGE/OCR/EMAIL order,
+// de-duplicated. Returns nullopt if the value names no known FUNC, so the
+// caller leaves the default (all four) in place per ParseConfig()'s
+// tolerant-parse contract -- registration is never silently emptied.
+std::optional<std::vector<std::string>> ParseRegisterFuncs(
+    const std::string& value) {
+  bool has_file = false, has_image = false, has_ocr = false, has_email = false;
+  std::istringstream tokens(value);
+  std::string token;
+  while (std::getline(tokens, token, ',')) {
+    std::string name = Trim(token);
+    for (char& c : name) {
+      if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    }
+    if (name == kFuncFile) has_file = true;
+    else if (name == kFuncImage) has_image = true;
+    else if (name == kFuncOcr) has_ocr = true;
+    else if (name == kFuncEmail) has_email = true;
+  }
+  std::vector<std::string> funcs;
+  if (has_file) funcs.emplace_back(kFuncFile);
+  if (has_image) funcs.emplace_back(kFuncImage);
+  if (has_ocr) funcs.emplace_back(kFuncOcr);
+  if (has_email) funcs.emplace_back(kFuncEmail);
+  if (funcs.empty()) return std::nullopt;
+  return funcs;
+}
+
 // Returns the Params this key's <dest> prefix (file/image/ocr/email) names,
 // or nullptr for anything else -- the caller then ignores the key.
 brscan::Params* ParamsForDestPrefix(Config* cfg, const std::string& dest) {
@@ -284,6 +315,12 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
   }
   if (key == "email_to") {
     cfg->email_to = value;
+    return;
+  }
+  if (key == "register_funcs") {
+    if (const auto funcs = ParseRegisterFuncs(value)) {
+      cfg->register_funcs = *funcs;
+    }
     return;
   }
 

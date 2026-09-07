@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "brscan/types.h"
 #include "output_writer.h"
@@ -165,6 +166,18 @@ struct Config {
   // blank for the user to fill in -- the message is never sent
   // automatically either way.
   std::string email_to;
+
+  // Which destination FUNCs the daemon advertises to the printer over SNMP
+  // (see daemon/snmp_register.h). Each registration is a small SNMP Set the
+  // printer's weak shared CPU must service every re-register cycle, so
+  // advertising only the FUNCs you actually press keeps that steady-state
+  // chatter down (GitHub #22). Defaults to all four FUNCs, so an
+  // unconfigured `register_funcs` -- or one whose value names no known FUNC
+  // -- behaves exactly as before: every button destination is registered.
+  // Held in the canonical FILE/IMAGE/OCR/EMAIL order; ParseConfig() drops
+  // duplicate and unknown tokens (see the `register_funcs` key below).
+  std::vector<std::string> register_funcs = {kFuncFile, kFuncImage, kFuncOcr,
+                                             kFuncEmail};
 };
 
 // This machine's host name (gethostname()), or "Mac" if that call fails.
@@ -209,6 +222,13 @@ Config DefaultConfig();
 //   email_to            recipient address the EMAIL destination's
 //                        outgoing Mail message is pre-addressed to
 //                        (empty: leave To: blank)
+//   register_funcs      comma-separated subset of FILE,IMAGE,OCR,EMAIL
+//                        (case-insensitive) naming which destinations to
+//                        advertise to the printer over SNMP (default: all
+//                        four). Unknown and duplicate tokens are dropped; a
+//                        value naming no known FUNC leaves the default in
+//                        place, so registration is never silently emptied
+//                        (GitHub #22).
 //   <dest>.mode         color | gray | bw | errdiff | truegray
 //   <dest>.dpi          positive integer, sets both x_dpi and y_dpi
 //   <dest>.source       flatbed | adf | adf-duplex

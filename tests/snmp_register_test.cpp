@@ -11,6 +11,11 @@
 
 #include "snmp_register.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 namespace brscan::scand {
@@ -203,6 +208,151 @@ TEST(BuildSnmpSetRegisterTest, RequestIdVariesOtherFieldsDoNot) {
   }
   EXPECT_EQ(differences, 1u);
   EXPECT_EQ(first_diff, 19u);
+}
+
+// --- SnmpRegistrar address caching (GitHub #22) ---
+//
+// These use the injectable resolver/sender seams so no real name resolution
+// or UDP send happens. A single fake endpoint (all-zero address) is enough:
+// the fake sender never inspects it.
+
+namespace {
+
+// A resolver that hands back one dummy endpoint and counts how many times it
+// was asked to resolve.
+SnmpResolveFn CountingResolver(int* calls) {
+  return [calls](const std::string&) {
+    ++*calls;
+    return std::vector<ResolvedEndpoint>{ResolvedEndpoint{}};
+  };
+}
+
+// Pulls the FUNC=... token out of an encoded registration packet, so a fake
+// sender can capture which FUNC each Set carried.
+std::string FuncInPacket(const uint8_t* data, std::size_t len) {
+  const std::string s(data, data + len);
+  const std::string key = "FUNC=";
+  const auto pos = s.find(key);
+  if (pos == std::string::npos) return "";
+  const auto start = pos + key.size();
+  const auto end = s.find(';', start);
+  return s.substr(start, end == std::string::npos ? end : end - start);
+}
+
+}  // namespace
+
+TEST(SnmpRegistrarTest, ResolvesOnceAndReusesAcrossSends) {
+  int resolves = 0;
+  auto sender = [](const ResolvedEndpoint&, const uint8_t*, std::size_t) {
+    return true;
+  };
+  SnmpRegistrar registrar("printer.local", "internal",
+                          CountingResolver(&resolves), sender);
+
+  for (uint32_t i = 1; i <= 4; ++i) {
+    EXPECT_EQ(registrar.Send("value", i), Status::kOk);
+  }
+  // Four successful Sets, but the host was resolved exactly once.
+  EXPECT_EQ(resolves, 1);
+  EXPECT_EQ(registrar.resolve_count(), 1);
+}
+
+TEST(SnmpRegistrarTest, ReResolvesAfterAFailedSend) {
+  int resolves = 0;
+  bool fail_send = false;
+  auto sender = [&fail_send](const ResolvedEndpoint&, const uint8_t*,
+                             std::size_t) { return !fail_send; };
+  SnmpRegistrar registrar("printer.local", "internal",
+                          CountingResolver(&resolves), sender);
+
+  EXPECT_EQ(registrar.Send("value", 1), Status::kOk);  // Resolves (count 1).
+  EXPECT_EQ(registrar.resolve_count(), 1);
+
+  fail_send = true;
+  EXPECT_EQ(registrar.Send("value", 2), Status::kIoError);  // Drops the cache.
+
+  fail_send = false;
+  EXPECT_EQ(registrar.Send("value", 3), Status::kOk);  // Re-resolves (count 2).
+  EXPECT_EQ(registrar.resolve_count(), 2);
+}
+
+TEST(SnmpRegistrarTest, RetriesResolveWhenHostIsUnresolvable) {
+  int resolves = 0;
+  auto empty_resolver = [&resolves](const std::string&) {
+    ++resolves;
+    return std::vector<ResolvedEndpoint>{};  // Resolution failed.
+  };
+  auto sender = [](const ResolvedEndpoint&, const uint8_t*, std::size_t) {
+    return true;
+  };
+  SnmpRegistrar registrar("nope.local", "internal", empty_resolver, sender);
+
+  // Each Send re-attempts resolution while it keeps failing (nothing to
+  // cache), rather than giving up after the first miss.
+  EXPECT_EQ(registrar.Send("value", 1), Status::kIoError);
+  EXPECT_EQ(registrar.Send("value", 2), Status::kIoError);
+  EXPECT_EQ(resolves, 2);
+}
+
+TEST(SnmpRegistrarTest, InvalidateCacheForcesReResolve) {
+  int resolves = 0;
+  auto sender = [](const ResolvedEndpoint&, const uint8_t*, std::size_t) {
+    return true;
+  };
+  SnmpRegistrar registrar("printer.local", "internal",
+                          CountingResolver(&resolves), sender);
+
+  EXPECT_EQ(registrar.Send("value", 1), Status::kOk);
+  registrar.InvalidateCache();
+  EXPECT_EQ(registrar.Send("value", 2), Status::kOk);
+  EXPECT_EQ(resolves, 2);
+}
+
+TEST(RegisterDestinationsTest, SendsOnlyTheGivenFuncsInOrder) {
+  int resolves = 0;
+  std::vector<std::string> sent_funcs;
+  auto sender = [&sent_funcs](const ResolvedEndpoint&, const uint8_t* data,
+                              std::size_t len) {
+    sent_funcs.push_back(FuncInPacket(data, len));
+    return true;
+  };
+  SnmpRegistrar registrar("printer.local", "internal",
+                          CountingResolver(&resolves), sender);
+
+  // A configured subset: FILE + EMAIL only.
+  const std::vector<FuncRegistration> funcs = {
+      {"FILE", kAppNumFile}, {"EMAIL", kAppNumEmail}};
+  uint32_t request_id = 1;
+  const Status status =
+      RegisterDestinations(registrar, funcs, "192.0.2.10", 54925, "Office Mac",
+                           /*duration_sec=*/360, &request_id);
+
+  EXPECT_EQ(status, Status::kOk);
+  EXPECT_EQ(sent_funcs, (std::vector<std::string>{"FILE", "EMAIL"}));
+  EXPECT_EQ(request_id, 3u);  // Two Sets consumed request ids 1 and 2.
+  EXPECT_EQ(registrar.resolve_count(), 1);  // Both Sets shared one resolution.
+}
+
+TEST(RegisterDestinationsTest, ReportsFailureWhenAFuncFailsToSend) {
+  auto resolver = [](const std::string&) {
+    return std::vector<ResolvedEndpoint>{ResolvedEndpoint{}};
+  };
+  auto sender = [](const ResolvedEndpoint&, const uint8_t*, std::size_t) {
+    return false;  // Every Set fails to send.
+  };
+  SnmpRegistrar registrar("printer.local", "internal", resolver, sender);
+
+  std::vector<std::string> results;
+  const std::vector<FuncRegistration> funcs = {{"FILE", kAppNumFile}};
+  uint32_t request_id = 1;
+  const Status status = RegisterDestinations(
+      registrar, funcs, "192.0.2.10", 54925, "Mac", 360, &request_id,
+      [&results](const std::string& func, Status s) {
+        results.push_back(func + (s == Status::kOk ? ":ok" : ":fail"));
+      });
+
+  EXPECT_EQ(status, Status::kIoError);
+  EXPECT_EQ(results, (std::vector<std::string>{"FILE:fail"}));
 }
 
 }  // namespace

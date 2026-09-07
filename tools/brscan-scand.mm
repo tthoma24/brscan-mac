@@ -1,6 +1,7 @@
 // brscan-scand: the Scan-button daemon. Registers this Mac with the
-// printer as a destination for each of FILE/IMAGE/OCR/EMAIL, listens for
-// button-press notifications on UDP 54925, and on each press ACKs it,
+// printer as a destination for the configured FUNCs (cfg.register_funcs,
+// all of FILE/IMAGE/OCR/EMAIL by default -- see daemon/config.h), listens
+// for button-press notifications on UDP 54925, and on each press ACKs it,
 // pulls the scan over TCP 54921, writes it to disk, and dispatches the
 // FUNC's action (only FILE is implemented so far -- see daemon/actions.h).
 // See reference/plan-master.md's Plan 1b for the overall design.
@@ -39,6 +40,17 @@ namespace {
 // kDefaultRegistrationDurationSec), so a re-register always lands before
 // the printer would let the prior one expire.
 constexpr int kReregisterIntervalSec = 300;
+
+// How long the daemon reuses a resolved printer address before resolving it
+// again as a slow guard against a silently-changed IP (GitHub #22). The
+// printer's SNMP address, this Mac's advertised local address, and the
+// sender-check IPs are all cached across re-register cycles rather than
+// re-resolved each time (each getaddrinfo of a `.local` host is an mDNS
+// query the printer must answer). A failed registration re-resolves right
+// away regardless of this interval; this only bounds how long an IP change
+// that did *not* fail a send can go unnoticed. Chosen well above the 300 s
+// re-register cadence so it doesn't reintroduce per-cycle lookups.
+constexpr int kResolveRefreshSec = 3600;
 
 // Upper bound on a single ButtonListener::Receive() call, independent of
 // how long remains until the next re-register. Without this cap, a quiet
@@ -87,6 +99,24 @@ constexpr FuncSpec kFuncs[] = {
     {"OCR", brscan::scand::kAppNumOcr},
     {"EMAIL", brscan::scand::kAppNumEmail},
 };
+
+// The FUNCs to register this run, derived from cfg.register_funcs (GitHub
+// #22): only the configured destinations are advertised, kept in the
+// canonical kFuncs order. cfg.register_funcs defaults to all four (see
+// daemon/config.h), so an unconfigured daemon still registers every
+// destination -- the filtering only narrows the set when the user opts into
+// a subset.
+std::vector<brscan::scand::FuncRegistration> ConfiguredFuncRegistrations(
+    const brscan::scand::Config& cfg) {
+  std::vector<brscan::scand::FuncRegistration> registrations;
+  for (const FuncSpec& spec : kFuncs) {
+    if (std::find(cfg.register_funcs.begin(), cfg.register_funcs.end(),
+                  spec.func) != cfg.register_funcs.end()) {
+      registrations.push_back({spec.func, spec.appnum});
+    }
+  }
+  return registrations;
+}
 
 // Determines the local IP address this Mac would use to reach `host`, by
 // opening a UDP socket, connect()ing it (which resolves the route but
@@ -140,20 +170,19 @@ std::optional<std::string> LocalIpForPeer(const std::string& host,
   return ip;
 }
 
-// SNMP-registers every FUNC in kFuncs with the printer. Best-effort: a
-// failure for one FUNC (or overall, if the local IP can't be determined)
-// is logged and does not stop the daemon -- the next scheduled
-// re-registration will try again.
-void RegisterAllDestinations(const brscan::scand::Config& cfg,
-                              uint16_t listen_port, uint32_t* next_request_id) {
-  const auto local_ip = LocalIpForPeer(cfg.printer_host, kSnmpProbePort);
-  if (!local_ip.has_value()) {
-    std::cerr << "[register] could not determine this Mac's local address "
-                  "for '"
-               << cfg.printer_host << "'; skipping registration this round\n";
-    return;
-  }
-
+// SNMP-registers the configured FUNCs (see ConfiguredFuncRegistrations) with
+// the printer via `registrar`, using the already-resolved `local_ip` for the
+// HOST= field. The registrar caches the printer's SNMP address across Sets
+// and cycles (see daemon/snmp_register.h), so this no longer re-resolves the
+// host per Set. Best-effort: a per-FUNC failure is logged and does not stop
+// the daemon. Returns false if any FUNC failed to send (so the caller
+// re-resolves next cycle in case the printer's IP changed) or if there was
+// nothing configured to register.
+bool RegisterConfiguredDestinations(brscan::scand::SnmpRegistrar& registrar,
+                                     const brscan::scand::Config& cfg,
+                                     const std::string& local_ip,
+                                     uint16_t listen_port,
+                                     uint32_t* next_request_id) {
   std::string name;
   if (const auto sanitized = brscan::scand::SanitizeDisplayName(cfg.display_name)) {
     name = *sanitized;
@@ -165,15 +194,24 @@ void RegisterAllDestinations(const brscan::scand::Config& cfg,
     name = kFallbackDisplayName;
   }
 
-  for (const FuncSpec& spec : kFuncs) {
-    const std::string value = brscan::scand::BuildRegisterValue(
-        *local_ip, listen_port, name, spec.func, spec.appnum,
-        brscan::scand::kDefaultRegistrationDurationSec);
-    const brscan::Status status = brscan::scand::SendSnmpRegister(
-        cfg.printer_host, kSnmpCommunity, value, (*next_request_id)++);
-    std::cout << "[register] FUNC=" << spec.func << " -> "
-               << (status == brscan::Status::kOk ? "sent" : "failed") << "\n";
+  const auto registrations = ConfiguredFuncRegistrations(cfg);
+  if (registrations.empty()) {
+    // Can't normally happen: register_funcs defaults to all four and an
+    // empty parse falls back to that (see daemon/config.h). Guarded anyway
+    // so a future config path can't silently register nothing.
+    std::cerr << "[register] no FUNCs configured to register; skipping\n";
+    return false;
   }
+
+  const brscan::Status status = brscan::scand::RegisterDestinations(
+      registrar, registrations, local_ip, listen_port, name,
+      brscan::scand::kDefaultRegistrationDurationSec, next_request_id,
+      [](const std::string& func, brscan::Status result) {
+        std::cout << "[register] FUNC=" << func << " -> "
+                   << (result == brscan::Status::kOk ? "sent" : "failed")
+                   << "\n";
+      });
+  return status == brscan::Status::kOk;
 }
 
 void PrintUsage(const char* argv0) {
@@ -254,14 +292,29 @@ int main(int argc, char** argv) {
   // register immediately, before waiting on anything.
   auto next_register = std::chrono::steady_clock::now();
 
-  // Numeric IP(s) `cfg.printer_host` resolves to, refreshed alongside
-  // registration (see below). Used to drop a notification whose UDP
-  // sender doesn't match the real printer -- defense in depth against a
-  // forged notification from elsewhere on the LAN; see
-  // daemon/sender_check.h. Starts empty (unresolved), which
-  // IsAllowedSender() treats as "check unavailable, allow" until the
-  // first registration cycle resolves it.
+  // Registers destinations over SNMP, caching the printer's resolved SNMP
+  // address so the daemon no longer re-resolves printer_host on every Set /
+  // cycle (GitHub #22). Rebuilt if a SIGHUP reload changes printer_host.
+  brscan::scand::SnmpRegistrar registrar(cfg.printer_host, kSnmpCommunity);
+
+  // Numeric IP(s) `cfg.printer_host` resolves to. Used to drop a
+  // notification whose UDP sender doesn't match the real printer -- defense
+  // in depth against a forged notification from elsewhere on the LAN; see
+  // daemon/sender_check.h. Starts empty (unresolved), which IsAllowedSender()
+  // treats as "check unavailable, allow" until the first registration cycle
+  // resolves it.
   std::vector<std::string> allowed_sender_ips;
+
+  // This Mac's address to advertise in HOST=, resolved via LocalIpForPeer.
+  // Cached across cycles like allowed_sender_ips: both call getaddrinfo (an
+  // mDNS query for a `.local` host), so they are refreshed only when
+  // `needs_resolve` is set -- on the first cycle, after a registration send
+  // fails (the printer's IP may have changed), after a config reload, and at
+  // most every kResolveRefreshSec (see above) as a slow staleness guard --
+  // rather than on every 300 s cycle (GitHub #22).
+  std::optional<std::string> cached_local_ip;
+  bool needs_resolve = true;
+  auto next_resolve_refresh = std::chrono::steady_clock::now();
 
   // The printer retransmits a button notification until it's satisfied the
   // press was consumed, so one press arrives as several identical datagrams
@@ -308,10 +361,18 @@ int main(int argc, char** argv) {
                        << "': " << reload_ec.message() << "\n";
           }
           std::cout << "[config] reloaded " << config_path << "\n";
+          // A changed printer_host means the cached registrar and resolved
+          // addresses are for the wrong device: rebuild the registrar and
+          // force a fresh resolve next cycle.
+          if (registrar.printer_host() != cfg.printer_host) {
+            registrar =
+                brscan::scand::SnmpRegistrar(cfg.printer_host, kSnmpCommunity);
+          }
+          needs_resolve = true;
           // Force an immediate re-register rather than waiting up to
-          // kReregisterIntervalSec: a changed display_name or
-          // printer_host should take effect right away, and
-          // RegisterAllDestinations is idempotent/safe to call early.
+          // kReregisterIntervalSec: a changed display_name or printer_host
+          // should take effect right away, and registration is
+          // idempotent/safe to call early.
           next_register = std::chrono::steady_clock::now();
         } else {
           std::cerr << "[config] reload failed: " << config_path
@@ -322,13 +383,36 @@ int main(int argc, char** argv) {
 
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_register) {
-        RegisterAllDestinations(cfg, listener.port(), &request_id);
-        allowed_sender_ips = brscan::scand::ResolveHostIps(cfg.printer_host);
-        if (allowed_sender_ips.empty()) {
-          std::cerr << "[listener] warning: could not resolve '"
+        // Refresh the cached resolutions only when due (see needs_resolve /
+        // kResolveRefreshSec above), not on every cycle -- this is what
+        // eliminates the steady-state mDNS chatter (GitHub #22).
+        if (needs_resolve || now >= next_resolve_refresh) {
+          registrar.InvalidateCache();
+          cached_local_ip = LocalIpForPeer(cfg.printer_host, kSnmpProbePort);
+          allowed_sender_ips = brscan::scand::ResolveHostIps(cfg.printer_host);
+          if (allowed_sender_ips.empty()) {
+            std::cerr << "[listener] warning: could not resolve '"
+                       << cfg.printer_host
+                       << "' to verify notification senders; sender check "
+                          "disabled until the next re-register\n";
+          }
+          next_resolve_refresh = now + std::chrono::seconds(kResolveRefreshSec);
+          needs_resolve = false;
+        }
+
+        if (!cached_local_ip.has_value()) {
+          std::cerr << "[register] could not determine this Mac's local "
+                        "address for '"
                      << cfg.printer_host
-                     << "' to verify notification senders; sender check "
-                        "disabled until the next re-register\n";
+                     << "'; skipping registration this round\n";
+          needs_resolve = true;  // Retry the resolve next cycle.
+        } else if (!RegisterConfiguredDestinations(registrar, cfg,
+                                                    *cached_local_ip,
+                                                    listener.port(),
+                                                    &request_id)) {
+          // A send failed: the printer's IP may have moved. Re-resolve
+          // everything (including this Mac's local address) next cycle.
+          needs_resolve = true;
         }
         next_register = now + std::chrono::seconds(kReregisterIntervalSec);
       }
