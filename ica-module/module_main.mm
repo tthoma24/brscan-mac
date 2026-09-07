@@ -2,7 +2,7 @@
 //
 // Plan 2 Task 1 proved the module LOADS: icdd matches the synthetic device,
 // launches this ad-hoc-signed bundle, and runs main() (see
-// docs/RUNBOOK-plan-2-loadspike.md). But selecting the device in Image Capture
+// docs/RUNBOOK-plan-2-ica.md). But selecting the device in Image Capture
 // returned "Failed to open a connection to the device (-21345)" —
 // ICReturnConnectionFailedToOpen (ImageCaptureCore/ImageCaptureConstants.h) —
 // because the module's callbacks were inert stubs: ICD_ScannerOpenTCPIPDevice
@@ -554,7 +554,7 @@ ICAError PeriodicTask(ScannerObjectInfo* /*objectInfo*/) {
 // (hundreds of calls a millisecond) and never reached a ready state, because a
 // scanner device object is a container icdd expects to hold its one scan object,
 // and an empty container is treated as "not built yet → walk again". (The
-// earlier load-spike had the mirror-image bug: it returned noErr for every
+// earlier load spike had the mirror-image bug: it returned noErr for every
 // index, i.e. an endless supply of children — an infinite walk the other way.)
 //
 // The fix is a correct, finite tree: the device object (kICADevice) reports

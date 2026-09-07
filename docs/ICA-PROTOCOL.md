@@ -389,12 +389,12 @@ rectangle. Tracked for a follow-up.
 re-test must also reap it. After building:
 
 ```
-sudo ica-module/install-loadspike.sh install
-sudo killall BrscanICALoadSpike 2>/dev/null      # reap the stale child
+sudo ica-module/install.sh install
+sudo killall "BrScan Mac ICA" 2>/dev/null        # reap the stale child
 sudo rm -f "/Library/Image Capture/Devices/deviceInfoCacheV2.plist"
 killall icdd 2>/dev/null
 # verify the INSTALLED binary carries your change:
-strings "/Library/Image Capture/Devices/BrscanICALoadSpike.app/Contents/MacOS/BrscanICALoadSpike" | grep "<a string you added>"
+strings "/Library/Image Capture/Devices/BrScan Mac ICA.app/Contents/MacOS/BrScan Mac ICA" | grep "<a string you added>"
 log stream --predicate 'subsystem == "me.tthoma24.brscan.ica"' --style compact --info --debug
 ```
 

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Info.plist for the Plan 2 Task 1 ICA device-module load spike.
+  Info.plist for the "BrScan Mac ICA" Image Capture device module.
 
   Keys that matter for loading, cross-checked against Apple's shipping module
   /System/Library/Image Capture/Devices/AirScanScanner.app/Contents/Info.plist:
@@ -28,7 +28,7 @@
   <key>CFBundleExecutable</key>
   <string>${MODULE_NAME}</string>
   <key>CFBundleIdentifier</key>
-  <string>me.tthoma24.brscan.ica-loadspike</string>
+  <string>me.tthoma24.brscan.ica</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -52,6 +52,6 @@
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>NSHumanReadableCopyright</key>
-  <string>Clean-room ICA load spike. Synthetic device only.</string>
+  <string>Clean-room ICA scanner module. Synthetic device only.</string>
 </dict>
 </plist>
