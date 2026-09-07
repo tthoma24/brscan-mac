@@ -1112,33 +1112,37 @@ ICAError SendScannerNotification(CFMutableDictionaryRef dict,
 }
 
 // Reports the document feeder as empty to the host: posts a
-// kICANotificationTypeDeviceStatusInfo carrying kICANotificationSubTypeKey =
-// kICANotificationSubTypeDocumentNotLoaded, referenced to the DEVICE object like
-// every scanner notification (Task 15). This is the module-side path behind the
-// client's readonly ICScannerFunctionalUnitDocumentFeeder.documentLoaded, which
-// ImageCaptureCore/ICScannerFunctionalUnits.h documents as changing "if the
-// scanner module has the capability to detect this state". The subtype-key
-// mechanism mirrors the documented WarmUp* status notifications
-// (kICANotificationSubTypeWarmUpStarted/Done ride the same key + type); all four
-// symbols resolve from ICADevices.
+// kICANotificationTypeDeviceStatusError carrying kICANotificationSubTypeKey =
+// CFSTR("kICAErrStrDFEmptyErr"), referenced to the DEVICE object like every
+// scanner notification (Task 15). The *Error* type is what makes Image Capture
+// raise its built-in alert ("Scanner reported an error / Document feeder is
+// empty."); the informational DeviceStatusInfo type we posted before raises no
+// dialog. The subtype value is a raw localized-string KEY, not an SDK constant:
+// Image Capture resolves "kICAErrStrDFEmptyErr" to "Document feeder is empty."
+// via ICADevices.framework/.../Resources/Error.loctable. The type constant
+// kICANotificationTypeDeviceStatusError resolves from ICADevices (exported
+// alongside kICANotificationTypeDeviceStatusInfo in ICADevices.tbd); the
+// subtype-key mechanism mirrors the documented WarmUp* status notifications
+// (kICANotificationSubTypeWarmUpStarted/Done ride the same key).
 //
-// CLEAN-ROOM / UNVERIFIED: that the host maps DocumentNotLoaded onto
-// documentLoaded = NO (and surfaces a feeder-empty message) is inferred from the
-// public header names, not confirmed against a live icdd trace -- see the
-// device-in-the-loop re-test in docs/ICA-PROTOCOL.md.
+// CLEAN-ROOM: the notification type constant, the kICANotificationSubTypeKey
+// usage, and the public loctable string key kICAErrStrDFEmptyErr are interface
+// facts only; no source was copied. That the host surfaces this exact alert
+// must still be confirmed device-in-the-loop -- see the re-test in
+// docs/ICA-PROTOCOL.md.
 void NotifyDocumentFeederEmpty(ICAObject deviceObject) {
   CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
       nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
   if (dict == nullptr) return;
   CFDictionarySetValue(dict, kICANotificationSubTypeKey,
-                       kICANotificationSubTypeDocumentNotLoaded);
+                       CFSTR("kICAErrStrDFEmptyErr"));
   const ICAError err = SendScannerNotification(
-      dict, deviceObject, kICANotificationTypeDeviceStatusInfo,
+      dict, deviceObject, kICANotificationTypeDeviceStatusError,
       /*waitForReply=*/false);
   CFRelease(dict);
   os_log(Log(),
-         "SyncScan: posted DeviceStatusInfo/DocumentNotLoaded (feeder empty) "
+         "SyncScan: posted DeviceStatusError/DFEmpty alert (feeder empty) "
          "err=%d",
          err);
 }
