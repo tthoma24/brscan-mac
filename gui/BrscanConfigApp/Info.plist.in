@@ -15,7 +15,7 @@
     - CFBundlePackageType APPL + NSPrincipalClass NSApplication: a normal
       launchable macOS app.
     - LSUIElement: run as a menu-bar-only agent with no Dock icon. It does NOT
-      hide the WindowGroup window; the app pairs openWindow(id:) with
+      hide the config window; the app pairs openWindow(id:) with
       NSApplication.shared.activate(ignoringOtherApps:) so the config window
       still comes forward (see BrscanConfigApp.swift). LSBackgroundOnly is
       deliberately NOT used — that would suppress the window entirely.
