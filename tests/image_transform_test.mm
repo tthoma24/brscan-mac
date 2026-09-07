@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include "action_ocr.h"
+#include "blank_detect.h"
 #include "brscan/scanner.h"
 #include "brscan/types.h"
 #include "image_transform.h"
@@ -87,6 +88,38 @@ TEST(RotatePortraitTest, GraySwapsDimsAndMovesMarkerToTopRight) {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------
+// Shared decode (Finding #6): one CGImage feeds both the rotation and the
+// blank check, the primitive the post-scan pipeline uses to decode each page
+// once instead of once per stage.
+// ---------------------------------------------------------------------
+
+TEST(RotatePortraitTest, DecodedOverloadMatchesScanResultAndFeedsBlankCheck) {
+  constexpr int kW = 4, kH = 6, kBlock = 2;
+  const brscan::ScanResult page = MakeGrayPageWithTopLeftMarker(kW, kH, kBlock);
+
+  // Decode the page exactly once, then drive both stages from that one image.
+  CGImageRef src = brscan::CreateCGImageFromScanResult(page);
+  ASSERT_NE(src, nullptr);
+
+  // The decoded-image rotation overload must produce the same bytes as the
+  // ScanResult overload -- the only difference between them is who decodes.
+  const std::optional<brscan::ScanResult> from_decoded =
+      RotatePortrait(page, src, kDefaultJpegQuality);
+  const std::optional<brscan::ScanResult> from_scan_result = RotatePortrait(page);
+  ASSERT_TRUE(from_decoded.has_value());
+  ASSERT_TRUE(from_scan_result.has_value());
+  EXPECT_EQ(from_decoded->width, from_scan_result->width);
+  EXPECT_EQ(from_decoded->height, from_scan_result->height);
+  EXPECT_EQ(from_decoded->data, from_scan_result->data);
+
+  // The same decoded image also answers the blank check: this page carries a
+  // dark marker, so it is not blank.
+  EXPECT_FALSE(IsBlankPage(src));
+
+  CGImageRelease(src);
 }
 
 // ---------------------------------------------------------------------

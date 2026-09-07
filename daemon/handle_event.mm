@@ -8,6 +8,7 @@
 #include <system_error>
 #include <vector>
 
+#include "action_ocr.h"  // CreateCGImageFromScanResult (shared per-page decode)
 #include "actions.h"
 #include "blank_detect.h"
 #include "brscan/scanner.h"
@@ -200,41 +201,85 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
              << pages.size() << (pages.size() == 1 ? " page, " : " pages, ")
              << pages[0].width << "x" << pages[0].height << ")\n";
 
-  // ADF high-speed (the config command's X=1): the device fed each sheet
-  // landscape and returned it rotated 90 degrees, so rotate every page back
-  // to portrait before it is written. Done here -- after the scan, before
-  // WriteConfiguredOutput -- so a later skip-blank filter (task 1e.18) can
-  // run on the already-upright pages. A page that fails to rotate is left as
-  // scanned rather than failing the whole job (see image_transform.h's
-  // RotatePortrait contract).
+  // Post-scan per-page pipeline: ADF high-speed rotation (the config
+  // command's X=1) followed by the skip-blank filter (W=1). When both are on,
+  // each page would otherwise be JPEG-decoded once to rotate it and again to
+  // blank-check it (and a third time in the writer). Share ONE decode per page
+  // across the rotation and the blank check here: decode the page once, rotate
+  // from that image, and judge blankness from that same image. Blank detection
+  // is orientation-independent (see blank_detect.h), so measuring the
+  // pre-rotation image gives the same verdict as the rotated one -- which is
+  // why the shared decode is safe. The writer still does its own single decode
+  // below, so a both-toggles job now decodes each sheet twice, not three
+  // times.
+  //
+  // ADF high-speed (X=1): the device fed each sheet landscape and returned it
+  // rotated 90 degrees, so rotate every page back to portrait before it is
+  // written. A page that fails to rotate is left as scanned rather than
+  // failing the whole job (see image_transform.h's RotatePortrait contract).
+  //
+  // Skip-blank (W=1): a page host-side blank detection judges empty is dropped
+  // below. A page that could not be decoded is treated as NON-blank (kept),
+  // matching IsBlankPage's ScanResult-overload contract.
   if (high_speed) {
     std::cout << "[handle_event] FUNC=" << event.func
                << ": ADF high-speed; rotating " << pages.size()
                << (pages.size() == 1 ? " page" : " pages")
                << " back to portrait\n";
-    for (brscan::ScanResult& page : pages) {
-      if (std::optional<brscan::ScanResult> rotated =
-              RotatePortrait(page, jpeg_quality)) {
-        page = std::move(*rotated);
-      } else {
-        std::cerr << "[handle_event] FUNC=" << event.func
-                   << ": could not rotate a high-speed page; keeping it as "
-                      "scanned\n";
+  }
+  // is_blank[i] is meaningful only when skip_blank is true; it stays false
+  // (kept) for an undecodable page, mirroring IsBlankPage's "never drop a page
+  // we can't measure" contract.
+  std::vector<bool> is_blank(pages.size(), false);
+  if (high_speed || skip_blank) {
+    for (size_t i = 0; i < pages.size(); ++i) {
+      // @autoreleasepool: CreateCGImageFromScanResult's kRgb (JPEG) path
+      // decodes through an autoreleased NSData (daemon/action_ocr.mm), and the
+      // daemon has no ambient pool. Draining per page keeps every color page's
+      // decode buffer from leaking for the process lifetime.
+      @autoreleasepool {
+        brscan::ScanResult& page = pages[i];
+        CGImageRef src = brscan::CreateCGImageFromScanResult(page);
+        if (src == nullptr) {
+          // Decode failed: rotation keeps the page as scanned, and blank
+          // detection treats it as non-blank (is_blank[i] stays false) -- both
+          // best-effort, never failing the job or dropping an un-inspectable
+          // page.
+          if (high_speed) {
+            std::cerr << "[handle_event] FUNC=" << event.func
+                       << ": could not rotate a high-speed page; keeping it as "
+                          "scanned\n";
+          }
+          if (skip_blank) {
+            std::cerr << "[blank_detect] could not decode page; treating as "
+                         "non-blank\n";
+          }
+          continue;
+        }
+        if (skip_blank) is_blank[i] = IsBlankPage(src);
+        if (high_speed) {
+          if (std::optional<brscan::ScanResult> rotated =
+                  RotatePortrait(page, src, jpeg_quality)) {
+            page = std::move(*rotated);
+          } else {
+            std::cerr << "[handle_event] FUNC=" << event.func
+                       << ": could not rotate a high-speed page; keeping it as "
+                          "scanned\n";
+          }
+        }
+        CGImageRelease(src);
       }
     }
   }
 
-  // Skip-blank (the config command's W=1): drop pages host-side blank
-  // detection judges empty (daemon/blank_detect.h's IsBlankPage). Run here --
-  // after the high-speed rotation loop, so detection sees upright pages, and
-  // before the write below. A page that could not be decoded is treated as
-  // NON-blank by IsBlankPage, so it is kept, not dropped.
+  // Apply the skip-blank filter using the verdicts computed above, dropping
+  // the pages judged blank before the write below.
   if (skip_blank) {
     const size_t total = pages.size();
     std::vector<brscan::ScanResult> kept;
     kept.reserve(total);
-    for (brscan::ScanResult& page : pages) {
-      if (!IsBlankPage(page)) kept.push_back(std::move(page));
+    for (size_t i = 0; i < pages.size(); ++i) {
+      if (!is_blank[i]) kept.push_back(std::move(pages[i]));
     }
     if (kept.empty()) {
       // Every page looked blank. The write path below requires at least one

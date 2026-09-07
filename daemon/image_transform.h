@@ -2,6 +2,8 @@
 
 #include <optional>
 
+#include <CoreGraphics/CGImage.h>
+
 #include "brscan/scanner.h"
 #include "brscan/types.h"
 #include "output_writer.h"  // brscan::scand::kDefaultJpegQuality
@@ -46,5 +48,20 @@ namespace brscan::scand {
 // whole job over one page that could not be rotated.
 std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
                                                  int jpeg_quality = kDefaultJpegQuality);
+
+// Same rotation as above, but from an already-decoded page image rather than a
+// ScanResult -- the ScanResult overload is exactly this preceded by a
+// CreateCGImageFromScanResult() decode. It lets a caller that has already
+// decoded a page (e.g. daemon/handle_event's post-scan pipeline, which shares
+// one decode between this rotation and the skip-blank check) avoid decoding it
+// a second time. `page` supplies the source PixelFormat and dimensions (which
+// equal `decoded`'s pixel dimensions) and the re-encode target; `decoded` is
+// the pixels to rotate. The caller owns `decoded` and is responsible for
+// releasing it. Returns std::nullopt on a re-encode failure, exactly as the
+// ScanResult overload does (minus the decode-failure case, which the caller
+// handles by not calling this).
+std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
+                                                 CGImageRef decoded,
+                                                 int jpeg_quality);
 
 }  // namespace brscan::scand
