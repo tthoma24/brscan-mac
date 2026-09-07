@@ -27,7 +27,9 @@ struct MenuBarContentView: View {
     Divider()
 
     Button("Preferences…") {
-      openWindow(id: BrscanConfigApp.mainWindowID)
+      // Pair the open with app activation: under LSUIElement the window can
+      // otherwise surface behind the frontmost app (see BrscanConfigApp).
+      BrscanConfigApp.openConfigWindow(openWindow)
     }
 
     Divider()

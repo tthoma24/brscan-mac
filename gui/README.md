@@ -41,26 +41,57 @@ Both packages need macOS 13 (Ventura) or later and Swift 5.9 or later (the
 Xcode or Command Line Tools that ship with recent macOS releases include
 both).
 
-Neither package is wired into the project's CMake/C++ build — they're built
-and tested independently with `swift build`/`swift test`, not `cmake --build`
-or `ctest`.
+For quick iteration you can build and test either package on its own with
+`swift build`/`swift test`. The packaged `.app` (below) is built through CMake.
 
-## Current limitations
+## Packaging
 
-- **No `.app` bundle yet.** `BrscanConfigApp` is a plain SwiftPM executable:
-  `swift build`/`swift run` produce and run a binary, but not a signed,
-  double-clickable `.app` with an `Info.plist` (so no `LSUIElement`
-  menu-bar-only launch, and no Gatekeeper-friendly install). Packaging it as a
-  real `.app` is future work.
-- **Panel-only toggles aren't editable.** Skip-blank, remove-background, ADF
-  high-speed, and the OCR Text/HTML/RTF sub-formats have no `brscan-scand.conf`
-  key yet — they're parsed only as Touch-Panel-ON wire fields (see
-  `daemon/button_config.h` and docs/BUTTON.md's "Not yet implemented"). Adding
-  config keys for them is a daemon change, not a Plan 1e UI change.
-- **No Printers & Scanners / Image Capture integration.** Embedding these
-  settings in the system scanner UI depends on Plan 2's Image Capture device
-  module, which doesn't exist yet. This app is the standalone baseline until
-  then.
+`cmake --build build` (from the repo root) builds the app in release, assembles
+it into a real `.app` bundle, and ad-hoc signs it:
+
+```bash
+cmake -S . -B build
+cmake --build build          # builds build/gui/Brscan Config.app (among others)
+```
+
+The bundle is `build/gui/Brscan Config.app`: `CFBundleExecutable =
+BrscanConfigApp`, id `me.tthoma24.brscan.config`, and `LSUIElement = true` so it
+runs as a menu-bar-only agent (no Dock icon) while still showing its config
+window. SwiftPM's build output stays under `build/gui/swiftpm`, never in the
+source tree.
+
+Install it into `/Applications` (or remove it) with the helper script:
+
+```bash
+gui/install.sh install
+gui/install.sh uninstall
+```
+
+## Signing and Gatekeeper
+
+The bundle is **ad-hoc signed** by CMake (`codesign --sign -`), which is enough
+to run it locally. Because it is not Developer-ID signed or notarized, Gatekeeper
+will not open it on a first double-click: right-click the app in `/Applications`
+and choose **Open** (then **Open** again in the dialog), or clear the quarantine
+flag with `xattr -dr com.apple.quarantine "/Applications/Brscan Config.app"`.
+`gui/install.sh install` prints this reminder.
+
+The future Developer-ID signing + notarization path (for redistributing the app
+to other machines) is documented in
+[../docs/DISTRIBUTION.md](../docs/DISTRIBUTION.md); it is deliberately not wired
+into the build.
+
+## Not yet editable here
+
+- **Panel-only toggles aren't editable.** Skip-blank, ADF high-speed, and the
+  OCR Text/HTML/RTF sub-formats have no `brscan-scand.conf` key yet — they're
+  parsed only as Touch-Panel-ON wire fields (see `daemon/button_config.h` and
+  docs/BUTTON.md's "Not yet implemented"). Adding config keys for them is a
+  daemon change.
+- **No Printers & Scanners / Image Capture integration.** The system scanner UI
+  (Image Capture, Printers & Scanners) exposes only a module's scan-time
+  capabilities — there is no host hook for a persistent settings pane — so this
+  standalone app stays the configuration surface.
 
 ## How changes apply: Save & apply
 

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for "Brscan Config", the Plan 1e standalone configuration app.
+
+  The app is a menu-bar agent (SwiftUI MenuBarExtra) that edits the daemon's
+  per-destination "set from computer" defaults. CMake configures this template
+  (@ONLY) with the build target's version/min-OS and assembles it into
+  build/gui/Brscan Config.app/Contents/Info.plist around the `swift build`
+  release binary.
+
+  Keys that matter:
+    - CFBundleExecutable = BrscanConfigApp: the SwiftPM product name (no
+      spaces); the pretty name is CFBundleName/CFBundleDisplayName instead.
+    - CFBundlePackageType APPL + NSPrincipalClass NSApplication: a normal
+      launchable macOS app.
+    - LSUIElement: run as a menu-bar-only agent with no Dock icon. It does NOT
+      hide the WindowGroup window; the app pairs openWindow(id:) with
+      NSApplication.shared.activate(ignoringOtherApps:) so the config window
+      still comes forward (see BrscanConfigApp.swift). LSBackgroundOnly is
+      deliberately NOT used — that would suppress the window entirely.
+    - LSMinimumSystemVersion 13.0: matches Package.swift's .macOS(.v13).
+    - CFBundleSupportedPlatforms [MacOSX]: bundle parity for LaunchServices.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>BrscanConfigApp</string>
+  <key>CFBundleIdentifier</key>
+  <string>me.tthoma24.brscan.config</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Brscan Config</string>
+  <key>CFBundleDisplayName</key>
+  <string>Brscan Config</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleSupportedPlatforms</key>
+  <array>
+    <string>MacOSX</string>
+  </array>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleSignature</key>
+  <string>????</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>@CONFIG_APP_MIN_MACOS@</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright (C) 2025 brscan-mac contributors. Licensed GPL-2.0-or-later.</string>
+</dict>
+</plist>
