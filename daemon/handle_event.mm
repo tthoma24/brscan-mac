@@ -9,7 +9,7 @@
 #include <system_error>
 #include <vector>
 
-#include "action_ocr.h"  // CreateCGImageFromScanResult (shared per-page decode)
+#include "output/action_ocr.h"  // CreateCGImageFromScanResult (shared per-page decode)
 #include "actions.h"
 #include "blank_detect.h"
 #include "brscan/scanner.h"
@@ -236,7 +236,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   if (high_speed || skip_blank) {
     for (size_t i = 0; i < pages.size(); ++i) {
       // @autoreleasepool: CreateCGImageFromScanResult's kRgb (JPEG) path
-      // decodes through an autoreleased NSData (daemon/action_ocr.mm), and the
+      // decodes through an autoreleased NSData (output/action_ocr.mm), and the
       // daemon has no ambient pool. Draining per page keeps every color page's
       // decode buffer from leaking for the process lifetime.
       @autoreleasepool {

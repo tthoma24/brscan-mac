@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "brscan/types.h"
-#include "output_writer.h"
+#include "output/output_writer.h"
 
 // The daemon's configuration: where the printer is, what to call this Mac
 // in the printer's Scan menu, where FILE-destination scans land, and the
@@ -142,7 +142,7 @@ struct Config {
   int ocr_jpeg_quality = kDefaultJpegQuality;
   int email_jpeg_quality = kDefaultJpegQuality;
 
-  // OCR-destination output sub-format (see daemon/action_ocr.h's
+  // OCR-destination output sub-format (see output/action_ocr.h's
   // OcrTextFormat and output_writer.h's OutputFormat text sinks): the file
   // the OCR destination produces when its scan-button `T=` sub-format is
   // NOT panel-supplied (Touch-Panel-OFF). kPdf (the default) is the

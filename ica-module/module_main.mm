@@ -1269,7 +1269,7 @@ PageResult PostBand(ICAObject icaObject, const brscan::ScanBand& band,
 // ImageIO (CGImageDestination) and writes it into the host's destination
 // folder, then posts the page/scan-done notifications the host recognises for a
 // saved file. This is entirely self-contained -- it does NOT use
-// daemon/output_writer (different scope). CGImage construction facts are the
+// output/output_writer (different scope). CGImage construction facts are the
 // public CoreGraphics/ImageIO contract; the notification sequence is confirmed
 // from Apple's ICADevices sample VirtualScanner (facts only, no source copied):
 // its file transfer writes the page with CGImageDestinationCreateWithURL / ...

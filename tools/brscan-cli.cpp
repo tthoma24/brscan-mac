@@ -14,7 +14,7 @@
 #include "brscan/scanner.h"
 #include "brscan/transport_tcp.h"
 #include "brscan/types.h"
-#include "output_writer.h"
+#include "output/output_writer.h"
 #include "scan_output.h"
 
 namespace {

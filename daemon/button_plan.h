@@ -7,7 +7,7 @@
 
 #include "brscan/types.h"
 #include "config.h"
-#include "output_writer.h"
+#include "output/output_writer.h"
 
 // The scan-button precedence planner: decides whether a button press is
 // driven by the printer's own LCD-set settings ("Touch-Panel-ON") or by

@@ -6,7 +6,7 @@
 
 #include "brscan/scanner.h"
 #include "brscan/types.h"
-#include "output_writer.h"  // brscan::scand::kDefaultJpegQuality
+#include "output/output_writer.h"  // brscan::scand::kDefaultJpegQuality
 
 // Host-side page rotation for the scan-button "ADF High Speed" mode (the
 // config command's `X=1`; see reference/protocol-notes-button-options.md and
@@ -25,7 +25,7 @@ namespace brscan::scand {
 // contract in libbrscan/include/brscan/scanner.h), so a rotated page is
 // indistinguishable from a natively-scanned one to every downstream writer.
 //
-// Decoding reuses daemon/action_ocr.h's CreateCGImageFromScanResult (the one
+// Decoding reuses output/action_ocr.h's CreateCGImageFromScanResult (the one
 // place that turns a ScanResult's native bytes back into a CGImage), so the
 // three PixelFormat cases decode exactly as they do everywhere else.
 //

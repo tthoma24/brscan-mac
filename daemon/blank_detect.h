@@ -13,7 +13,7 @@
 // this judges blank before writing.
 namespace brscan::scand {
 
-// Returns true if `page` looks blank: it is decoded (via daemon/action_ocr.h's
+// Returns true if `page` looks blank: it is decoded (via output/action_ocr.h's
 // CreateCGImageFromScanResult -- the one place that turns a ScanResult's
 // native bytes back into a CGImage, so kRgb/kGray/kBitonal all decode exactly
 // as they do elsewhere), downscaled into a small grayscale bitmap, and judged

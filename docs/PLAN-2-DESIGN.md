@@ -469,7 +469,7 @@ public `VirtualScanner` sample module, interface facts only):
   to, logged verbatim (Task 15) — and finally one
   `kICANotificationTypeScannerScanDone`, both against the device object. Encoding
   uses ImageIO directly in the module — it does **not** pull in
-  `daemon/output_writer` (different scope).
+  `output/output_writer` (different scope).
 
   For a **local** client (a `"document folder"` is present, as with Image
   Capture saving to `~/Documents`) VirtualScanner writes the file and posts

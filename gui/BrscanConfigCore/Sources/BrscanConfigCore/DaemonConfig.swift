@@ -282,7 +282,7 @@ extension DaemonConfig.Route {
   /// combine), which `daemon/config.h`'s doc comments call out as this
   /// project's chosen default for every FUNC absent a config override; see
   /// `daemon/config.h`'s `Config::file_params`/`file_output` comments and
-  /// `libbrscan/include/brscan/types.h`'s `Params`/`daemon/output_writer.h`'s
+  /// `libbrscan/include/brscan/types.h`'s `Params`/`output/output_writer.h`'s
   /// `OutputSettings`.
   public static let `default` = DaemonConfig.Route(
     mode: OptionSets.mode[0],  // "color"

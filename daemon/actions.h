@@ -37,7 +37,7 @@ int DefaultCommandRunner(const std::vector<std::string>& argv);
 // Performs the destination action for `func` (FILE/IMAGE/OCR/EMAIL) on the
 // files already written for this press (see HandleButtonEvent in
 // daemon/handle_event.h, which calls this after
-// daemon/output_writer.h's WriteConfiguredOutput has produced `written` --
+// output/output_writer.h's WriteConfiguredOutput has produced `written` --
 // the user-configured format's file(s): one native file per page, one
 // combined PDF/TIFF, or several `-docNNN` documents under `every:N`
 // separation).
@@ -52,7 +52,7 @@ int DefaultCommandRunner(const std::vector<std::string>& argv);
 //     deliverable, and it was already produced upstream by
 //     WriteConfiguredOutput(searchable=true) -- see daemon/handle_event.cpp,
 //     which forces OCR's OutputSettings to PDF+searchable before calling
-//     it. (daemon/action_ocr.h's OcrImageToSearchablePdf still exists and
+//     it. (output/action_ocr.h's OcrImageToSearchablePdf still exists and
 //     is still tested on its own; it's just no longer invoked from here.)
 //   - EMAIL: opens a new Mail.app outgoing message with every file in
 //     `written` attached (a combined PDF/TIFF is a single attachment;

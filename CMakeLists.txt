@@ -37,33 +37,21 @@ target_include_directories(brscan PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
 target_link_libraries(brscan PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
-# The end-to-end scanning CLI. Links against the brscan library for the
-# scan protocol itself, plus daemon/output_writer.mm (Task 1c.2b's
-# --format/--tiff-compression/--separate flags) for turning the scanned
-# pages into the requested file(s). output_writer.mm's PDF/TIFF paths
-# decode each page via daemon/action_ocr.mm's CreateCGImageFromScanResult
-# and compose PDFs via its WriteSearchablePdf (with searchable always
-# false from the CLI -- OCR is a daemon destination concern), so that
-# source and its Vision/CoreGraphics framework dependencies are pulled in
-# here too, even though the CLI itself never requests a text layer.
-add_executable(brscan-cli
-  tools/brscan-cli.cpp
-  tools/scan_output.cpp
-  daemon/action_ocr.mm
-  daemon/output_writer.mm
-)
-target_include_directories(brscan-cli PRIVATE daemon tools)
-target_link_libraries(brscan-cli PRIVATE brscan)
-target_link_libraries(brscan-cli PRIVATE ${TURBOJPEG_LIBRARIES})
-target_link_directories(brscan-cli PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
-
-# Frameworks for the OCR destination action (daemon/action_ocr.mm): Vision
-# does the text recognition; the rest are the CoreGraphics/CoreText/ImageIO
-# plumbing used to load the saved scan and compose the searchable PDF.
-# PDFKit and AppKit aren't used by action_ocr.mm itself, but PDFKit is
-# what tests/action_ocr_test.mm uses to read the produced PDF back for
-# verification (see CMakeLists.txt's brscan_tests target below), and
-# PDFKit pulls in AppKit.
+# The shared output library. output_writer + action_ocr turn a completed
+# multi-page scan into the configured file(s) -- native/JPEG/PNG/PDF/TIFF,
+# plus action_ocr's Vision searchable-PDF path and its per-page
+# CreateCGImageFromScanResult decode. Both front ends (the brscan-cli CLI
+# and the brscan-scand daemon) link this, so it lives in its own neutral
+# output/ directory rather than under daemon/, and carries the
+# Objective-C++/framework dependencies its ImageIO/CoreGraphics/Vision
+# implementation needs. The brscan core library stays framework-free.
+#
+# The OCR frameworks: Vision does the text recognition; the rest are the
+# CoreGraphics/CoreText/ImageIO plumbing used to load the saved scan and
+# compose the searchable PDF. PDFKit and AppKit aren't used by the sources
+# themselves, but tests/action_ocr_test.mm uses PDFKit to read the produced
+# PDF back for verification (see the brscan_tests target below), and PDFKit
+# pulls in AppKit; both reach that test target through this library.
 find_library(VISION_FRAMEWORK Vision REQUIRED)
 find_library(CORETEXT_FRAMEWORK CoreText REQUIRED)
 find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
@@ -82,20 +70,43 @@ set(OCR_FRAMEWORKS
   ${PDFKIT_FRAMEWORK}
   ${APPKIT_FRAMEWORK}
 )
-target_link_libraries(brscan-cli PRIVATE ${OCR_FRAMEWORKS})
+add_library(brscan-output
+  output/action_ocr.mm
+  output/output_writer.mm
+)
+# `#include "output/..."` resolves from the source root, and consumers that
+# link brscan-output inherit that path. output_writer.mm also uses
+# tools/scan_output.h's WritePages/PagePath for its native per-page files,
+# so tools/ is on the private compile path; each front end already compiles
+# scan_output.cpp, which resolves those symbols at the final link.
+target_include_directories(brscan-output PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(brscan-output PRIVATE ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(brscan-output PUBLIC brscan ${OCR_FRAMEWORKS})
 
-# action_ocr.mm (and its test) use ARC for their Objective-C objects
-# (NSData, VN*, NS*); Core Foundation/CoreGraphics/CoreText opaque types
-# are unaffected by this flag and stay manually retained/released either
-# way. CMake infers Objective-C++ compilation for these from the .mm
-# extension on its own.
+# action_ocr.mm and output_writer.mm use ARC for their Objective-C objects
+# (NSData, VN*, NS*); Core Foundation/CoreGraphics/CoreText opaque types are
+# unaffected by this flag and stay manually retained/released either way.
+# CMake infers Objective-C++ compilation from the .mm extension on its own.
 set_source_files_properties(
-  daemon/action_ocr.mm
-  daemon/output_writer.mm
-  tests/action_ocr_test.mm
-  tests/output_writer_test.mm
+  output/action_ocr.mm
+  output/output_writer.mm
   PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
 )
+
+# The end-to-end scanning CLI. Links the brscan library for the scan
+# protocol and the brscan-output library (Task 1c.2b's
+# --format/--tiff-compression/--separate flags) for turning the scanned
+# pages into the requested file(s). The CLI never requests a text layer, but
+# brscan-output's Vision/CoreGraphics dependencies now come in with the
+# library rather than being compiled here.
+add_executable(brscan-cli
+  tools/brscan-cli.cpp
+  tools/scan_output.cpp
+)
+target_include_directories(brscan-cli PRIVATE tools)
+target_link_libraries(brscan-cli PRIVATE brscan-output)
+target_link_libraries(brscan-cli PRIVATE ${TURBOJPEG_LIBRARIES})
+target_link_directories(brscan-cli PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 
 # The Scan-button daemon: registers with the printer, listens for button
 # presses on UDP 54925, pulls each scan, and saves it (Plan 1b). Its own
@@ -111,8 +122,6 @@ add_executable(brscan-scand
   daemon/paper_size.cpp
   daemon/config.cpp
   daemon/actions.cpp
-  daemon/action_ocr.mm
-  daemon/output_writer.mm
   daemon/image_transform.mm
   daemon/blank_detect.mm
   daemon/button_plan.cpp
@@ -122,9 +131,13 @@ add_executable(brscan-scand
   daemon/log_safe.cpp
 )
 target_include_directories(brscan-scand PRIVATE daemon tools)
-target_link_libraries(brscan-scand PRIVATE brscan)
+target_link_libraries(brscan-scand PRIVATE brscan-output)
 target_link_libraries(brscan-scand PRIVATE ${TURBOJPEG_LIBRARIES})
 target_link_directories(brscan-scand PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
+# brscan-scand's own daemon-side .mm (image_transform/blank_detect/
+# handle_event) call action_ocr's CreateCGImageFromScanResult and use the
+# CoreGraphics/ImageIO frameworks, which reach this target through
+# brscan-output; the explicit link keeps them available even so.
 target_link_libraries(brscan-scand PRIVATE ${OCR_FRAMEWORKS})
 
 # Plan 2 — ICA device module ("BrScan Mac ICA").
@@ -318,9 +331,7 @@ if(BUILD_TESTING)
     tests/config_reload_test.cpp
     daemon/actions.cpp
     tests/actions_test.cpp
-    daemon/action_ocr.mm
     tests/action_ocr_test.mm
-    daemon/output_writer.mm
     tests/output_writer_test.mm
     daemon/image_transform.mm
     tests/image_transform_test.mm
@@ -346,13 +357,23 @@ if(BUILD_TESTING)
     tests/file_transfer_test.cpp
     tests/scan_outcome_test.cpp
   )
-  target_link_libraries(brscan_tests PRIVATE brscan GTest::gtest_main)
+  target_link_libraries(brscan_tests PRIVATE brscan-output GTest::gtest_main)
   target_include_directories(brscan_tests PRIVATE libbrscan tests daemon tools
                              ica-module)
   target_include_directories(brscan_tests PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
   target_link_libraries(brscan_tests PRIVATE ${TURBOJPEG_LIBRARIES})
   target_link_directories(brscan_tests PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
   target_link_libraries(brscan_tests PRIVATE ${OCR_FRAMEWORKS})
+
+  # The output tests' .mm read/compose Objective-C objects and need ARC, the
+  # same as the brscan-output sources they exercise (the library sets the flag
+  # on its own translation units). image_transform/blank_detect/handle_event's
+  # .mm stay manually retained/released, matching their non-test builds.
+  set_source_files_properties(
+    tests/action_ocr_test.mm
+    tests/output_writer_test.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
+  )
   target_compile_definitions(brscan_tests PRIVATE
     BRSCAN_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
     BRSCAN_OPTION_SETS_JSON="${CMAKE_SOURCE_DIR}/config/option-sets.json")
