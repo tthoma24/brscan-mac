@@ -56,11 +56,15 @@
 # Each destination also takes its own output file format, mirroring
 # iPrint&Scan Settings' "File Type" and "Document" (separation) choices:
 #
-#   <dest>.format             pdf | tiff | jpeg | png | native (default
-#                             native: one file per page, in the format
-#                             <dest>.mode implies -- JPEG for color, PGM for
-#                             gray/truegray, PBM for bw/errdiff -- exactly
-#                             today's behavior)
+#   <dest>.format             pdf | tiff | jpeg | png | heic | jp2 | gif |
+#                             bmp | native (default native: one file per
+#                             page, in the format <dest>.mode implies --
+#                             JPEG for color, PGM for gray/truegray, PBM for
+#                             bw/errdiff -- exactly today's behavior). heic /
+#                             jp2 / gif / bmp are the extra single-image
+#                             types Image Capture offers; like jpeg/png they
+#                             write one file per page (no container), with
+#                             the .heic/.jp2/.gif/.bmp extension.
 #   <dest>.tiff_compression   lzw | g3 | g4 (default lzw; only affects
 #                             <dest>.format = tiff; g3/g4 are 1-bit fax
 #                             codecs and only apply to a bilevel (bw/errdiff)

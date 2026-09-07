@@ -13,7 +13,7 @@
 
   "format": {
     "_comment": "<dest>.format -- daemon/config.cpp's ParseFormatString(), daemon/output_writer.h's OutputFormat. Default when unset is native.",
-    "tokens": ["native", "pdf", "tiff", "jpeg", "png"]
+    "tokens": ["native", "pdf", "tiff", "jpeg", "png", "heic", "jp2", "gif", "bmp"]
   },
 
   "tiff_compression": {

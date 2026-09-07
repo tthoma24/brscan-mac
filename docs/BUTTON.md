@@ -25,11 +25,15 @@ your config) and what happens to the finished scan:
 
 Each destination also has its own output file format, configured with
 `<dest>.format` in the config file (`<dest>` is `file`, `image`, `ocr`, or
-`email`): `pdf`, `tiff`, `jpeg`, `png`, or `native` (the default). `native`
-writes one file per page in the format the destination's scan mode implies
--- JPEG for color, PGM for gray/truegray, PBM for black & white -- the same
-behavior as before this setting existed. Any other format instead writes a
-single JPEG/PNG per page, or one combined PDF/TIFF holding every page.
+`email`): `pdf`, `tiff`, `jpeg`, `png`, `heic`, `jp2`, `gif`, `bmp`, or
+`native` (the default). `native` writes one file per page in the format the
+destination's scan mode implies -- JPEG for color, PGM for gray/truegray,
+PBM for black & white -- the same behavior as before this setting existed.
+`heic`, `jp2`, `gif`, and `bmp` are the extra single-image types Apple's
+Image Capture menu offers; like `jpeg`/`png` they write one file per page
+(no container), with the matching `.heic`/`.jp2`/`.gif`/`.bmp` extension.
+Any other format instead writes a single image per page, or one combined
+PDF/TIFF holding every page.
 
 **OCR defaults to a searchable PDF.** Because OCR's whole point is text you
 can select and search, its output defaults to a PDF with a
@@ -45,8 +49,9 @@ For a PDF or TIFF, `<dest>.separation` controls how many pages land in each
 file: `combine` (the default) puts every page from one button press into a
 single file; `every:N` starts a new file every N pages instead (for
 example `every:1` with a 2-page scan produces two separate PDFs, each
-named with a `-docNNN` suffix). Separation doesn't apply to jpeg/png/native
-output, which always writes one file per page regardless.
+named with a `-docNNN` suffix). Separation doesn't apply to the per-page
+formats (jpeg/png/heic/jp2/gif/bmp/native), which always write one file per
+page regardless.
 
 `<dest>.tiff_compression` (`lzw`, `g3`, or `g4`; default `lzw`) only
 matters for `<dest>.format = tiff`. `g3`/`g4` are 1-bit fax codecs that
@@ -133,9 +138,10 @@ page looks blank one page is kept so the scan still produces output.
 **JPEG quality is computer-side only.** The `<dest>.jpeg_quality` config key
 (integer `0-100`, default `90`) sets the JPEG lossy-compression quality --
 like the vendor driver's "File Size: Small ... High Quality" slider. It
-applies to JPEG output (`<dest>.format = jpeg`) and to the color re-encode of
-a high-speed rotated page (`daemon/image_transform.h`'s `RotatePortrait`);
-tiff/png/pdf/native ignore it. Unlike the toggles above, there is **no**
+applies to the lossy image formats (`<dest>.format = jpeg`, and `heic`/`jp2`
+where the host supports them) and to the color re-encode of a high-speed
+rotated page (`daemon/image_transform.h`'s `RotatePortrait`); the lossless
+formats (png/gif/bmp) and the tiff/pdf/native paths ignore it. Unlike the toggles above, there is **no**
 Touch-Panel counterpart: the LCD config vocabulary carries no quality key, so
 this is always taken from the config with no ON/OFF precedence. The daemon
 resolves it once per event (`JpegQualityForFunc`) and maps it to ImageIO's

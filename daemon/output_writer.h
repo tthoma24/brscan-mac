@@ -26,6 +26,14 @@ namespace brscan::scand {
 //   tools/scan_output.cpp's WritePages already produces, and the format
 //   used when no `<dest>.format` key is set.
 //
+// kHeic/kJpeg2000/kGif/kBmp are the extra single-image formats Image
+// Capture's "File Type" menu exposes for this scanner (public.heic /
+// public.jpeg-2000 / com.compuserve.gif / com.microsoft.bmp). Like kJpeg and
+// kPng they are single-image encoders, so each writes one file per page (no
+// multi-page container): document separation does not apply. kHeic and
+// kJpeg2000 are lossy; the rest are lossless. Appended (with the OCR sinks
+// below) so existing enumerator values stay stable.
+//
 // kText/kHtml/kRtf are OCR-only text sinks: rather than reproduce the
 // scanned image, they run Vision text recognition on each page and write
 // the recognized text as a single plain-text (.txt), HTML (.html), or RTF
@@ -35,7 +43,20 @@ namespace brscan::scand {
 // `ocr.ocr_format` config key -- since a text sink discards the image.
 // Appended after the image formats so existing switch coverage keeps its
 // enumerator values stable.
-enum class OutputFormat { kNative, kPdf, kTiff, kJpeg, kPng, kText, kHtml, kRtf };
+enum class OutputFormat {
+  kNative,
+  kPdf,
+  kTiff,
+  kJpeg,
+  kPng,
+  kText,
+  kHtml,
+  kRtf,
+  kHeic,
+  kJpeg2000,
+  kGif,
+  kBmp
+};
 
 // TIFF compression codec, as an NSTIFFCompression value at write time
 // (LZW=5, CCITT Group 3=3, CCITT Group 4=4). G3/G4 are 1-bit fax codecs
@@ -104,11 +125,14 @@ struct OutputSettings {
 //     written 1-bit with the requested fax codec; a kGray/kRgb page is not
 //     bilevel, so G3/G4 falls back to LZW for that page (documented,
 //     lossless -- no thresholding).
-//   - kJpeg / kPng: one file per page, numbered `-NNN` when there is more
-//     than one page (via brscan::cli::PagePath). Separation does not apply
-//     to these per-page formats -- kEveryImage/kEveryPage behave like
-//     kCombine. kJpeg encodes at `settings.jpeg_quality` (0-100); kPng, a
-//     lossless format, ignores it.
+//   - kJpeg / kPng / kHeic / kJpeg2000 / kGif / kBmp: one single-image file
+//     per page, numbered `-NNN` when there is more than one page (via
+//     brscan::cli::PagePath) with the format's extension (.jpg / .png /
+//     .heic / .jp2 / .gif / .bmp). Separation does not apply to these
+//     per-page formats -- kEveryImage/kEveryPage behave like kCombine. The
+//     lossy encoders (kJpeg, and kHeic/kJpeg2000 where the host supports
+//     them) honor `settings.jpeg_quality` (0-100); the lossless formats
+//     (kPng, kGif, kBmp) ignore it.
 //   - kText / kHtml / kRtf: one `.txt` / `.html` / `.rtf` file holding the
 //     Vision-recognized text of every page (see daemon/action_ocr.h's
 //     WriteRecognizedText). Single-file output, like kNative -- document

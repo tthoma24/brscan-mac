@@ -20,7 +20,7 @@ public enum OptionSets {
   public static let source: [String] = ["flatbed", "adf", "adf-duplex"]
 
   /// `<dest>.format` tokens (daemon/config.cpp's ParseFormatString).
-  public static let format: [String] = ["native", "pdf", "tiff", "jpeg", "png"]
+  public static let format: [String] = ["native", "pdf", "tiff", "jpeg", "png", "heic", "jp2", "gif", "bmp"]
 
   /// `<dest>.tiff_compression` tokens (daemon/config.cpp's ParseTiffCompressionString).
   public static let tiffCompression: [String] = ["lzw", "g3", "g4"]

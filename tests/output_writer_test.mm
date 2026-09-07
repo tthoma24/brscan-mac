@@ -149,6 +149,24 @@ bool ImageDims(const std::filesystem::path& path, int* width, int* height) {
   return true;
 }
 
+// The image type (UTI) ImageIO detects for the file at `path`, e.g.
+// "public.heic", or empty if it cannot be read as an image. Used to confirm
+// a per-page single-image write produced a file of the intended format.
+std::string ImageUti(const std::filesystem::path& path) {
+  NSURL* url =
+      [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+  CGImageSourceRef src =
+      CGImageSourceCreateWithURL((__bridge CFURLRef)url, nullptr);
+  if (src == nullptr) return "";
+  CFStringRef uti = CGImageSourceGetType(src);
+  std::string result;
+  if (uti != nullptr) {
+    result = [(__bridge NSString*)uti UTF8String];
+  }
+  CFRelease(src);
+  return result;
+}
+
 int PdfPageCount(const std::filesystem::path& path) {
   NSURL* url =
       [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
@@ -319,6 +337,106 @@ TEST(WriteConfiguredOutputTest, PngSinglePageIsNotNumbered) {
   EXPECT_EQ(written[0], TempPath("single.png").string());
   int w = 0, h = 0;
   ASSERT_TRUE(ImageDims(written[0], &w, &h));
+  EXPECT_EQ(w, 24);
+  EXPECT_EQ(h, 12);
+  RemoveAll(written);
+}
+
+// ---------------------------------------------------------------------
+// Extra single-image formats: HEIC / JPEG 2000 / GIF / BMP (issue #24).
+// Each writes one file per page, like JPEG/PNG, and produces a file ImageIO
+// re-opens as an image of the intended type.
+// ---------------------------------------------------------------------
+
+TEST(WriteConfiguredOutputTest, HeicWritesOneDecodableFilePerPage) {
+  // HEIC uses RGB pages: the platform HEIC (HEVC) encoder rejects a
+  // DeviceGray source, so this mirrors a color scan, HEIC's common use.
+  const std::vector<brscan::ScanResult> pages = {MakeRgbPage(20, 10),
+                                                 MakeRgbPage(30, 15)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kHeic;
+
+  const std::filesystem::path base = TempPath("heic_imgs.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk)
+      << "HEIC write failed -- if this fails in a headless/CI-like "
+         "environment, the HEVC encoder HEIC needs may be unavailable there.";
+  ASSERT_EQ(written.size(), 2u);
+  EXPECT_EQ(written[0], TempPath("heic_imgs-001.heic").string());
+  EXPECT_EQ(written[1], TempPath("heic_imgs-002.heic").string());
+  EXPECT_EQ(ImageUti(written[0]), "public.heic");
+  int w = 0, h = 0;
+  ASSERT_TRUE(ImageDims(written[0], &w, &h));
+  EXPECT_EQ(w, 20);
+  EXPECT_EQ(h, 10);
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, Jpeg2000WritesOneDecodableFilePerPage) {
+  const std::vector<brscan::ScanResult> pages = {MakeGrayPage(20, 10, 200),
+                                                 MakeGrayPage(30, 15, 100)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kJpeg2000;
+
+  const std::filesystem::path base = TempPath("jp2_imgs.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(written.size(), 2u);
+  EXPECT_EQ(written[0], TempPath("jp2_imgs-001.jp2").string());
+  EXPECT_EQ(written[1], TempPath("jp2_imgs-002.jp2").string());
+  EXPECT_EQ(ImageUti(written[0]), "public.jpeg-2000");
+  int w = 0, h = 0;
+  ASSERT_TRUE(ImageDims(written[1], &w, &h));
+  EXPECT_EQ(w, 30);
+  EXPECT_EQ(h, 15);
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, GifSinglePageIsNotNumbered) {
+  const std::vector<brscan::ScanResult> pages = {MakeGrayPage(24, 12, 128)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kGif;
+
+  const std::filesystem::path base = TempPath("only.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(written.size(), 1u);
+  EXPECT_EQ(written[0], TempPath("only.gif").string());
+  EXPECT_EQ(ImageUti(written[0]), "com.compuserve.gif");
+  int w = 0, h = 0;
+  ASSERT_TRUE(ImageDims(written[0], &w, &h));
+  EXPECT_EQ(w, 24);
+  EXPECT_EQ(h, 12);
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, BmpWritesOneDecodableFilePerPage) {
+  const std::vector<brscan::ScanResult> pages = {MakeRgbPage(16, 8),
+                                                 MakeBitonalPage(24, 12)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kBmp;
+
+  const std::filesystem::path base = TempPath("bmp_imgs.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(written.size(), 2u);
+  EXPECT_EQ(written[0], TempPath("bmp_imgs-001.bmp").string());
+  EXPECT_EQ(written[1], TempPath("bmp_imgs-002.bmp").string());
+  EXPECT_EQ(ImageUti(written[0]), "com.microsoft.bmp");
+  int w = 0, h = 0;
+  ASSERT_TRUE(ImageDims(written[1], &w, &h));
   EXPECT_EQ(w, 24);
   EXPECT_EQ(h, 12);
   RemoveAll(written);

@@ -158,6 +158,10 @@ std::optional<OutputFormat> ExpectedFormat(const std::string& token) {
   if (token == "tiff") return OutputFormat::kTiff;
   if (token == "jpeg") return OutputFormat::kJpeg;
   if (token == "png") return OutputFormat::kPng;
+  if (token == "heic") return OutputFormat::kHeic;
+  if (token == "jp2") return OutputFormat::kJpeg2000;
+  if (token == "gif") return OutputFormat::kGif;
+  if (token == "bmp") return OutputFormat::kBmp;
   return std::nullopt;
 }
 
