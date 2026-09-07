@@ -1,190 +1,52 @@
-# ICA module runbook — Plan 2 ("BrScan Mac ICA", does an ICA module still load?)
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
-This is the go/no-go gate for Plan 2. Before any scan-path code is written, we
-answer one question empirically: **does a third-party Image Capture (ICA) device
-module still load on this macOS, and what signing does it need?** If a
-third-party module will not load, or only loads after Developer-ID notarization
-on every iteration, Plan 2 stops and the project standardizes on Plan 3
-(AirSane/eSCL) instead. See `docs/PLAN-2-DESIGN.md`, Task 1 and "Open decisions".
+# ICA module runbook — Plan 2 ("BrScan Mac ICA")
 
-The module under test (`ica-module/`) is deliberately inert: a background-only
-`.app` that registers no-op `ICD_Scanner…` callbacks and calls the framework's
-`ICD_ScannerMain`. It runs no scan. Its only job is to appear.
+This is the device-in-the-loop runbook for the Plan 2 Image Capture (ICA) device
+module, `BrScan Mac ICA`. The module now scans end-to-end from Apple's own scan
+UI: it appears in **Image Capture** and **System Settings ▸ Printers & Scanners**,
+renders a live progressive overview, and completes flatbed and document-feeder
+scans in color, grayscale, and black & white, saving to the chosen destination.
 
-Device identity is the synthetic Bonjour name `BRW00AABBCCDDEE` throughout.
+The module began as a go/no-go *load spike* ("does a third-party ICA module still
+load on this macOS?"). That question is settled — the module loads, binds, and
+scans — so this runbook is now a **regression test matrix**: a repeatable checklist
+that a tester runs against the real device after each change to confirm nothing
+broke. The load-spike history is preserved in the [History appendix](#history-appendix-the-load-spike)
+for provenance.
 
-## What was confirmed against the SDK (clean-room)
+Every check here is manual and needs the physical Brother MFC-J6920DW on the
+network, because none of it can be automated. The hermetic parameter, paper-size,
+and buffer-descriptor logic is covered by the GoogleTest suite in CI and is out of
+scope for this runbook.
 
-Read from `MacOSX.sdk/System/Library/Frameworks/ICADevices.framework/Headers`
-(`ICD_ScannerCalls.h`, `ICADevices.h`) — public SDK only, no vendor source:
+## Scope
 
-- The framework exports `int ICD_ScannerMain(int, const char**)` and the global
-  callback table `ICD_scanner_callback_functions gICDScannerCallbackFunctions`.
-  A module fills in the entry points it implements, then calls `ICD_ScannerMain`,
-  which runs the module's service loop. Both symbols are present in the SDK's
-  `ICADevices.tbd`, so the module links.
-- The host is `icdd` (the "ImageCapture Discovery Daemon",
-  `/System/Library/Image Capture/Support/icdd`, a per-user LaunchAgent
-  `com.apple.icdd`). Its binary strings name the load paths
-  `/Library/Image Capture/Devices/` and `/System/Library/Image Capture/Devices/`,
-  the matching selectors `addMatchingBonjourDevices:fromBundleWithPath:…` and
-  `baseDictionaryForBonjourServiceType:andTXTRecords:devices:`, the key
-  `ICABonjourServiceTypeKey`, the browsed service type `_scanner._tcp.`, and the
-  warning `Missing DeviceMatchingInfo.plist in '<bundle>'!`.
+This runbook covers the **ICA / Image Capture host-initiated** scan path only —
+the path where the user drives a scan from Image Capture or Printers & Scanners
+and the module serves it over `libbrscan`.
 
-**Two things the SDK does not settle, so the spike must:**
+It does **not** cover the scan-button flow, the Plan 1e panel toggles
+(skip-blank, high-speed, OCR sub-formats), or the config GUI `.app`. Those are a
+separate surface with their own front end and their own docs:
 
-1. The exact schema of `Contents/Resources/DeviceMatchingInfo.plist`, and
-   whether a `DeviceInfo.plist` is also required.
-2. Whether icdd will load a non-Apple module at all on this OS, and under what
-   signature. This is the make-or-break question and can only be answered by
-   installing into the privileged directory (below).
+- Scan-button flow — [BUTTON.md](BUTTON.md).
+- Config GUI and panel toggles — [../gui/README.md](../gui/README.md).
 
-## Task 1b update — plist schema corrected, DeviceInfo.plist added
+For the module's clean-room interface reference (callback lifecycle, the
+`theDict["device"]` capability schema, the notification sequence, ADF centering,
+duplex, feeder-empty mapping), see [ICA-PROTOCOL.md](ICA-PROTOCOL.md). For the
+design and task history, see [PLAN-2-DESIGN.md](PLAN-2-DESIGN.md).
 
-The first spike installed and icdd read its `DeviceMatchingInfo.plist` without
-the `Missing…` warning, but **Image Capture showed DEVICES = 0** — no device
-was instantiated. Task 1b found two causes and fixed both:
+## Re-test loop
 
-- **`DeviceMatchingInfo.plist` had the wrong schema.** The first version was
-  reconstructed from icdd's symbols (`ICABonjourServiceTypeKey`, a `bonjour`
-  array of `serviceType`/`devices`/`deviceType`). Inspecting the one shipping
-  example, `/System/Library/Image Capture/Devices/AirScanScanner.app`, shows the
-  real shape: a top-level **`BonjourNetwork`** dict keyed by the Bonjour service
-  type, each value an array of dicts carrying **`device type` = `scanner`**
-  (note the space), plus a top-level **`Version` = `1.0`**. AirScan keys it on
-  the eSCL types `_uscan._tcp.` / `_uscans._tcp.`; we key the same structure on
-  the Brother raw type `_scanner._tcp.`. The file is rewritten to this schema.
-- **No `DeviceInfo.plist` shipped at all.** AirScan carries one; we did not.
-  Added `ica-module/DeviceInfo.plist` (`device info version` = `3.0`, a
-  `devices` dict of `{ iconFile }` entries) and wired it into the bundle. It is
-  not settled from the public interface whether icdd keys `devices` by the
-  module name or the matched Bonjour device name, so we register both
-  (`BrScan Mac ICA` and the synthetic `BRW00AABBCCDDEE`) to a stock system
-  icon.
-- **Added `os_log` tracing** to `module_main.mm` (subsystem
-  `me.tthoma24.brscan.ica`, category `session`) at `main` /
-  `ICD_ScannerMain` entry and in every registered callback, so a re-run shows
-  whether icdd launches our executable and calls us.
+Run this loop after every change, before touching the matrix. It builds the
+bundle, verifies the signature, installs it, reaps the stale module child, clears
+the device-info cache, restarts `icdd`, and opens the scan UI. Each step exists
+because skipping it silently re-tests the *previous* build — the hard-won lesson
+of the load spike.
 
-## Task 1c update — rename, bundle parity, and a re-test that separates A vs B
-
-The earlier interpretation ("zero of our `os_log` lines ⇒ a signing/load gate")
-was wrong, and this task corrects it. What we established locally:
-
-- **Renamed** the identifier `ai.jiffylabs` → `me.tthoma24` everywhere: bundle id
-  `me.tthoma24.brscan.ica`, `os_log` subsystem `me.tthoma24.brscan.ica`,
-  and the predicates in this runbook.
-- **How icdd loads a module — confirmed by inspecting Apple's shipping module,
-  not source.** `nm -gU` on
-  `/System/Library/Image Capture/Devices/AirScanScanner.app/Contents/MacOS/AirScanScanner`
-  exports **no** `ICD_` symbols; it only *imports* `_ICD_ScannerMain` and
-  `_gICDScannerCallbackFunctions` from the framework, and its `Info.plist` is a
-  plain `CFBundlePackageType APPL` app. icdd's own strings show it launches
-  modules as **processes** (`launchDeviceModule`,
-  `launchDeviceModuleForBrowseID:fromClientPID:runningPID:`,
-  `launchedTaskWithLaunchPath:arguments:`, `openApplicationAtURL:configuration:`)
-  — it does **not** `dlsym` an entry point out of the module. Our bundle already
-  matches this contract: `main()` fills `gICDScannerCallbackFunctions` and calls
-  `ICD_ScannerMain`, and our imports are identical to Apple's. **So "entry points
-  not exported under the names icdd looks up" is not the gap — there is no such
-  lookup.**
-- **Ad-hoc signing is not a blanket exec/load gate.** Running our ad-hoc bundle's
-  binary directly launches it, loads `ICADevices.framework`, enters
-  `ICD_ScannerMain`, and emits our `os_log` lines. Ad-hoc code executes on this
-  macOS; the only open A-question is whether icdd's *launch context* additionally
-  enforces library validation on the child — which only the live re-test settles.
-- **Bundle-parity fixes** (close plausible match/load B-gaps, learned from Apple's
-  keys, values our own): added `CFBundleSupportedPlatforms = [MacOSX]` and a
-  `Contents/PkgInfo` (`APPL????`) to match Apple's module for the LaunchServices
-  path icdd uses.
-
-**Why "zero of our `os_log` lines" does NOT prove A.** icdd launches a module
-only *after* a Bonjour browse resolves a device and matches it to that module
-(the `launchDeviceModuleForBrowseID:` path). So no os_log lines means only "the
-module process was never started" — which is equally:
-
-- **(A) signing/library-validation gate:** icdd *tried* to launch our module and
-  the launch was denied, or
-- **(B) match/bundle gap:** icdd *never tried* — no `_scanner._tcp.` device
-  matched our module, so there was nothing to launch.
-
-Our subsystem is silent in both. The discriminator is in the **icdd** log (did a
-launch get *attempted*?) plus AMFI (was a launch *denied*?), streamed together in
-§3 below so one re-test tells A from B.
-
-Both schema shapes are learned from the **public plist interface** of the
-shipping module, not from Apple source; all values are synthetic.
-
-These changes are still **unverified** — they need the `sudo` install + Image
-Capture UI re-test below. A device appearing is success for this spike; the scan
-path is out of scope.
-
-## Task 1d update — the match/binding gap is FIXABLE (missing TXT match key)
-
-Task 1d answered the crux Plan 2 question with the earlier re-test's evidence
-already in hand: our `me.tthoma24.brscan.ica` subsystem is silent AND no AMFI /
-codesign line names our bundle — i.e. **no launch was even *attempted***. That
-is scenario **B (match/binding gap)**, not A (signing). The question left was
-whether B is fixable or structural — does icdd dispatch a raw `_scanner._tcp.`
-device to a *third-party* module at all?
-
-**Finding: FIXABLE. icdd does dispatch `_scanner._tcp.` to third-party modules;
-our match dict was just missing the TXT criterion icdd binds on.** The evidence,
-from Apple's public plugin interface and the device's own broadcast:
-
-1. **The bind test is a TXT-record comparison, and our match dict gave it
-   nothing to compare.** icdd exports the selector
-   `compareBonjourDeviceModuleDictionary:withBonjourTXTRecord:` and
-   `baseDictionaryForBonjourServiceType:andTXTRecords:devices:` (strings in
-   `/System/Library/Image Capture/Support/icdd`). The comparison needs an
-   **`ICABonjourTXTRecordKey`** sub-dict of TXT key/value pairs to test against
-   the device's advertised TXT record. `ICABonjourTXTRecordKey` is Apple's
-   public match key — Apple's own `AirScanScanner.app` uses exactly it to match
-   its service type on Bonjour TXT pairs. Our Task 1b/1c dict carried only
-   `device type = scanner` — no `ICABonjourTXTRecordKey` — so the comparison had
-   no TXT pair to test and the device never bound.
-2. **The device advertises usable identity TXT keys.** Captured independently on
-   the live network:
-
-   ```
-   dns-sd -L "Brother MFC-J6920DW" _scanner._tcp local
-   # ... can be reached at <host>.local.:54921
-   #   txtvers=1 ty=Brother MFC-J6920DW mfg=Brother mdl=MFC-J6920DW
-   #   button=T feeder=T flatbed=T
-   ```
-
-   The device does **not** advertise eSCL `_uscan._tcp.` at all (`dns-sd -B
-   _uscan._tcp local` is empty), so `_scanner._tcp.` is the only network scan
-   path it exposes.
-
-Whether icdd will actually dispatch a raw `_scanner._tcp.` device to a
-third-party module is what the §3 re-test settles — Apple's `AirScanScanner`
-demonstrates the match *interface* on its own service type, not this dispatch;
-this fix supplies the missing TXT criterion so binding, and then a launch
-attempt, can finally happen.
-
-**The fix (applied):** `ica-module/DeviceMatchingInfo.plist`'s `_scanner._tcp.`
-match dict now carries `ICABonjourTXTRecordKey = { mdl = MFC-J6920DW; mfg =
-Brother; }` and `device events = ( scan )`, matching the proven schema. The two
-values are the device's own publicly-broadcast TXT strings (from the `dns-sd`
-capture above), captured black-box; `mdl`/`mfg` are device-class identity
-(the project's public target model), while the synthetic per-unit Bonjour name
-`BRW00AABBCCDDEE` stays in `DeviceInfo.plist`.
-
-**Residual risk — the signing gate (A) is the NEXT gate, still unverified.**
-Making the device *bind* is what lets icdd finally *attempt* to launch our
-module. Only then can the library-validation / Developer-ID question actually
-fire (Apple's own modules in the system directory are Team-signed and carry the
-library-validation flag, so an ad-hoc third-party module may still be refused).
-So a clean bind
-does not by itself prove Plan 2 green; it unblocks the go/no-go by turning the
-silent non-result into a real launch attempt whose success or AMFI-denial the
-§3 stream will now show. If, after this fix, the device binds and icdd launches
-our ad-hoc module (success log line below), Plan 2 is go; if the launch is
-AMFI-denied, that is the signing wall and the fallback is Plan 3.
-
-## 1. Build and sign (no privileges needed)
+### 1. Build and verify the signature
 
 From the repo root:
 
@@ -193,78 +55,181 @@ cmake -S . -B build
 cmake --build build --target brscan-ica
 ```
 
-That produces `build/BrScan Mac ICA.app`, copies `DeviceMatchingInfo.plist`
-and `DeviceInfo.plist` into `Contents/Resources/`, and **ad-hoc** signs the
-bundle (`codesign --sign -`), the cheapest signature to try first. Verify:
+That produces `build/BrScan Mac ICA.app`, copies `DeviceMatchingInfo.plist` and
+`DeviceInfo.plist` into `Contents/Resources/`, writes `Contents/PkgInfo`, and
+**ad-hoc** signs the bundle. Verify the signature:
 
 ```bash
-codesign --verify --strict --verbose=2 "build/BrScan Mac ICA.app"
+codesign --verify --deep --strict --verbose=2 "build/BrScan Mac ICA.app"
 codesign -dvvv "build/BrScan Mac ICA.app"    # Signature=adhoc, flags=0x2(adhoc)
 ```
 
-Gatekeeper will reject an ad-hoc bundle (`spctl -a -t exec` → "rejected"). That
-is expected and is a *distribution* check, not the *load* check icdd does; do
-not read it as a load result.
+Ad-hoc signing is enough for a local install. Gatekeeper rejects an ad-hoc bundle
+(`spctl -a -t exec` → "rejected"); that is a *distribution* check, not the *load*
+check `icdd` performs, so ignore it here. See [DISTRIBUTION.md](DISTRIBUTION.md)
+for the Developer-ID + notarization path.
 
-## 2. Install into the system directory (privileged, manual)
+### 2. Install into the system directory (privileged)
 
-ICA modules load only from `/Library/Image Capture/Devices/` or the system
-directory — there is no user-writable location — so this step needs admin and is
-kept out of the build:
+ICA modules load only from `/Library/Image Capture/Devices/` — there is no
+user-writable location — so this step needs admin and is kept out of the build:
 
 ```bash
 sudo ica-module/install.sh install
-# then make icdd rescan:
-killall icdd 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.apple.icdd
 ```
 
-**Also kill any already-running module process, not just icdd.** icdd launches
-the module as a *child* process that keeps running after `killall icdd`, so a
-freshly reinstalled bundle does not take effect until the old child dies —
-symptom: the log keeps showing the *previous* build's lines (e.g. an old
-callback string) even though the installed binary is new. Reap the stale child
-too, and confirm the *installed* binary carries your change before re-testing:
+### 3. Reap the stale module child
+
+`icdd` launches the module as a **child** process that keeps running after
+`killall icdd`, so a freshly reinstalled bundle does not take effect until the old
+child dies. Symptom: the log keeps showing the *previous* build's lines. Reap the
+child, then prove the *installed* binary carries your change:
 
 ```bash
 sudo killall "BrScan Mac ICA" 2>/dev/null || true
-# Prove the installed copy (not just build/) has your change — grep a string
-# you added; it is embedded in the binary as an os_log format literal:
+# Prove the installed copy (not just build/) has your change — grep an os_log
+# format literal you added; it is embedded in the binary:
 strings "/Library/Image Capture/Devices/BrScan Mac ICA.app/Contents/MacOS/BrScan Mac ICA" \
   | grep "<a string you just added>"
 ps -Ao pid,lstart,comm | grep -i brscan   # no stale PID older than the reinstall
 ```
 
-Remove it when done:
+### 4. Clear the device-info cache
+
+`icdd` caches per-device presentation state at
+`~/Library/Application Support/icdd/deviceInfoCacheV2.plist`, keyed by device
+UUID. Stale entries suppress a fresh match, so clear the cache before re-testing:
+
+```bash
+rm -f ~/Library/Application\ Support/icdd/deviceInfoCacheV2.plist
+```
+
+### 5. Kick icdd
+
+```bash
+killall icdd 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.apple.icdd
+```
+
+### 6. Stream the module log, then open the scan UI
+
+Start the module's log stream in one terminal before you open the UI. This
+compact predicate follows the module's own subsystem — the callback lifecycle,
+the scan progress, and the completion:
+
+```bash
+log stream --predicate 'subsystem == "me.tthoma24.brscan.ica"' --style compact --info --debug
+```
+
+Then open **Image Capture** (and keep it open — `icdd` only launches the module
+while a client is browsing) with the device on the network, and select
+`Brother MFC-J6920DW`. A healthy launch prints the module entering
+`ICD_ScannerMain` and then its per-scan callback lines.
+
+If the device does **not** appear at all, switch to the fuller launch/AMFI
+discriminator predicate in the [History appendix](#diagnosing-a-non-appearance)
+to tell a signing denial from a match gap.
+
+### Uninstall when done
 
 ```bash
 sudo ica-module/install.sh uninstall
 killall icdd 2>/dev/null || true
 ```
 
-## 3. One re-test that tells A (signing gate) from B (match/bundle gap)
+## Test matrix
 
-The point of this run is to see, in a single log stream, **whether icdd
-*attempted* to launch our module and, if so, whether the launch was *denied*.**
-That, not the presence/absence of our own `os_log` lines, is what separates A
-from B.
+Work top to bottom. Mark each row Pass or Fail and record what you saw in Notes;
+a Fail with a note is the useful output of a session. The **PRs** in parentheses
+are the change that landed each behavior, for provenance when a row regresses.
 
-### 3.0 Clear the stale device-info cache first (required)
+Legend for the `ICScannerDocumentType` values referenced below is in
+[ICA-PROTOCOL.md](ICA-PROTOCOL.md#capability-schema-icd_scannergetparameters).
 
-icdd caches per-device presentation state at
-`~/Library/Application Support/icdd/deviceInfoCacheV2.plist`, keyed by device
-UUID. Earlier runs (wrong-schema plist, old bundle id) can leave entries that
-suppress a fresh match, so clear it before the re-test:
+### A. Discovery and open
 
-```bash
-rm -f ~/Library/Application\ Support/icdd/deviceInfoCacheV2.plist
-killall icdd 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.apple.icdd
-```
+| Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |
+|---|---|---|---|---|---|
+| **A1. Appears in Image Capture** | Module installed; re-test loop run; device on network | Open Image Capture | `Brother MFC-J6920DW` appears in the source list | ☐ | |
+| **A2. Appears in Printers & Scanners** | As A1 | Open System Settings ▸ Printers & Scanners ▸ select the device ▸ **Scan** tab ▸ **Open Scanner** | The same ICA scan UI opens; the device is listed | ☐ | Same ICA path as Image Capture |
+| **A3. Scan panel + pickers populate** | Device selected in either UI | Open the scan panel; inspect every control | Pickers populate: **Kind** (Flatbed / Document Feeder), **Resolution/DPI**, mode (Color / Gray / B&W), **Size**, **Format**; the feeder exposes a **Duplex / 2-sided** control (#67, #68, #76, #80) | ☐ | No control implies the capability schema regressed |
 
-### 3.1 Stream everything the discriminator needs, in one terminal
+### B. Flatbed (platen)
 
-Start this **before** the rescan. It merges the icdd log (launch attempts,
-Bonjour browse, the `Missing DeviceMatchingInfo.plist` warning), AMFI / `amfid`
-(library-validation and launch denials), and our own subsystem:
+| Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |
+|---|---|---|---|---|---|
+| **B1. Live progressive overview + geometry** | Kind = Flatbed; original on the glass | Trigger **Overview** / preview | The overview fills **band-by-band top-to-bottom** (live progressive, not only on completion), with a moving progress bar; a **Letter** selection is correctly proportioned against the A3 platen (#77, #78, #75) | ☐ | Proportion live-confirmed in #75. Residual nuance: the platen extent is advertised as a union (A3 width × Ledger height), not one real glass rectangle — see [ICA-PROTOCOL Geometry](ICA-PROTOCOL.md#geometry-platen-extent--open). Confirm the Letter proportion still looks right |
+| **B2. Low-resolution scan** | Kind = Flatbed | Set a low DPI (e.g. 100 or 150); Scan | Image completes at the selected DPI | ☐ | |
+| **B3. High-resolution scan** | Kind = Flatbed | Set a high DPI (e.g. 600); Scan | Image completes at the selected DPI; pixel dimensions scale accordingly | ☐ | Clamped to the device `ESC I` offer max |
+| **B4. Color mode** | Kind = Flatbed | Mode = Color; Scan | Correct 24-bit color image | ☐ | kRgb decoded via DecodeJpeg |
+| **B5. Grayscale mode** | Kind = Flatbed | Mode = Gray; Scan | Correct 8-bit grayscale image | ☐ | |
+| **B6. Black & white mode** | Kind = Flatbed | Mode = B&W; Scan | Correct 1-bit bitonal image; `1 = black` renders as ink | ☐ | |
+| **B7. Flatbed size sweep** | Kind = Flatbed | Step through the size menu, scanning (or previewing) each: **Default (Auto)**, A3, US Ledger, A4, US Letter, US Legal, A5, A6, US Executive, JIS B4, JIS B5, Business Card, 4R, 3R, 5R (#82) | Each selection crops the scan area to the named size | ☐ | Tester has Letter/Legal/A4 media. For smaller sizes, place a smaller original and confirm the crop matches. Note per size whether real media was used or eyeballed |
+| **B8. File / format save** | Kind = Flatbed; a save destination and format chosen | Scan to the chosen folder in the chosen format (TIFF/JPEG/PNG) | The scan **saves to the chosen destination** as `<name>.<ext>` in the chosen format (#70, #71) | ☐ | Uses the security-scoped destination URL |
+| **B9. Cancel mid-scan** | Kind = Flatbed; a scan running | Press **Cancel** while the scan is in progress | The scan aborts promptly and cleanly; no file is written; the device is ready for the next scan (#66, #71) | ☐ | Mid-scan cancel via `userCanceledErr` on a band reply |
+
+### C. ADF (document feeder)
+
+| Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |
+|---|---|---|---|---|---|
+| **C1. Feeder actually feeds** | Kind = Document Feeder; sheets loaded in the ADF | Scan | The **sheets feed through the ADF** (not the glass); output matches the fed pages (#79) | ☐ | Confirms source resolves to kAdf, not flatbed |
+| **C2. Centered window — Letter** | Kind = Document Feeder; a **Letter** sheet in the ADF | Scan | The page is **centered**: no left padding, no right-edge cut-off (#81) | ☐ | Device center-registers; module re-centers the window |
+| **C3. Centered window — Legal** | Kind = Document Feeder; a **Legal** sheet in the ADF | Scan | Centered as C2, no cut-off, on Legal | ☐ | |
+| **C4. Duplex (2-sided)** | Kind = Document Feeder; a 2-sided original; Duplex enabled | Scan | Front and back pages come out, correct and in order (#80) | ☐ | Duplex honored only for the feeder |
+| **C5. Feeder size set** | Kind = Document Feeder | Inspect the size menu | Offers: **Default (Auto)**, US Letter, US Legal, A4, US Ledger, A3, A5, US Executive, JIS B4, JIS B5 — and **no** A6/photos/Business Card (below the ADF minimum width) (#80, #82) | ☐ | Scan the sizes you have media for |
+| **C6. Multi-page feed** | Kind = Document Feeder; several sheets loaded | Scan | **Multi-page output** — one page per fed sheet, in order | ☐ | File transfer appends a page index |
+| **C7. Empty ADF — simplex** | Kind = Document Feeder; **no paper**; Duplex off | Press **Scan** | Image Capture promptly shows the **native alert "Scanner reported an error / Document feeder is empty."** (#84, #85) | ☐ | Instant via the `ESC D` ack (`0xc2`), not a timeout |
+| **C8. Empty ADF — 2-sided** | Kind = Document Feeder; **no paper**; Duplex on | Press **Scan** | Same native "Document feeder is empty." alert, promptly (#84, #85) | ☐ | Must fire for duplex as well as simplex |
+
+### D. Packaging and signing
+
+| Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |
+|---|---|---|---|---|---|
+| **D1. Installed bundle verifies + identifier** | Module installed | `codesign --verify --deep --strict --verbose=2 "/Library/Image Capture/Devices/BrScan Mac ICA.app"` then `codesign -dvvv` on it | Verify passes; the identifier is `me.tthoma24.brscan.ica`; signature is ad-hoc | ☐ | |
+| **D2. Distribution path documented** | — | Read [DISTRIBUTION.md](DISTRIBUTION.md) | Ad-hoc suffices for the local install; Developer-ID + `notarytool` is the documented future step for redistribution | ☐ | No notarization needed for local testing |
+
+## History appendix — the load spike
+
+Before any scan-path code existed, Plan 2 opened with a single go/no-go question:
+**does a third-party ICA device module still load on this macOS, and under what
+signing?** If a third-party module would not load, or loaded only after
+Developer-ID notarization on every iteration, Plan 2 stopped and the project fell
+back to Plan 3 (AirSane/eSCL). The module under test was deliberately inert — a
+background-only `.app` that registered no-op `ICD_Scanner…` callbacks and called
+`ICD_ScannerMain`, running no scan. Its only job was to appear. That question is
+now settled; the notes below record how, for provenance.
+
+- **Task 1b — plist schema corrected.** The first spike installed and `icdd` read
+  its `DeviceMatchingInfo.plist`, but Image Capture showed **0 devices**. The
+  real schema, learned from Apple's shipping `AirScanScanner.app`, is a top-level
+  `BonjourNetwork` dict keyed by the Bonjour service type, each value carrying
+  `device type = scanner`, plus a top-level `Version = 1.0`; a `DeviceInfo.plist`
+  is also required. Both were added, and `os_log` tracing (subsystem
+  `me.tthoma24.brscan.ica`) was wired in.
+- **Task 1c — rename and bundle parity.** The identifier was renamed
+  `ai.jiffylabs` → `me.tthoma24` throughout (bundle id, `os_log` subsystem, log
+  predicates). Inspecting Apple's module confirmed `icdd` launches modules as
+  **processes** (it does not `dlsym` an entry point), and that ad-hoc code
+  executes on this macOS. `CFBundleSupportedPlatforms` and `Contents/PkgInfo`
+  were added for LaunchServices parity.
+- **A vs B — the discriminator.** "Zero of our `os_log` lines" did not by itself
+  prove a signing gate. `icdd` launches a module only after a Bonjour browse
+  matches a device to it, so silence was equally **(A)** a signing /
+  library-validation denial or **(B)** a match/bundle gap where no launch was even
+  attempted. The two were told apart by streaming the `icdd` log (was a launch
+  *attempted*?) alongside AMFI (was it *denied*?).
+- **Task 1d — the match gap, fixable.** The evidence pointed at **B**: no launch
+  attempt, no AMFI line. The cause was a missing TXT criterion — the match dict
+  carried only `device type = scanner`. Adding `ICABonjourTXTRecordKey = { mdl =
+  MFC-J6920DW; mfg = Brother; }` (the device's own advertised TXT, captured with
+  `dns-sd -L`) and `device events = ( scan )` let `icdd` bind the device and
+  attempt the launch — which then succeeded on the ad-hoc signature. Plan 2 was
+  green, and the scan path (Tasks 2–25, PRs #62–#85) followed.
+
+### Diagnosing a non-appearance
+
+If the device stops appearing after a change, reuse the A-vs-B discriminator
+stream — it merges the `icdd` launch log, AMFI / `amfid` denials, and the module's
+own subsystem, so one run tells a signing denial (A) from a match gap (B):
 
 ```bash
 log stream --info --debug --predicate '
@@ -277,47 +242,15 @@ log stream --info --debug --predicate '
   OR eventMessage CONTAINS[c] "was denied"'
 ```
 
-Then trigger discovery: open **Image Capture** (and keep it open — icdd only
-launches a module when a client is browsing) with the real `_scanner._tcp.`
-device on the network. Optionally confirm the device advertises the type we
-declare, in another terminal:
-
-```bash
-dns-sd -B _scanner._tcp local     # our module declares this type
-dns-sd -B _uscan._tcp local       # eSCL/AirScan; Apple's module claims this
-```
-
-### 3.2 Read the stream — the exact lines that decide A vs B
-
-- **A — signing / library-validation gate (→ no-go, go to Plan 3):** icdd logs a
-  launch **attempt** for our bundle — a line naming `BrScan Mac ICA.app` from
-  `launchDeviceModule` / `launchDeviceModuleForBrowseID:` /
-  `openApplicationAtURL:` — **and** it is followed by an AMFI / codesign denial:
-  a line from `AppleMobileFileIntegrity` or `amfid`, or containing
-  `library validation failed`, `code signature`, or `Launch … was denied`, that
-  names `me.tthoma24.brscan.ica` or the bundle path. Our own
-  `me.tthoma24.brscan.ica` subsystem stays **silent** (the child was killed
-  before `main`). This means ad-hoc is not enough to *load*; the bar is
-  Developer-ID + notarization, which turns every iteration into a notarization
-  round trip → **Plan 2 is not viable without an Apple-level signature; take
-  Plan 3.**
-- **B — match / bundle gap (→ fixable):** there is **no** launch attempt for our
-  bundle in the icdd log and **no** AMFI/codesign line naming it. icdd browsed
-  `_scanner._tcp.` but either resolved no device (then `dns-sd -B _scanner._tcp`
-  is also empty → the Brother advertises only eSCL `_uscan._tcp.`, so declare
-  that type instead) or resolved one without binding it to our module (a
-  match-dict/`DeviceInfo` gap). The fix is in our plists/bundle, not the
-  signature.
-- **Success (spike passes):** our subsystem prints
-  `main: Brscan ICA module launched` then
-  `main: callbacks registered, entering ICD_ScannerMain` — icdd launched and ran
-  our code. `callback: …` lines mean it is driving the device; it should now
-  appear in Image Capture. `main: ICD_ScannerMain returned …` should NOT appear
-  (it means the service loop exited).
-
-Watch for the `Missing DeviceMatchingInfo.plist in '…'!` warning: it should
-**not** fire (the file is present); if it does, the bundle is in the wrong place
-or unreadable — a third, trivially-fixable variant of B.
+- **A (signing / library-validation):** `icdd` logs a launch *attempt* for
+  `BrScan Mac ICA.app`, followed by an AMFI / codesign *denial* naming the bundle
+  or `me.tthoma24.brscan.ica`. The fix is a stronger signature (Developer-ID +
+  notarization), not the plists.
+- **B (match / bundle gap):** **no** launch attempt and **no** AMFI line naming
+  the bundle. `icdd` browsed `_scanner._tcp.` but never bound the device to the
+  module — a match-dict, `DeviceInfo`, or cache problem. Confirm the cache was
+  cleared (loop step 4) and the `Missing DeviceMatchingInfo.plist in '…'!` warning
+  is absent, then check the match dict.
 
 Backward look (same predicate) if you missed the live stream:
 
@@ -328,33 +261,3 @@ log show --last 10m --info --debug --predicate '
   OR subsystem == "me.tthoma24.brscan.ica"
   OR eventMessage CONTAINS[c] "library validation"'
 ```
-
-## 4. The manual UI check (the actual go/no-go)
-
-The definitive pass is visual and cannot be automated:
-
-1. With the module installed and icdd restarted, open **Image Capture** and
-   **System Settings ▸ Printers & Scanners**.
-2. **Go** = the synthetic device `BRW00AABBCCDDEE` appears in the source list
-   (even if selecting it does nothing — this spike has no scan path).
-3. **No-go** = it never appears. Correlate with §3.2 to classify it: a denied
-   launch of our bundle = **A** (signature/library-validation → Plan 3); no
-   launch attempt at all = **B** (match/bundle gap → fixable in our plists).
-
-Record which happened. A rejection is a finding, not a failure — it tells us the
-real bar (schema fix, or Developer-ID + notarization) before Plan 2 continues.
-
-## Signing and distribution
-
-Signing (the ad-hoc signature that ships today) and the future Developer-ID +
-notarization path are documented once, shared with the config app, in
-[DISTRIBUTION.md](DISTRIBUTION.md). Module-load specific note: ad-hoc is
-*verified locally* (the bundle builds, links `ICADevices`, and passes
-`codesign --verify --strict`), but whether icdd *loads* an ad-hoc module or
-enforces library validation is the open A-question the re-test above settles.
-
-## What this runbook does NOT cover
-
-Discovery correctness, parameter mapping, the scan itself, cancellation, and TCC
-prompts are Plan 2 Tasks 5–9 and their own live runbook. This one stops at
-"does the module load and the device appear".
