@@ -172,11 +172,19 @@ int CenteredAdfX0(int sensor_width_at_dpi, int requested_width) {
 Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
   Params p;  // brscan defaults: kColor, kFlatbed, 300 dpi, 50/50, full area.
 
-  // Resolution: default 300, clamp to the offered maximum (never below 1).
-  int dpi = (req.has_resolution && req.resolution > 0) ? req.resolution
-                                                       : kDefaultDpi;
+  // Resolution. `request_dpi` is the resolution ScanRequestFromIcap already used
+  // to convert the scan area (req.area_*) to pixels; `dpi` is that value clamped
+  // to the offered maximum for the actual scan (never below 1). The two are equal
+  // for every real request -- the host is constrained to <= the advertised max --
+  // but the ADF centering below re-derives the window from the requested width,
+  // which is in request_dpi pixels, so it MUST use request_dpi (not the clamped
+  // dpi) for the sensor width. Otherwise, if a request ever exceeded the max, the
+  // requested width and the sensor width would be on two different dpi scales.
+  const int request_dpi = (req.has_resolution && req.resolution > 0)
+                              ? req.resolution
+                              : kDefaultDpi;
   const int max_dpi = limits.max_dpi > 0 ? limits.max_dpi : kDefaultDpi;
-  dpi = Clamp(dpi, 1, max_dpi);
+  const int dpi = Clamp(request_dpi, 1, max_dpi);
   p.x_dpi = dpi;
   p.y_dpi = dpi;
 
@@ -221,7 +229,9 @@ Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
     // The flatbed corner-registers, so its rectangle is left exactly as sent.
     if (feeder) {
       const int width = x1 - x0;
-      x0 = CenteredAdfX0(AdfSensorWidthAtDpi(dpi), width);
+      // Center using request_dpi (the scale req.area_* was computed at), so the
+      // requested width and the sensor width always share one dpi scale.
+      x0 = CenteredAdfX0(AdfSensorWidthAtDpi(request_dpi), width);
       x1 = x0 + width;
     }
     p.area = Area{x0, req.area_y0, x1, req.area_y1};

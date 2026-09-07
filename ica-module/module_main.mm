@@ -319,9 +319,12 @@ brscan::ica::ScanRequest ReadScanRequest(CFDictionaryRef dict,
 
   // Full dump of the parameter source (the Task-8 log truncated before the
   // scan-area offset/extent). This is what confirms the real area key names for
-  // a follow-up, so the truncation is deliberately removed here.
+  // a follow-up, so the truncation is deliberately removed here. The dict can
+  // carry the user's destination path (document folder/name), so the value is
+  // logged at %{private}@ -- redacted in the persistent log unless a developer
+  // opts in -- while the presence flag stays public.
   os_log(Log(),
-         "ReadScanRequest: userScanArea present=%d; FULL source dict: %{public}@",
+         "ReadScanRequest: userScanArea present=%d; FULL source dict: %{private}@",
          area != nullptr, (__bridge NSDictionary*)src);
 
   brscan::ica::IcapScanSelection sel;
@@ -684,22 +687,30 @@ ICAError GetParameters(const ScannerObjectInfo* deviceObjectInfo,
   // what stops the feeder-selection loop: after the host selects the feeder via
   // SetParameters, it re-reads parameters here and must see its choice reflected.
   const int selectedUnit = ctx ? ctx->selectedFunctionalUnit : 0;
-  if (pb->theDict != nullptr) {
-    // DIAGNOSTIC (Task 8): dump the INCOMING dict BEFORE we populate it. This
-    // reveals whether icdd pre-seeds the capability keys it expects (in which
-    // case we should merge into / mirror its shape rather than invent one). An
-    // empty incoming dict means the module alone dictates the schema.
-    os_log(Log(),
-           "GetParameters: INCOMING theDict (%ld keys) BEFORE populate: %{public}@",
-           CFDictionaryGetCount(pb->theDict),
-           (__bridge NSDictionary*)pb->theDict);
-    brscan::ica::BuildScannerParameters(pb->theDict, selectedUnit);
-    os_log(Log(),
-           "GetParameters: described %ld parameter keys "
-           "(selectedFunctionalUnitType=%d)",
-           CFDictionaryGetCount(pb->theDict), selectedUnit);
-  } else {
-    os_log_error(Log(), "GetParameters: theDict is null");
+  // Drain the many autoreleased NSDictionary/NSArray objects this callback builds
+  // (BuildScannerParameters), matching the scan worker's pool.
+  @autoreleasepool {
+    if (pb->theDict != nullptr) {
+      // DIAGNOSTIC (Task 8): dump the INCOMING dict BEFORE we populate it. This
+      // reveals whether icdd pre-seeds the capability keys it expects (in which
+      // case we should merge into / mirror its shape rather than invent one). An
+      // empty incoming dict means the module alone dictates the schema.
+      // The incoming dict can carry user destination data, so the dict VALUE is
+      // logged at %{private}@ (opt-in in the persistent log); the key count stays
+      // public.
+      os_log(
+          Log(),
+          "GetParameters: INCOMING theDict (%ld keys) BEFORE populate: %{private}@",
+          CFDictionaryGetCount(pb->theDict),
+          (__bridge NSDictionary*)pb->theDict);
+      brscan::ica::BuildScannerParameters(pb->theDict, selectedUnit);
+      os_log(Log(),
+             "GetParameters: described %ld parameter keys "
+             "(selectedFunctionalUnitType=%d)",
+             CFDictionaryGetCount(pb->theDict), selectedUnit);
+    } else {
+      os_log_error(Log(), "GetParameters: theDict is null");
+    }
   }
   pb->header.err = noErr;
   return noErr;
@@ -717,7 +728,9 @@ void LogFullDict(const char* label, CFDictionaryRef dict) {
          (unsigned long)d.count);
   for (id key in d) {
     id value = [d objectForKey:key];
-    os_log(Log(), "  %{public}s['%{public}@'] (%{public}@) = %{public}@", label,
+    // Key name and value class stay public (they are schema facts); the VALUE is
+    // %{private}@ because it can carry the user's destination path or file name.
+    os_log(Log(), "  %{public}s['%{public}@'] (%{public}@) = %{private}@", label,
            key, [value class], value);
   }
 }
@@ -902,7 +915,8 @@ void DetectTransferMode(DeviceContext* ctx, CFDictionaryRef dict) {
            ctx->transferPlan.uti.c_str(), ctx->transferPlan.extension.c_str(),
            ctx->transferPlan.stem.c_str());
   } else {
-    if (scoped != nullptr) CFRelease(scoped);
+    // Reached only when scoped == nullptr AND docFolder is empty, so `scoped` is
+    // guaranteed null here -- nothing to release.
     os_log(Log(), "SetParameters: MEMORY/overview transfer (no destination)");
   }
 }
@@ -912,48 +926,53 @@ ICAError SetParameters(const ScannerObjectInfo* deviceObjectInfo,
   os_log(Log(), "callback: ICD_ScannerSetParameters");
   if (pb == nullptr) return kICADeviceInvalidParamErr;
   DeviceContext* ctx = ContextOf(deviceObjectInfo);
-  if (pb->theDict) {
-    // Full per-key dump (a whole-dict %@ truncates and hid the transfer keys).
-    LogFullDict("SetParameters.dict", pb->theDict);
+  // Drain the autoreleased dict/array objects the translation below builds
+  // (LogFullDict, ReadScanRequest, DetectTransferMode), matching the worker.
+  @autoreleasepool {
+    if (pb->theDict) {
+      // Full per-key dump (a whole-dict %@ truncates and hid the transfer keys).
+      LogFullDict("SetParameters.dict", pb->theDict);
 
-    // Translate the host's selection to a brscan::Params and stash it on the
-    // device context for ICD_ScannerStart to scan with. The tracked unit (from an
-    // earlier unit-switch SetParameters) is the last source fallback, so pass it
-    // in; -1 means "no context" so the fallback is skipped.
-    const int trackedUnit = ctx ? ctx->selectedFunctionalUnit : -1;
-    brscan::ica::ScanRequest req = ReadScanRequest(pb->theDict, trackedUnit);
-    brscan::ica::ScanLimits limits;  // default max_dpi = highest offer (600).
-    brscan::Params params = brscan::ica::TranslateScanParams(req, limits);
-    if (ctx) ctx->params = params;
+      // Translate the host's selection to a brscan::Params and stash it on the
+      // device context for ICD_ScannerStart to scan with. The tracked unit (from
+      // an earlier unit-switch SetParameters) is the last source fallback, so
+      // pass it in; -1 means "no context" so the fallback is skipped.
+      const int trackedUnit = ctx ? ctx->selectedFunctionalUnit : -1;
+      brscan::ica::ScanRequest req = ReadScanRequest(pb->theDict, trackedUnit);
+      brscan::ica::ScanLimits limits;  // default max_dpi = highest offer (600).
+      brscan::Params params = brscan::ica::TranslateScanParams(req, limits);
+      if (ctx) ctx->params = params;
 
-    // Track the host's functional-unit selection so the next GetParameters
-    // advertises it (0=flatbed, 3=feeder). Update only on an EXPLICIT unit or a
-    // CAP_FEEDERENABLED signal -- a source resolved from the tracked value would
-    // just rewrite the same value, and logging it every scan would be noise. On
-    // the unit-switch round-trip the host sends ONLY selectedFunctionalUnitType
-    // (no resolution/pixeltype); answering GetParameters with this tracked value
-    // is what stops the feeder-selection loop.
-    if (ctx &&
-        (req.source_signal == brscan::ica::SourceSignal::kExplicitUnit ||
-         req.source_signal == brscan::ica::SourceSignal::kFeederEnabled)) {
-      ctx->selectedFunctionalUnit = req.functional_unit;
+      // Track the host's functional-unit selection so the next GetParameters
+      // advertises it (0=flatbed, 3=feeder). Update only on an EXPLICIT unit or a
+      // CAP_FEEDERENABLED signal -- a source resolved from the tracked value would
+      // just rewrite the same value, and logging it every scan would be noise. On
+      // the unit-switch round-trip the host sends ONLY selectedFunctionalUnitType
+      // (no resolution/pixeltype); answering GetParameters with this tracked value
+      // is what stops the feeder-selection loop.
+      if (ctx &&
+          (req.source_signal == brscan::ica::SourceSignal::kExplicitUnit ||
+           req.source_signal == brscan::ica::SourceSignal::kFeederEnabled)) {
+        ctx->selectedFunctionalUnit = req.functional_unit;
+        os_log(Log(),
+               "SetParameters: tracked selectedFunctionalUnitType=%d (%{public}s) "
+               "via %{public}s",
+               req.functional_unit,
+               req.functional_unit == 3 ? "feeder" : "flatbed",
+               SourceSignalName(req.source_signal));
+      }
+
+      // Detect file-based vs overview/memory transfer for this scan.
+      DetectTransferMode(ctx, pb->theDict);
+
       os_log(Log(),
-             "SetParameters: tracked selectedFunctionalUnitType=%d (%{public}s) "
-             "via %{public}s",
-             req.functional_unit,
-             req.functional_unit == 3 ? "feeder" : "flatbed",
-             SourceSignalName(req.source_signal));
+             "SetParameters: translated -> mode=%{public}s dpi=%d "
+             "source=%{public}s duplex=%d area=(%d,%d,%d,%d) brightness=%d "
+             "contrast=%d",
+             ModeName(params.mode), params.x_dpi, SourceName(params.source),
+             params.duplex, params.area.x0, params.area.y0, params.area.x1,
+             params.area.y1, params.brightness, params.contrast);
     }
-
-    // Detect file-based vs overview/memory transfer for this scan.
-    DetectTransferMode(ctx, pb->theDict);
-
-    os_log(Log(),
-           "SetParameters: translated -> mode=%{public}s dpi=%d source=%{public}s "
-           "duplex=%d area=(%d,%d,%d,%d) brightness=%d contrast=%d",
-           ModeName(params.mode), params.x_dpi, SourceName(params.source),
-           params.duplex, params.area.x0, params.area.y0, params.area.x1,
-           params.area.y1, params.brightness, params.contrast);
   }
   pb->header.err = noErr;
   return noErr;
@@ -1079,9 +1098,18 @@ constexpr UInt32 kUserCanceledReplyCode = static_cast<UInt32>(-128);
 // (matching kUserCanceledReplyCode above; ICADevices does not declare it).
 constexpr ICAError kAdfFeederEmptyError = -9931;  // ICReturnScannerFailedToCompleteScan
 
-// Outcome of handing one page back: delivered, host cancelled at this page
-// boundary (progress replyCode == userCanceledErr), or a delivery/encode error.
-enum class PageResult { kOk, kCanceled, kError };
+// Outcome of handing one page/band back:
+//   kOk         delivered.
+//   kCanceled   host cancelled at this boundary (progress replyCode ==
+//               userCanceledErr).
+//   kDropped    this band was rejected before any send (bad geometry/stride,
+//               null data, or a dictionary-alloc failure) -- the band renders
+//               nothing, but the scan can tolerate a single dropped band.
+//   kSendFailed the notification send itself failed. Unlike kDropped this is a
+//               hard delivery fault (the host link is broken), so the caller
+//               must abort the scan with a device error rather than continue.
+// PostFilePage uses only kOk / kSendFailed (a failed file write is a hard fault).
+enum class PageResult { kOk, kCanceled, kDropped, kSendFailed };
 
 // Sets the type + the device/scanner ICAObject (under kICANotificationICAObjectKey,
 // the key every scanner notification carries) and pushes the dictionary to the
@@ -1159,8 +1187,11 @@ void NotifyDocumentFeederEmpty(ICAObject deviceObject) {
 // replyCode. `logArgs` gates the verbose per-band arg line: at 16-row band
 // granularity a page has hundreds of bands, so the caller logs only the first
 // band + a final count and passes false otherwise. Returns kOk if the band was
-// accepted, kCanceled if the host replied userCanceledErr (host cancel), or
-// kError on bad geometry / stride mismatch / a failed send.
+// accepted, kCanceled if the host replied userCanceledErr (host cancel),
+// kDropped for a band rejected before any send (bad geometry / stride mismatch /
+// null data / dict-alloc failure -- a single such band is tolerable), or
+// kSendFailed when the notification send itself fails (a hard delivery fault the
+// caller must not silently ignore).
 PageResult PostBand(ICAObject icaObject, const brscan::ScanBand& band,
                     bool logArgs) {
   std::optional<brscan::ica::BandImageInfo> info = brscan::ica::DescribeBand(
@@ -1172,11 +1203,11 @@ PageResult PostBand(ICAObject icaObject, const brscan::ScanBand& band,
                  "start=%d rows=%d size=%zu (dropped)",
                  band.page_index, band.full_width, band.full_height,
                  band.start_row, band.num_rows, band.size);
-    return PageResult::kError;
+    return PageResult::kDropped;
   }
   if (band.data == nullptr) {
     os_log_error(Log(), "PostBand[p%d]: null band data", band.page_index);
-    return PageResult::kError;
+    return PageResult::kDropped;
   }
 
   // Log the first band's exact image-info args once per scan so the unified log
@@ -1198,7 +1229,7 @@ PageResult PostBand(ICAObject icaObject, const brscan::ScanBand& band,
   CFMutableDictionaryRef imageDict = CFDictionaryCreateMutable(
       nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
-  if (imageDict == nullptr) return PageResult::kError;
+  if (imageDict == nullptr) return PageResult::kDropped;
 
   ICAError addErr = ICDAddImageInfoToNotificationDictionary(
       imageDict, static_cast<UInt32>(info->width),
@@ -1225,7 +1256,7 @@ PageResult PostBand(ICAObject icaObject, const brscan::ScanBand& band,
     os_log_error(Log(),
                  "PostBand[p%d]: send failed addImageInfo=%d sendProgress=%d",
                  band.page_index, addErr, imageErr);
-    return PageResult::kError;
+    return PageResult::kSendFailed;
   }
   return PageResult::kOk;
 }
@@ -1316,7 +1347,7 @@ bool WriteImageToURL(CGImageRef image, NSURL* fileURL, CFStringRef uti) {
 // the written file path under kICANotificationScannerDocumentNameKey. The
 // scoped URL is borrowed (owned by Start, which releases it after the scan);
 // this only starts/stops access, it does not retain or release. Returns kOk if
-// the file was written, kError otherwise. (The file path posts page-done
+// the file was written, kSendFailed otherwise. (The file path posts page-done
 // fire-and-forget, so it never observes a host cancel -- cancel is detected on
 // the in-memory overview path.)
 PageResult PostFilePage(CFURLRef securityScopedURL,
@@ -1346,7 +1377,7 @@ PageResult PostFilePage(CFURLRef securityScopedURL,
     }
     if (folderURL == nil) {
       os_log_error(Log(), "PostFilePage[%d]: no destination folder", pageIndex);
-      return PageResult::kError;
+      return PageResult::kSendFailed;
     }
     os_log(Log(),
            "PostFilePage[%d]: destination path=%{public}s scopedAccess=%d",
@@ -1413,7 +1444,7 @@ PageResult PostFilePage(CFURLRef securityScopedURL,
     os_log(Log(), "PostFilePage[%d]: wrote=%d sendPageDone=%d", pageIndex, wrote,
            pageErr);
   }
-  return wrote ? PageResult::kOk : PageResult::kError;
+  return wrote ? PageResult::kOk : PageResult::kSendFailed;
 }
 
 // Runs the ENTIRE scan SYNCHRONOUSLY on icdd's callback thread (Task 16),
@@ -1477,6 +1508,7 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
     // granularity, PostBand logs only the first band's args (logArgs) and a
     // per-scan band count is logged once RunScan returns.
     bool loggedFirstBand = false;
+    bool sendFailed = false;
     long bandCount = 0;
     const brscan::BandCallback onBand =
         [&](const brscan::ScanBand& band) -> bool {
@@ -1488,7 +1520,14 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         canceled = true;
         return false;  // Host cancel -> RunScan returns kCancelled.
       }
-      return true;  // kOk, or a single dropped band -- keep scanning.
+      if (r == PageResult::kSendFailed) {
+        // Hard delivery fault (broken host link). Continuing would silently
+        // truncate the preview yet still end the scan noErr, so stop reading and
+        // report a device error below instead of tolerating it like kDropped.
+        sendFailed = true;
+        return false;  // RunScan returns kCancelled; handled as a failure below.
+      }
+      return true;  // kOk, or a single kDropped band -- keep scanning.
     };
 
     const brscan::Status scanStatus =
@@ -1501,7 +1540,16 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
     const brscan::ica::ScanOutcome outcome = brscan::ica::ClassifyScanOutcome(
         params.source, /*produced_pages=*/!pages.empty(), scanStatus);
 
-    if (outcome == brscan::ica::ScanOutcome::kCanceled) {
+    if (sendFailed) {
+      // A hard band send failure stopped RunScan early, which otherwise reads as
+      // a clean cancel (kCanceled) and would end the scan noErr. Override that:
+      // report a device error and skip the file post-processing.
+      finalErr = kICADeviceInternalErr;
+      os_log_error(Log(),
+                   "SyncScan: aborting on band send failure (bands=%ld) -> "
+                   "device error err=%d",
+                   bandCount, finalErr);
+    } else if (outcome == brscan::ica::ScanOutcome::kCanceled) {
       // Clean host cancel: the bands already delivered stay on the host; write
       // no file and end with a clean ScannerScanDone (Start releases the scoped
       // URL, and transport is disconnected below -- nothing leaks).
