@@ -46,6 +46,7 @@ final class ConfigStoreTests: XCTestCase {
       "file.paper = letter",
       "file.high_speed = off",
       "file.skip_blank = off",
+      "file.jpeg_quality = 90",
       "",
       "image.mode = gray",
       "image.source = adf",
@@ -56,6 +57,7 @@ final class ConfigStoreTests: XCTestCase {
       "image.paper = a4",
       "image.high_speed = on",
       "image.skip_blank = off",
+      "image.jpeg_quality = 90",
       "",
       "ocr.mode = bw",
       "ocr.source = adf-duplex",
@@ -67,6 +69,7 @@ final class ConfigStoreTests: XCTestCase {
       "ocr.ocr_format = pdf",
       "ocr.high_speed = off",
       "ocr.skip_blank = on",
+      "ocr.jpeg_quality = 90",
       "",
       "email.mode = errdiff",
       "email.source = flatbed",
@@ -77,6 +80,7 @@ final class ConfigStoreTests: XCTestCase {
       "email.paper = a5",
       "email.high_speed = off",
       "email.skip_blank = off",
+      "email.jpeg_quality = 90",
     ].joined(separator: "\n") + "\n"
   }
 

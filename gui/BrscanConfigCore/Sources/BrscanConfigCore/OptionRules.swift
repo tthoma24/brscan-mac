@@ -27,4 +27,11 @@ public enum OptionRules {
   public static func searchableApplies(to format: String) -> Bool {
     format == "pdf"
   }
+
+  /// `<dest>.jpeg_quality` (the Brother driver's "File Size" control) only
+  /// affects output when `format == "jpeg"` -- the daemon writes a JPEG's
+  /// bytes at that quality; every other format ignores it.
+  public static func jpegQualityApplies(to format: String) -> Bool {
+    format == "jpeg"
+  }
 }

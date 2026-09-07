@@ -291,6 +291,50 @@ final class DaemonConfigTests: XCTestCase {
     XCTAssertFalse(config.file.skipBlank)
   }
 
+  // MARK: JPEG quality: <dest>.jpeg_quality (bounded int, clamped 0...100)
+
+  /// `<dest>.jpeg_quality` reads back as its integer value; a missing key
+  /// takes the default (90). Read on file and image routes.
+  func testJpegQualityParsesAndMissingDefaultsTo90() {
+    let doc = ConfigDocument(text: "file.jpeg_quality = 60\nimage.jpeg_quality = 100\n")
+    let config = DaemonConfig.from(doc)
+    XCTAssertEqual(config.file.jpegQuality, 60)
+    XCTAssertEqual(config.image.jpegQuality, 100)
+    // email/ocr keys absent -> default 90.
+    XCTAssertEqual(config.email.jpegQuality, 90)
+    XCTAssertEqual(config.ocr.jpegQuality, 90)
+  }
+
+  /// Setting `jpegQuality` on a route writes the exact integer.
+  func testApplyWritesJpegQuality() {
+    var doc = ConfigDocument()
+    var config = DaemonConfig.default
+    config.file.jpegQuality = 60
+    config.apply(to: &doc)
+    XCTAssertEqual(doc.value(for: "file.jpeg_quality"), "60")
+  }
+
+  /// An out-of-range value clamps to the daemon's `0...100`, on both ends;
+  /// a non-integer value defaults to 90.
+  func testJpegQualityClampsOutOfRangeAndDefaultsWhenUnparsable() {
+    let high = DaemonConfig.from(ConfigDocument(text: "file.jpeg_quality = 150\n"))
+    XCTAssertEqual(high.file.jpegQuality, 100)
+
+    let low = DaemonConfig.from(ConfigDocument(text: "file.jpeg_quality = -5\n"))
+    XCTAssertEqual(low.file.jpegQuality, 0)
+
+    let bad = DaemonConfig.from(ConfigDocument(text: "file.jpeg_quality = high\n"))
+    XCTAssertEqual(bad.file.jpegQuality, 90)
+  }
+
+  /// Both clamped bounds are values the daemon would keep as-is.
+  func testJpegQualityBoundsAreValid() {
+    XCTAssertTrue(JpegQuality.isValid(0))
+    XCTAssertTrue(JpegQuality.isValid(100))
+    XCTAssertFalse(JpegQuality.isValid(-1))
+    XCTAssertFalse(JpegQuality.isValid(101))
+  }
+
   // MARK: Defaults sanity
 
   func testDefaultRouteMatchesDaemonDefaults() {
@@ -304,6 +348,7 @@ final class DaemonConfigTests: XCTestCase {
     XCTAssertEqual(route.paper, "")
     XCTAssertFalse(route.highSpeed)
     XCTAssertFalse(route.skipBlank)
+    XCTAssertEqual(route.jpegQuality, 90)
   }
 
   func testDefaultGeneralHasNoPrinterHostOrDisplayName() {

@@ -131,11 +131,17 @@ public struct DaemonConfig: Equatable {
     /// (Task 1e.18). A plain boolean, not a token set. Unparsable/missing ->
     /// default (`false`, i.e. `off`).
     public var skipBlank: Bool
+    /// `<dest>.jpeg_quality` -- an integer `0...100` (0 = smallest file,
+    /// 100 = highest quality) matching the Brother driver's "File Size:
+    /// Small ... High Quality" control. A bounded int, not a token set (see
+    /// `JpegQuality`); the daemon clamps it to `0...100`. Only meaningful
+    /// when `format == "jpeg"`. Unparsable/missing -> default (90).
+    public var jpegQuality: Int
 
     public init(
       mode: String, source: String, dpi: Int, format: String, tiffCompression: String, separation: Separation,
       paper: String, ocrFormat: String = OptionSets.ocrFormat[0],  // "pdf"
-      highSpeed: Bool = false, skipBlank: Bool = false
+      highSpeed: Bool = false, skipBlank: Bool = false, jpegQuality: Int = JpegQuality.default
     ) {
       self.mode = mode
       self.source = source
@@ -147,6 +153,7 @@ public struct DaemonConfig: Equatable {
       self.ocrFormat = ocrFormat
       self.highSpeed = highSpeed
       self.skipBlank = skipBlank
+      self.jpegQuality = jpegQuality
     }
   }
 
@@ -330,6 +337,12 @@ extension DaemonConfig.Route {
     if let raw = doc.value(for: "\(dest).skip_blank"), let parsed = BoolToken.parse(raw) {
       route.skipBlank = parsed
     }
+    // <dest>.jpeg_quality: a bounded int, clamped to 0...100 the way the
+    // daemon does (see JpegQuality). A non-integer or missing value keeps
+    // the default (90).
+    if let raw = doc.value(for: "\(dest).jpeg_quality"), let parsed = JpegQuality.parse(raw) {
+      route.jpegQuality = parsed
+    }
 
     return route
   }
@@ -349,6 +362,7 @@ extension DaemonConfig.Route {
     }
     doc.setValue(BoolToken.serialize(highSpeed), for: "\(dest).high_speed")
     doc.setValue(BoolToken.serialize(skipBlank), for: "\(dest).skip_blank")
+    doc.setValue(String(jpegQuality), for: "\(dest).jpeg_quality")
   }
 }
 

@@ -160,6 +160,46 @@ final class RouteViewModelTests: XCTestCase {
     XCTAssertTrue(viewModel.skipBlank)
   }
 
+  // MARK: JPEG quality (File size slider)
+
+  /// Defaults to 90 and binds into the produced route.
+  func testJpegQualityDefaultsTo90AndBindsIntoRoute() {
+    let viewModel = RouteViewModel()
+    XCTAssertEqual(viewModel.jpegQuality, 90)
+    XCTAssertEqual(viewModel.route.jpegQuality, 90)
+
+    viewModel.jpegQuality = 60
+    XCTAssertEqual(viewModel.route.jpegQuality, 60)
+  }
+
+  /// The File size slider is only surfaced for the jpeg format.
+  func testJpegQualityEditableOnlyForJpeg() {
+    let viewModel = RouteViewModel()
+    for format in OptionSets.format {
+      viewModel.format = format
+      XCTAssertEqual(
+        viewModel.isJpegQualityEditable, format == "jpeg",
+        "jpeg-quality gating mismatch for \(format)")
+    }
+  }
+
+  /// Seeding from a route with a set quality populates the field, and
+  /// producing a route round-trips it. `load` reseeds in place too.
+  func testJpegQualitySeedsAndReseeds() {
+    var seed = DaemonConfig.Route.default
+    seed.format = "jpeg"
+    seed.jpegQuality = 100
+
+    let viewModel = RouteViewModel(route: seed)
+    XCTAssertEqual(viewModel.jpegQuality, 100)
+    XCTAssertEqual(viewModel.route, seed)
+
+    var reseed = DaemonConfig.Route.default
+    reseed.jpegQuality = 30
+    viewModel.load(reseed)
+    XCTAssertEqual(viewModel.jpegQuality, 30)
+  }
+
   // MARK: Separation editing
 
   func testSwitchingToImageModeProducesImageSeparation() {

@@ -53,6 +53,12 @@ public final class RouteViewModel: ObservableObject {
   /// plain on/off toggle.
   @Published public var skipBlank: Bool
 
+  /// `<dest>.jpeg_quality` -- JPEG output quality, `0...100` (0 = smallest
+  /// file, 100 = highest quality), matching the Brother driver's "File Size:
+  /// Small ... High Quality" control. A bounded int (see `JpegQuality`),
+  /// surfaced only when `format == "jpeg"` (see `isJpegQualityEditable`).
+  @Published public var jpegQuality: Int
+
   /// The separation mode and its `N`, kept as two separate published
   /// fields (rather than one `@Published var separation: Separation`) so
   /// the view can bind a mode picker and an `N` stepper independently.
@@ -71,6 +77,7 @@ public final class RouteViewModel: ObservableObject {
     self.paper = route.paper
     self.highSpeed = route.highSpeed
     self.skipBlank = route.skipBlank
+    self.jpegQuality = route.jpegQuality
 
     switch route.separation {
     case .combine:
@@ -97,6 +104,14 @@ public final class RouteViewModel: ObservableObject {
   /// applicable -- the daemon behaves as if it were always `combine`.
   public var isSeparationEditable: Bool {
     OptionRules.separationApplies(to: format)
+  }
+
+  /// `<dest>.jpeg_quality` is only meaningful when `format == "jpeg"` -- for
+  /// every other format the daemon ignores it (see
+  /// `OptionRules.jpegQualityApplies(to:)`), so the view only surfaces the
+  /// File size slider then.
+  public var isJpegQualityEditable: Bool {
+    OptionRules.jpegQualityApplies(to: format)
   }
 
   // MARK: Validation
@@ -143,7 +158,8 @@ public final class RouteViewModel: ObservableObject {
       separation: separation,
       paper: paper,
       highSpeed: highSpeed,
-      skipBlank: skipBlank)
+      skipBlank: skipBlank,
+      jpegQuality: jpegQuality)
   }
 
   // MARK: Reseeding
@@ -161,6 +177,7 @@ public final class RouteViewModel: ObservableObject {
     paper = route.paper
     highSpeed = route.highSpeed
     skipBlank = route.skipBlank
+    jpegQuality = route.jpegQuality
 
     switch route.separation {
     case .combine:
