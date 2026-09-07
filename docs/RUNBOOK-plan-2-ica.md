@@ -1,4 +1,4 @@
-# Load-spike runbook — Plan 2 Task 1 (does an ICA module still load?)
+# ICA module runbook — Plan 2 ("BrScan Mac ICA", does an ICA module still load?)
 
 This is the go/no-go gate for Plan 2. Before any scan-path code is written, we
 answer one question empirically: **does a third-party Image Capture (ICA) device
@@ -60,10 +60,10 @@ was instantiated. Task 1b found two causes and fixed both:
   `devices` dict of `{ iconFile }` entries) and wired it into the bundle. It is
   not settled from the public interface whether icdd keys `devices` by the
   module name or the matched Bonjour device name, so we register both
-  (`BrscanICALoadSpike` and the synthetic `BRW00AABBCCDDEE`) to a stock system
+  (`BrScan Mac ICA` and the synthetic `BRW00AABBCCDDEE`) to a stock system
   icon.
 - **Added `os_log` tracing** to `module_main.mm` (subsystem
-  `me.tthoma24.brscan.ica`, category `loadspike`) at `main` /
+  `me.tthoma24.brscan.ica`, category `session`) at `main` /
   `ICD_ScannerMain` entry and in every registered callback, so a re-run shows
   whether icdd launches our executable and calls us.
 
@@ -73,7 +73,7 @@ The earlier interpretation ("zero of our `os_log` lines ⇒ a signing/load gate"
 was wrong, and this task corrects it. What we established locally:
 
 - **Renamed** the identifier `ai.jiffylabs` → `me.tthoma24` everywhere: bundle id
-  `me.tthoma24.brscan.ica-loadspike`, `os_log` subsystem `me.tthoma24.brscan.ica`,
+  `me.tthoma24.brscan.ica`, `os_log` subsystem `me.tthoma24.brscan.ica`,
   and the predicates in this runbook.
 - **How icdd loads a module — confirmed by inspecting Apple's shipping module,
   not source.** `nm -gU` on
@@ -190,16 +190,16 @@ From the repo root:
 
 ```bash
 cmake -S . -B build
-cmake --build build --target brscan-ica-loadspike
+cmake --build build --target brscan-ica
 ```
 
-That produces `build/BrscanICALoadSpike.app`, copies `DeviceMatchingInfo.plist`
+That produces `build/BrScan Mac ICA.app`, copies `DeviceMatchingInfo.plist`
 and `DeviceInfo.plist` into `Contents/Resources/`, and **ad-hoc** signs the
 bundle (`codesign --sign -`), the cheapest signature to try first. Verify:
 
 ```bash
-codesign --verify --strict --verbose=2 build/BrscanICALoadSpike.app
-codesign -dvvv build/BrscanICALoadSpike.app    # Signature=adhoc, flags=0x2(adhoc)
+codesign --verify --strict --verbose=2 "build/BrScan Mac ICA.app"
+codesign -dvvv "build/BrScan Mac ICA.app"    # Signature=adhoc, flags=0x2(adhoc)
 ```
 
 Gatekeeper will reject an ad-hoc bundle (`spctl -a -t exec` → "rejected"). That
@@ -213,7 +213,7 @@ directory — there is no user-writable location — so this step needs admin an
 kept out of the build:
 
 ```bash
-sudo ica-module/install-loadspike.sh install
+sudo ica-module/install.sh install
 # then make icdd rescan:
 killall icdd 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.apple.icdd
 ```
@@ -226,10 +226,10 @@ callback string) even though the installed binary is new. Reap the stale child
 too, and confirm the *installed* binary carries your change before re-testing:
 
 ```bash
-sudo killall BrscanICALoadSpike 2>/dev/null || true
+sudo killall "BrScan Mac ICA" 2>/dev/null || true
 # Prove the installed copy (not just build/) has your change — grep a string
 # you added; it is embedded in the binary as an os_log format literal:
-strings "/Library/Image Capture/Devices/BrscanICALoadSpike.app/Contents/MacOS/BrscanICALoadSpike" \
+strings "/Library/Image Capture/Devices/BrScan Mac ICA.app/Contents/MacOS/BrScan Mac ICA" \
   | grep "<a string you just added>"
 ps -Ao pid,lstart,comm | grep -i brscan   # no stale PID older than the reinstall
 ```
@@ -237,7 +237,7 @@ ps -Ao pid,lstart,comm | grep -i brscan   # no stale PID older than the reinstal
 Remove it when done:
 
 ```bash
-sudo ica-module/install-loadspike.sh uninstall
+sudo ica-module/install.sh uninstall
 killall icdd 2>/dev/null || true
 ```
 
@@ -290,12 +290,12 @@ dns-sd -B _uscan._tcp local       # eSCL/AirScan; Apple's module claims this
 ### 3.2 Read the stream — the exact lines that decide A vs B
 
 - **A — signing / library-validation gate (→ no-go, go to Plan 3):** icdd logs a
-  launch **attempt** for our bundle — a line naming `BrscanICALoadSpike.app` from
+  launch **attempt** for our bundle — a line naming `BrScan Mac ICA.app` from
   `launchDeviceModule` / `launchDeviceModuleForBrowseID:` /
   `openApplicationAtURL:` — **and** it is followed by an AMFI / codesign denial:
   a line from `AppleMobileFileIntegrity` or `amfid`, or containing
   `library validation failed`, `code signature`, or `Launch … was denied`, that
-  names `me.tthoma24.brscan.ica-loadspike` or the bundle path. Our own
+  names `me.tthoma24.brscan.ica` or the bundle path. Our own
   `me.tthoma24.brscan.ica` subsystem stays **silent** (the child was killed
   before `main`). This means ad-hoc is not enough to *load*; the bar is
   Developer-ID + notarization, which turns every iteration into a notarization
@@ -309,7 +309,7 @@ dns-sd -B _uscan._tcp local       # eSCL/AirScan; Apple's module claims this
   match-dict/`DeviceInfo` gap). The fix is in our plists/bundle, not the
   signature.
 - **Success (spike passes):** our subsystem prints
-  `main: BrscanICALoadSpike executable launched` then
+  `main: Brscan ICA module launched` then
   `main: callbacks registered, entering ICD_ScannerMain` — icdd launched and ran
   our code. `callback: …` lines mean it is driving the device; it should now
   appear in Image Capture. `main: ICD_ScannerMain returned …` should NOT appear
@@ -357,6 +357,37 @@ real bar (schema fix, or Developer-ID + notarization) before Plan 2 continues.
   in this environment, so the notarization path cannot be exercised here; if the
   ad-hoc install does not load, that is where the effort estimate changes (every
   load test becomes a notarization round trip) and Plan 3 becomes the better bet.
+
+## Distribution: Developer-ID + notarization (documented, NOT wired)
+
+**Not required for a local/dev install — ad-hoc signing suffices for the
+developer-built module** (the CMake POST_BUILD ad-hoc signs it, and
+`ica-module/install.sh` copies it into `/Library/Image Capture/Devices/`). This
+section is a forward-looking note for redistributing the module to other
+machines, and is deliberately **not** part of the build: it needs a paid Apple
+Developer account and credentials, which this project does not wire into CMake.
+
+To ship the bundle to another Mac, replace the ad-hoc signature with a
+Developer-ID one and notarize it (all manual, run by a human with credentials):
+
+```bash
+# 1. Re-sign with a Developer ID Application cert (hardened runtime).
+codesign --force --options runtime --timestamp \
+  --sign "Developer ID Application: <Name> (<TEAMID>)" \
+  "build/BrScan Mac ICA.app"
+
+# 2. Submit to Apple's notary service and wait for the result.
+ditto -c -k --keepParent "build/BrScan Mac ICA.app" "BrScan Mac ICA.zip"
+xcrun notarytool submit "BrScan Mac ICA.zip" \
+  --apple-id "<apple-id>" --team-id "<TEAMID>" --password "<app-specific-pw>" \
+  --wait
+
+# 3. Staple the notarization ticket into the bundle.
+xcrun stapler staple "build/BrScan Mac ICA.app"
+```
+
+None of the above is added as a CMake step — it would require credentials in the
+build. Ad-hoc signing stays the default and is enough for local development.
 
 ## What this runbook does NOT cover
 

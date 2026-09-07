@@ -33,7 +33,7 @@
   <string>3.0</string>
   <key>devices</key>
   <dict>
-    <key>BrscanICALoadSpike</key>
+    <key>BrScan Mac ICA</key>
     <dict>
       <key>iconFile</key>
       <string>/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericNetworkIcon.icns</string>

@@ -553,7 +553,7 @@ work) are answered first, before any effort is sunk into the framework glue.
    target macOS. This is the go/no-go gate for the whole plan and the
    recommended first milestone. *Verifiable manually, immediately.*
    **Status:** the spike bundle, build seam, and runbook are implemented
-   (`ica-module/`, `docs/RUNBOOK-plan-2-loadspike.md`). It builds, links
+   (`ica-module/`, `docs/RUNBOOK-plan-2-ica.md`). It builds, links
    `ICADevices`, and ad-hoc signs; the load/appearance result is a privileged,
    manual check the runbook drives — not yet run against hardware.
    **Task 1d (match/binding gap — resolved as fixable):** the earlier re-test

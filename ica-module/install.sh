@@ -1,19 +1,19 @@
 #!/bin/bash
-# Install (or remove) the Plan 2 Task 1 ICA load-spike module into the system
-# Image Capture devices directory. This is an OPT-IN, privileged step, kept out
-# of the CMake build on purpose: /Library/Image Capture/Devices/ needs admin
-# rights, and loading a module there is exactly what the load spike is testing.
+# Install (or remove) the "BrScan Mac ICA" module into the system Image Capture
+# devices directory. This is an OPT-IN, privileged step, kept out of the CMake
+# build on purpose: /Library/Image Capture/Devices/ needs admin rights, and
+# loading a module there is what makes the device appear in Image Capture.
 #
 # Usage, from the repo root after `cmake --build build`:
-#   sudo ica-module/install-loadspike.sh install
-#   sudo ica-module/install-loadspike.sh uninstall
+#   sudo ica-module/install.sh install
+#   sudo ica-module/install.sh uninstall
 #
-# See docs/RUNBOOK-plan-2-loadspike.md for what to check once it is installed.
+# See docs/RUNBOOK-plan-2-ica.md for what to check once it is installed.
 set -euo pipefail
 
-BUNDLE="build/BrscanICALoadSpike.app"
+BUNDLE="build/BrScan Mac ICA.app"
 DEST_DIR="/Library/Image Capture/Devices"
-DEST="${DEST_DIR}/BrscanICALoadSpike.app"
+DEST="${DEST_DIR}/BrScan Mac ICA.app"
 
 case "${1:-}" in
   install)
