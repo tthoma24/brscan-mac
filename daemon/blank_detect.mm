@@ -1,6 +1,6 @@
 // Objective-C++ implementation of host-side blank-page detection (see
 // blank_detect.h). No ARC is needed here: the decode goes through
-// daemon/action_ocr.h's CreateCGImageFromScanResult and the rest is
+// output/action_ocr.h's CreateCGImageFromScanResult and the rest is
 // CoreGraphics/CoreFoundation opaque types (CGImageRef, CGContextRef,
 // CGColorSpaceRef), all manually retained/released -- the same style
 // daemon/image_transform.mm uses for its CoreGraphics plumbing.
@@ -14,7 +14,7 @@
 #include <iostream>
 #include <vector>
 
-#include "action_ocr.h"
+#include "output/action_ocr.h"
 #include "blank_detect.h"
 
 namespace brscan::scand {
@@ -115,7 +115,7 @@ bool IsBlankPage(const brscan::ScanResult& page) {
   }
 
   // @autoreleasepool: CreateCGImageFromScanResult's kRgb (JPEG) path decodes
-  // through an autoreleased NSData (see daemon/action_ocr.mm). The daemon has
+  // through an autoreleased NSData (see output/action_ocr.mm). The daemon has
   // no ambient pool -- its main loop is plain C++ with no NSRunLoop -- so
   // without this every color page's decode buffer would leak for the process
   // lifetime ("autoreleased with no pool in place - just leaking"). The pool

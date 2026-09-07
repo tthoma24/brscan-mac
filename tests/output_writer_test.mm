@@ -1,4 +1,4 @@
-// Tests for daemon/output_writer.h/.mm: the library-level output writer
+// Tests for output/output_writer.h/.mm: the library-level output writer
 // that turns a multi-page scan (a list of brscan::ScanResult) into the
 // configured file format (PDF / multi-page TIFF / numbered JPEG-PNG /
 // native). Every input page here is a synthetic image built at runtime --
@@ -26,7 +26,7 @@
 
 #include "brscan/scanner.h"
 #include "brscan/types.h"
-#include "output_writer.h"
+#include "output/output_writer.h"
 
 namespace brscan::scand {
 namespace {

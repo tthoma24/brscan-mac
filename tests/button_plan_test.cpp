@@ -13,7 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "config.h"
-#include "output_writer.h"
+#include "output/output_writer.h"
 #include "paper_size.h"
 
 namespace brscan::scand {

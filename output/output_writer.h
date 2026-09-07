@@ -16,7 +16,7 @@
 // FUNC triggered the scan. Task 1c.2b wires it into the daemon's actions.
 //
 // The Objective-C++ implementation (ImageIO / CoreGraphics / Vision) lives
-// in daemon/output_writer.mm; this header is plain C++ so an ordinary .cpp
+// in output/output_writer.mm; this header is plain C++ so an ordinary .cpp
 // caller can drive it.
 namespace brscan::scand {
 
@@ -37,7 +37,7 @@ namespace brscan::scand {
 // kText/kHtml/kRtf are OCR-only text sinks: rather than reproduce the
 // scanned image, they run Vision text recognition on each page and write
 // the recognized text as a single plain-text (.txt), HTML (.html), or RTF
-// (.rtf) file (see daemon/action_ocr.h's WriteRecognizedText, where the
+// (.rtf) file (see output/action_ocr.h's WriteRecognizedText, where the
 // Vision dependency lives). They are only ever selected for the OCR
 // destination -- the scan-button's `T=TXT/HTML/RTF` sub-format or the
 // `ocr.ocr_format` config key -- since a text sink discards the image.
@@ -134,7 +134,7 @@ struct OutputSettings {
 //     them) honor `settings.jpeg_quality` (0-100); the lossless formats
 //     (kPng, kGif, kBmp) ignore it.
 //   - kText / kHtml / kRtf: one `.txt` / `.html` / `.rtf` file holding the
-//     Vision-recognized text of every page (see daemon/action_ocr.h's
+//     Vision-recognized text of every page (see output/action_ocr.h's
 //     WriteRecognizedText). Single-file output, like kNative -- document
 //     separation does not apply.
 //

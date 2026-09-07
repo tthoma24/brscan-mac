@@ -338,7 +338,7 @@ int main(int argc, char** argv) {
     //
     // @autoreleasepool (defense in depth for the autorelease leak fix): the
     // post-scan image pipeline decodes color pages through an autoreleased
-    // NSData (daemon/action_ocr.mm), and this daemon has no NSRunLoop draining
+    // NSData (output/action_ocr.mm), and this daemon has no NSRunLoop draining
     // an ambient pool. The per-page decode sites already wrap their own pools,
     // but wrapping each loop iteration here drains any other stray autoreleased
     // object created anywhere under HandleButtonEvent, so nothing accumulates

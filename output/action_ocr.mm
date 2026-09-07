@@ -16,7 +16,7 @@
 #include <iterator>
 #include <vector>
 
-#include "action_ocr.h"
+#include "output/action_ocr.h"
 
 namespace brscan {
 

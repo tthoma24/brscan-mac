@@ -12,12 +12,12 @@
   },
 
   "format": {
-    "_comment": "<dest>.format -- daemon/config.cpp's ParseFormatString(), daemon/output_writer.h's OutputFormat. Default when unset is native.",
+    "_comment": "<dest>.format -- daemon/config.cpp's ParseFormatString(), output/output_writer.h's OutputFormat. Default when unset is native.",
     "tokens": ["native", "pdf", "tiff", "jpeg", "png", "heic", "jp2", "gif", "bmp"]
   },
 
   "tiff_compression": {
-    "_comment": "<dest>.tiff_compression -- daemon/config.cpp's ParseTiffCompressionString(), daemon/output_writer.h's TiffCompression. Only affects tiff format; default is lzw.",
+    "_comment": "<dest>.tiff_compression -- daemon/config.cpp's ParseTiffCompressionString(), output/output_writer.h's TiffCompression. Only affects tiff format; default is lzw.",
     "tokens": ["lzw", "g3", "g4"]
   },
 

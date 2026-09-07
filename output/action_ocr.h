@@ -18,7 +18,7 @@
 // translation unit) so daemon/actions.cpp -- an ordinary .cpp file, not
 // Objective-C++ -- can call OcrImageToSearchablePdf() directly. The
 // Objective-C++ bits (Vision, CoreText, PDFKit-adjacent CoreGraphics PDF
-// context calls) live in daemon/action_ocr.mm.
+// context calls) live in output/action_ocr.mm.
 namespace brscan {
 
 // Loads `image_path` into a CGImageRef. Recognizes three formats by
@@ -71,7 +71,7 @@ Status WriteSearchablePdf(const std::vector<CGImageRef>& images,
 // The text document format WriteRecognizedText emits: plain UTF-8 text,
 // HTML, or RTF. Distinct from OutputFormat's kText/kHtml/kRtf (which name
 // the same three sinks at the config/output-writer layer); this enum keeps
-// action_ocr's public surface independent of daemon/output_writer.h.
+// action_ocr's public surface independent of output/output_writer.h.
 enum class OcrTextFormat { kPlain, kHtml, kRtf };
 
 // Runs Vision text recognition (VNRecognizeTextRequest, accurate level) on

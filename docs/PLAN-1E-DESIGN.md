@@ -289,7 +289,7 @@ Layout: a tabbed window. **General** holds the machine-wide keys; each of
 ## Config fields the UI edits
 
 All keys and value sets below are taken from `daemon/config.h`,
-`daemon/config.cpp`, `daemon/output_writer.h`, and `daemon/paper_size.h`.
+`daemon/config.cpp`, `output/output_writer.h`, and `daemon/paper_size.h`.
 `<dest>` is one of `file`, `image`, `ocr`, `email`.
 
 ### General (machine-wide keys)
@@ -369,7 +369,7 @@ Prerequisite, daemon-side, **not** a UI PR — confirmed, not optional:
 
 This design uses no Brother source or assets. The only Brother-derived strings
 are the paper/format tokens already decoded clean-room into this project's own
-headers (`daemon/paper_size.h`, `daemon/output_writer.h`, `daemon/button_config.h`).
+headers (`daemon/paper_size.h`, `output/output_writer.h`, `daemon/button_config.h`).
 Where a device placeholder is needed, use the synthetic `BRW00AABBCCDDEE`; no
 real device identity (Bonjour name, MAC, or IP) appears here.
 

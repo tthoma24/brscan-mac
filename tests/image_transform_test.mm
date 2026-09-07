@@ -18,7 +18,7 @@
 
 #include <gtest/gtest.h>
 
-#include "action_ocr.h"
+#include "output/action_ocr.h"
 #include "blank_detect.h"
 #include "brscan/scanner.h"
 #include "brscan/types.h"

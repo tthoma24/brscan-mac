@@ -16,8 +16,8 @@
 #include <string>
 #include <vector>
 
-#include "action_ocr.h"
-#include "output_writer.h"
+#include "output/action_ocr.h"
+#include "output/output_writer.h"
 #include "scan_output.h"
 
 namespace brscan::scand {
@@ -267,7 +267,7 @@ brscan::Status WriteContainers(const std::vector<brscan::ScanResult>& pages,
       bool decoded = true;
       for (int i = first; i < last; ++i) {
         // Per-page @autoreleasepool: CreateCGImageFromScanResult's kRgb (JPEG)
-        // path decodes through an autoreleased NSData (daemon/action_ocr.mm),
+        // path decodes through an autoreleased NSData (output/action_ocr.mm),
         // and the daemon has no ambient pool. Draining each page's decode
         // buffer here keeps a many-page color PDF from accumulating them all
         // until the write finishes. The CGImageRef is manually retained, so it

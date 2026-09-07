@@ -1,4 +1,4 @@
-// Tests for daemon/action_ocr.h/.mm: the OCR destination action's core.
+// Tests for output/action_ocr.h/.mm: the OCR destination action's core.
 //
 // The important test here is OcrImageToSearchablePdfTest.RecognizesTextAndProducesSearchablePdf:
 // it renders a synthetic grayscale bitmap containing a known, distinctive
@@ -22,7 +22,7 @@
 
 #include <gtest/gtest.h>
 
-#include "action_ocr.h"
+#include "output/action_ocr.h"
 
 namespace brscan {
 namespace {
