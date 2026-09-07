@@ -16,7 +16,7 @@
 #include "button_plan.h"
 #include "image_transform.h"
 #include "log_safe.h"
-#include "scan_output.h"
+#include "output/page_writer.h"
 
 namespace brscan::scand {
 
@@ -187,7 +187,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   if (scan_status != Status::kOk) {
     std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
                << ": scan failed: "
-               << brscan::cli::DescribeFailure(scan_status) << "\n";
+               << brscan::output::DescribeFailure(scan_status) << "\n";
     return scan_status;
   }
   // RunScan only returns kOk after pushing at least one page (see
@@ -346,7 +346,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
 
   // Best-effort: if output_dir already exists (the common case after the
   // first scan; always true for EMAIL's just-created temp dir) this is a
-  // no-op; if it can't be created, WriteOutput below will fail to open the
+  // no-op; if it can't be created, WriteConfiguredOutput below will fail to open the
   // file and report that instead.
   std::error_code ec;
   std::filesystem::create_directories(output_dir, ec);

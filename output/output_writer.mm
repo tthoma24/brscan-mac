@@ -18,7 +18,7 @@
 
 #include "output/action_ocr.h"
 #include "output/output_writer.h"
-#include "scan_output.h"
+#include "output/page_writer.h"
 
 namespace brscan::scand {
 
@@ -304,7 +304,7 @@ brscan::Status WriteContainers(const std::vector<brscan::ScanResult>& pages,
 }
 
 // Writes one JPEG or PNG file per page, numbered `-NNN` when there is more
-// than one page (via brscan::cli::PagePath). Document separation does not
+// than one page (via brscan::output::PagePath). Document separation does not
 // apply -- the per-file numbering already keeps the pages distinct. `quality`
 // (0-100) is the JPEG lossy-compression quality; it is ignored for PNG.
 brscan::Status WritePerPageImages(const std::vector<brscan::ScanResult>& pages,
@@ -313,7 +313,7 @@ brscan::Status WritePerPageImages(const std::vector<brscan::ScanResult>& pages,
                                   std::vector<std::string>* written) {
   const int total = static_cast<int>(pages.size());
   for (int i = 0; i < total; ++i) {
-    const std::string path = brscan::cli::PagePath(image_base, i + 1, total);
+    const std::string path = brscan::output::PagePath(image_base, i + 1, total);
     const brscan::Status status =
         WriteSingleImageFile(pages[static_cast<size_t>(i)], uti, path, quality);
     if (status != brscan::Status::kOk) return status;
@@ -372,11 +372,11 @@ brscan::Status WriteConfiguredOutput(
     case OutputFormat::kNative:
       // Native per-PixelFormat files, numbered by WritePages exactly as the
       // CLI does. Document separation does not apply to native output.
-      if (!brscan::cli::WritePages(pages, base_path)) {
+      if (!brscan::output::WritePages(pages, base_path)) {
         return brscan::Status::kIoError;
       }
       for (int i = 0; i < static_cast<int>(pages.size()); ++i) {
-        written->push_back(brscan::cli::PagePath(
+        written->push_back(brscan::output::PagePath(
             base_path, i + 1, static_cast<int>(pages.size())));
       }
       return brscan::Status::kOk;

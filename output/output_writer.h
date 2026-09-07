@@ -23,7 +23,7 @@ namespace brscan::scand {
 // The output file format, one per "File Type" the vendor dialog offers.
 //   kNative writes each page in its own per-PixelFormat file (JPEG for a
 //   color page, PGM/P5 for gray, PBM/P4 for bitonal) -- exactly what
-//   tools/scan_output.cpp's WritePages already produces, and the format
+//   output/page_writer.cpp's WritePages already produces, and the format
 //   used when no `<dest>.format` key is set.
 //
 // kHeic/kJpeg2000/kGif/kBmp are the extra single-image formats Image
@@ -115,7 +115,7 @@ struct OutputSettings {
 // cleared first). Returns kOk on success.
 //
 // Behavior by format:
-//   - kNative: delegates to brscan::cli::WritePages -- one native file per
+//   - kNative: delegates to brscan::output::WritePages -- one native file per
 //     page, numbered `-NNN` when there is more than one page. Separation
 //     does not apply (there is no container to split).
 //   - kPdf: one multi-page PDF; if `settings.searchable`, each page also
@@ -127,7 +127,7 @@ struct OutputSettings {
 //     lossless -- no thresholding).
 //   - kJpeg / kPng / kHeic / kJpeg2000 / kGif / kBmp: one single-image file
 //     per page, numbered `-NNN` when there is more than one page (via
-//     brscan::cli::PagePath) with the format's extension (.jpg / .png /
+//     brscan::output::PagePath) with the format's extension (.jpg / .png /
 //     .heic / .jp2 / .gif / .bmp). Separation does not apply to these
 //     per-page formats -- kEveryImage/kEveryPage behave like kCombine. The
 //     lossy encoders (kJpeg, and kHeic/kJpeg2000 where the host supports

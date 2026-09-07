@@ -716,7 +716,7 @@ TEST(WriteConfiguredOutputTest, RtfSinkWritesSingleRtfFile) {
 }
 
 // ---------------------------------------------------------------------
-// Native (delegates to brscan::cli::WritePages).
+// Native (delegates to brscan::output::WritePages).
 // ---------------------------------------------------------------------
 
 TEST(WriteConfiguredOutputTest, NativeWritesPerFormatFilesNumbered) {

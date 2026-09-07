@@ -1,0 +1,53 @@
+// Self-contained page-writing primitives for the brscan-output library:
+// turning a completed brscan::ScanResult into a file on disk, and describing
+// a failed brscan::Status. These are generic (not CLI-specific), so they live
+// in the shared brscan-output library alongside output_writer/action_ocr
+// rather than in the CLI's tools/ tree; both front ends (brscan-cli and the
+// brscan-scand daemon) reach them through the library. Genuine CLI glue --
+// process exit-code mapping -- stays in tools/scan_output.h (brscan::cli).
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "brscan/scanner.h"
+#include "brscan/types.h"
+
+namespace brscan::output {
+
+// A human-readable line for each failure Status RunScan can report, per
+// libbrscan/scanner.h's doc comment.
+std::string DescribeFailure(brscan::Status status);
+
+// Writes `result` to `path`: the JPEG bytes as-is for color, a binary PGM
+// (P5) for gray (GRAY64 raw or GRAY256/RLENGTH, both PixelFormat::kGray),
+// or a binary PBM (P4) for the 1-bit modes (TEXT/ERRDIF,
+// PixelFormat::kBitonal -- see the bit-packing convention documented on
+// PixelFormat::kBitonal in types.h, which is exactly what P4 expects, so
+// `result.data` is written out unchanged). Returns false (after printing
+// an error) if the file can't be opened for writing.
+bool WriteOutput(const brscan::ScanResult& result, const std::string& path);
+
+// Writes every page in `pages` to disk, per WriteOutput's format rules for
+// each page's PixelFormat. A single-page vector writes exactly `path`,
+// unchanged. A multi-page vector writes one numbered file per page instead:
+// `path` with `-<NNN>` (1-based, zero-padded to 3 digits) inserted before
+// its extension -- e.g. `scan.jpg` becomes `scan-001.jpg`, `scan-002.jpg`,
+// and so on. Returns false (after WriteOutput has printed an error for the
+// page that failed) if any page fails to write; pages before the failure
+// are still left on disk.
+bool WritePages(const std::vector<brscan::ScanResult>& pages,
+                 const std::string& path);
+
+// The actual on-disk path WritePages(pages, base) wrote (or will write) for
+// page `index_1based` (1-based) out of `total` pages: `base` unchanged when
+// `total == 1` (WritePages never numbers a single page), otherwise `base`
+// with `-<NNN>` inserted before its extension, matching WritePages' own
+// numbering exactly. Callers that need to know which real file a
+// particular page landed at -- e.g. to run an action against page 1's
+// file, rather than the never-written `base` path a multi-page scan
+// doesn't produce -- must go through this helper instead of
+// reimplementing the numbering.
+std::string PagePath(const std::string& base, int index_1based, int total);
+
+}  // namespace brscan::output

@@ -73,14 +73,14 @@ set(OCR_FRAMEWORKS
 add_library(brscan-output
   output/action_ocr.mm
   output/output_writer.mm
+  output/page_writer.cpp
 )
 # `#include "output/..."` resolves from the source root, and consumers that
-# link brscan-output inherit that path. output_writer.mm also uses
-# tools/scan_output.h's WritePages/PagePath for its native per-page files,
-# so tools/ is on the private compile path; each front end already compiles
-# scan_output.cpp, which resolves those symbols at the final link.
+# link brscan-output inherit that path. page_writer.cpp holds the shared
+# page-writing primitives (WriteOutput/WritePages/PagePath) and the shared
+# failure describer output_writer.mm and both front ends use, so the library
+# is self-contained and needs no include of or link against the CLI's tools/.
 target_include_directories(brscan-output PUBLIC ${CMAKE_SOURCE_DIR})
-target_include_directories(brscan-output PRIVATE ${CMAKE_SOURCE_DIR}/tools)
 target_link_libraries(brscan-output PUBLIC brscan ${OCR_FRAMEWORKS})
 
 # action_ocr.mm and output_writer.mm use ARC for their Objective-C objects
@@ -115,7 +115,6 @@ target_link_directories(brscan-cli PRIVATE ${TURBOJPEG_LIBRARY_DIRS})
 # they're specific to this daemon and not part of the core scan protocol.
 add_executable(brscan-scand
   tools/brscan-scand.mm
-  tools/scan_output.cpp
   daemon/snmp_register.cpp
   daemon/button_listener.cpp
   daemon/button_config.cpp
@@ -347,7 +346,6 @@ if(BUILD_TESTING)
     tests/notification_deduper_test.cpp
     daemon/log_safe.cpp
     tests/log_safe_test.cpp
-    tools/scan_output.cpp
     tests/option_sets_test.cpp
     ica-module/buffer_descriptor.cpp
     tests/buffer_descriptor_test.cpp

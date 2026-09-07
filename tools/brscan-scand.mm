@@ -29,7 +29,7 @@
 #include "handle_event.h"
 #include "log_safe.h"
 #include "notification_deduper.h"
-#include "scan_output.h"
+#include "output/page_writer.h"
 #include "sender_check.h"
 #include "snmp_register.h"
 
@@ -485,7 +485,7 @@ int main(int argc, char** argv) {
       if (connect_status != brscan::Status::kOk) {
         std::cerr << "[scan] could not connect to " << cfg.printer_host << ":"
                    << kScanPort << ": "
-                   << brscan::cli::DescribeFailure(connect_status) << "\n";
+                   << brscan::output::DescribeFailure(connect_status) << "\n";
         continue;
       }
 
@@ -496,7 +496,7 @@ int main(int argc, char** argv) {
 
       if (handled != brscan::Status::kOk) {
         std::cerr << "[scan] FUNC=" << brscan::scand::LogSafe(event.func) << ": "
-                   << brscan::cli::DescribeFailure(handled) << "\n";
+                   << brscan::output::DescribeFailure(handled) << "\n";
       }
     } catch (const std::exception& e) {
       // Cheap exception-safety net for a long-running daemon: an
