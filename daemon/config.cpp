@@ -77,6 +77,10 @@ std::optional<OutputFormat> ParseFormatString(const std::string& s) {
   if (s == "tiff") return OutputFormat::kTiff;
   if (s == "jpeg") return OutputFormat::kJpeg;
   if (s == "png") return OutputFormat::kPng;
+  if (s == "heic") return OutputFormat::kHeic;
+  if (s == "jp2") return OutputFormat::kJpeg2000;
+  if (s == "gif") return OutputFormat::kGif;
+  if (s == "bmp") return OutputFormat::kBmp;
   if (s == "native") return OutputFormat::kNative;
   return std::nullopt;
 }

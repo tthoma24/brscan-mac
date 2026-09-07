@@ -181,12 +181,17 @@ brscan::Status WriteMultipageTiff(
   }
 }
 
-// The ImageIO properties dict for a JPEG write at `quality` (0-100), i.e.
-// { kCGImageDestinationLossyCompressionQuality: quality/100.0 }. Returns nil
-// for a non-JPEG `uti` (PNG is lossless -- CoreGraphics ignores the key there,
-// so there is nothing to pass). `quality` is clamped to 0-100 defensively.
-NSDictionary* JpegImageProperties(CFStringRef uti, int quality) {
-  if (!CFEqual(uti, CFSTR("public.jpeg"))) return nil;
+// The ImageIO properties dict for a lossy single-image write at `quality`
+// (0-100), i.e. { kCGImageDestinationLossyCompressionQuality: quality/100.0 }.
+// Applies to the lossy UTIs the writer emits -- JPEG, HEIC, and JPEG 2000 --
+// and returns nil for the lossless formats (PNG/GIF/BMP), whose encoders
+// ignore the key, so there is nothing to pass. `quality` is clamped to 0-100
+// defensively.
+NSDictionary* LossyImageProperties(CFStringRef uti, int quality) {
+  const bool lossy = CFEqual(uti, CFSTR("public.jpeg")) ||
+                     CFEqual(uti, CFSTR("public.heic")) ||
+                     CFEqual(uti, CFSTR("public.jpeg-2000"));
+  if (!lossy) return nil;
   const int clamped = std::clamp(quality, 0, 100);
   return @{
     (__bridge NSString*)kCGImageDestinationLossyCompressionQuality :
@@ -195,9 +200,10 @@ NSDictionary* JpegImageProperties(CFStringRef uti, int quality) {
 }
 
 // Writes `page` as a single-image file of type `uti` (e.g. "public.jpeg",
-// "public.png") at `path`. For a JPEG, `quality` (0-100) sets the lossy
-// compression quality (see JpegImageProperties); it is ignored for the
-// lossless PNG path. Returns kIoError on decode/encode failure.
+// "public.png", "public.heic") at `path`. For a lossy format, `quality`
+// (0-100) sets the lossy compression quality (see LossyImageProperties); it
+// is ignored for the lossless paths (PNG/GIF/BMP). Returns kIoError on
+// decode/encode failure.
 brscan::Status WriteSingleImageFile(const brscan::ScanResult& page,
                                     CFStringRef uti, const std::string& path,
                                     int quality) {
@@ -211,7 +217,7 @@ brscan::Status WriteSingleImageFile(const brscan::ScanResult& page,
       CGImageRelease(image);
       return brscan::Status::kIoError;
     }
-    NSDictionary* props = JpegImageProperties(uti, quality);
+    NSDictionary* props = LossyImageProperties(uti, quality);
     CGImageDestinationAddImage(dest, image, (__bridge CFDictionaryRef)props);
     const bool finalized = CGImageDestinationFinalize(dest);
     CFRelease(dest);
@@ -391,6 +397,29 @@ brscan::Status WriteConfiguredOutput(
     case OutputFormat::kPng:
       return WritePerPageImages(pages, CFSTR("public.png"),
                                 ReplaceExtension(base_path, ".png"),
+                                settings.jpeg_quality, written);
+
+    // The extra single-image formats Image Capture exposes (issue #24): one
+    // file per page, like kJpeg/kPng. kHeic/kJpeg2000 are lossy and honor
+    // settings.jpeg_quality (see LossyImageProperties); kGif/kBmp ignore it.
+    case OutputFormat::kHeic:
+      return WritePerPageImages(pages, CFSTR("public.heic"),
+                                ReplaceExtension(base_path, ".heic"),
+                                settings.jpeg_quality, written);
+
+    case OutputFormat::kJpeg2000:
+      return WritePerPageImages(pages, CFSTR("public.jpeg-2000"),
+                                ReplaceExtension(base_path, ".jp2"),
+                                settings.jpeg_quality, written);
+
+    case OutputFormat::kGif:
+      return WritePerPageImages(pages, CFSTR("com.compuserve.gif"),
+                                ReplaceExtension(base_path, ".gif"),
+                                settings.jpeg_quality, written);
+
+    case OutputFormat::kBmp:
+      return WritePerPageImages(pages, CFSTR("com.microsoft.bmp"),
+                                ReplaceExtension(base_path, ".bmp"),
                                 settings.jpeg_quality, written);
 
     case OutputFormat::kText:

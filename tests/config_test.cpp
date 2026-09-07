@@ -265,6 +265,20 @@ TEST(ParseConfigTest, AppliesNativeFormatExplicitly) {
   EXPECT_EQ(cfg.file_output.format, OutputFormat::kNative);
 }
 
+// The extra single-image formats Image Capture exposes (issue #24): each
+// `<dest>.format` token round-trips to its OutputFormat.
+TEST(ParseConfigTest, AppliesExtraSingleImageFormats) {
+  const Config cfg = ParseConfig(
+      "file.format=heic\n"
+      "image.format=jp2\n"
+      "ocr.format=gif\n"
+      "email.format=bmp\n");
+  EXPECT_EQ(cfg.file_output.format, OutputFormat::kHeic);
+  EXPECT_EQ(cfg.image_output.format, OutputFormat::kJpeg2000);
+  EXPECT_EQ(cfg.ocr_output.format, OutputFormat::kGif);
+  EXPECT_EQ(cfg.email_output.format, OutputFormat::kBmp);
+}
+
 TEST(ParseConfigTest, AppliesTiffCompression) {
   EXPECT_EQ(ParseConfig("file.tiff_compression=lzw\n").file_output.tiff_compression,
             TiffCompression::kLzw);
