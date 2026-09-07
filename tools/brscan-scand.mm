@@ -26,6 +26,7 @@
 #include "button_listener.h"
 #include "config.h"
 #include "handle_event.h"
+#include "log_safe.h"
 #include "notification_deduper.h"
 #include "scan_output.h"
 #include "sender_check.h"
@@ -376,8 +377,9 @@ int main(int argc, char** argv) {
         continue;
       }
 
-      std::cout << "[listener] button press: FUNC=" << event.func
-                 << " user=" << event.user << " seq=" << event.seq << "\n";
+      std::cout << "[listener] button press: FUNC=" << brscan::scand::LogSafe(event.func)
+                 << " user=" << brscan::scand::LogSafe(event.user) << " seq=" << event.seq
+                 << "\n";
       // ACK first (even for a duplicate): the byte-for-byte echo is what
       // tells the printer to stop retransmitting this notification.
       if (listener.Ack(raw, from, fromlen) != brscan::Status::kOk) {
@@ -388,8 +390,8 @@ int main(int argc, char** argv) {
       // A retransmit of a press already handled is ACKed above but not
       // scanned again -- see daemon/notification_deduper.h.
       if (deduper.IsDuplicate(event)) {
-        std::cout << "[listener] duplicate notification (REGID=" << event.regid
-                   << " SEQ=" << event.seq
+        std::cout << "[listener] duplicate notification (REGID="
+                   << brscan::scand::LogSafe(event.regid) << " SEQ=" << event.seq
                    << "); ACKed, not re-scanning\n";
         continue;
       }
@@ -409,7 +411,7 @@ int main(int argc, char** argv) {
       transport.Disconnect();
 
       if (handled != brscan::Status::kOk) {
-        std::cerr << "[scan] FUNC=" << event.func << ": "
+        std::cerr << "[scan] FUNC=" << brscan::scand::LogSafe(event.func) << ": "
                    << brscan::cli::DescribeFailure(handled) << "\n";
       }
     } catch (const std::exception& e) {

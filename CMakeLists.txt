@@ -119,6 +119,7 @@ add_executable(brscan-scand
   daemon/handle_event.mm
   daemon/sender_check.cpp
   daemon/notification_deduper.cpp
+  daemon/log_safe.cpp
 )
 target_include_directories(brscan-scand PRIVATE daemon tools)
 target_link_libraries(brscan-scand PRIVATE brscan)
@@ -333,6 +334,8 @@ if(BUILD_TESTING)
     tests/sender_check_test.cpp
     daemon/notification_deduper.cpp
     tests/notification_deduper_test.cpp
+    daemon/log_safe.cpp
+    tests/log_safe_test.cpp
     tools/scan_output.cpp
     tests/option_sets_test.cpp
     ica-module/buffer_descriptor.cpp
