@@ -104,16 +104,25 @@ Touch-Panel-ON config frame falls back safely (the ESC I offer's full
 scan area, or a PDF, respectively) and is logged -- it never aborts the
 scan.
 
+**ADF high-speed honors its rotation.** The LCD's "ADF high-speed" toggle
+(`X=`) feeds each sheet *landscape* for throughput and returns the raster
+rotated 90 degrees, without transposing the scan area it reports -- there is
+no device flag to undo this, so the host rotates every page back to portrait
+after the scan (`daemon/image_transform.h`'s `RotatePortrait`, done in
+`HandleButtonEvent` before the pages are written). With Touch-Panel ON the
+panel's `X=` drives it; with Touch-Panel OFF the `<dest>.high_speed` config
+key (`on|off`, default `off`) does. A page that fails to rotate is written as
+scanned rather than failing the job. (The rotation direction is a single
+constant in `image_transform.mm`, flippable if a device-in-the-loop test ever
+shows pages upside-down.)
+
 ### Not yet implemented
 
-The config command also carries a few panel toggles this project parses
-but does not yet act on -- captured for a later task, not silently
-dropped:
+The config command also carries one panel toggle this project parses but
+does not yet act on -- captured for a later task, not silently dropped:
 
 - **Skip-blank** (`W=`): host-side detection and removal of blank pages
   from a multi-page scan.
-- **High-speed** (`X=`): the LCD's high-speed/landscape (rotated) scan
-  mode.
 
 ## How it works
 

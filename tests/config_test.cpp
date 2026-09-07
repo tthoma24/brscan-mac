@@ -515,6 +515,73 @@ TEST(RemoveBackgroundLevelForFuncTest, FallsBackToFileLevelForUnknownFunc) {
   EXPECT_EQ(RemoveBackgroundLevelForFunc(cfg, "BOGUS"), 128);
 }
 
+// ---------------------------------------------------------------------
+// ADF high-speed (`<dest>.high_speed`).
+// ---------------------------------------------------------------------
+
+TEST(DefaultConfigTest, HighSpeedDefaultsToOff) {
+  const Config cfg = DefaultConfig();
+  EXPECT_FALSE(cfg.file_high_speed);
+  EXPECT_FALSE(cfg.image_high_speed);
+  EXPECT_FALSE(cfg.ocr_high_speed);
+  EXPECT_FALSE(cfg.email_high_speed);
+}
+
+TEST(ParseConfigTest, AppliesHighSpeedForEachDest) {
+  const Config cfg = ParseConfig(
+      "file.high_speed=on\n"
+      "image.high_speed=off\n"
+      "ocr.high_speed=on\n"
+      "email.high_speed=off\n");
+  EXPECT_TRUE(cfg.file_high_speed);
+  EXPECT_FALSE(cfg.image_high_speed);
+  EXPECT_TRUE(cfg.ocr_high_speed);
+  EXPECT_FALSE(cfg.email_high_speed);
+}
+
+TEST(ParseConfigTest, HighSpeedAcceptsTolerantSpellings) {
+  // ParseBoolString tolerates the common bool spellings, case-insensitively.
+  EXPECT_TRUE(ParseConfig("file.high_speed=TRUE\n").file_high_speed);
+  EXPECT_TRUE(ParseConfig("file.high_speed=Yes\n").file_high_speed);
+  EXPECT_TRUE(ParseConfig("file.high_speed=1\n").file_high_speed);
+  EXPECT_FALSE(ParseConfig("file.high_speed=No\n").file_high_speed);
+  EXPECT_FALSE(ParseConfig("file.high_speed=0\n").file_high_speed);
+}
+
+TEST(ParseConfigTest, MissingHighSpeedKeyLeavesOffDefault) {
+  const Config cfg = ParseConfig("file.mode=gray\n");
+  EXPECT_FALSE(cfg.file_high_speed);
+}
+
+TEST(ParseConfigTest, UnknownHighSpeedValueLeavesOffDefault) {
+  // An unparsable value leaves the field at its default (off), per
+  // ParseConfig's tolerant contract -- it doesn't flip a configured value.
+  EXPECT_FALSE(ParseConfig("file.high_speed=maybe\n").file_high_speed);
+  const Config cfg = ParseConfig(
+      "image.high_speed=on\n"
+      "image.high_speed=whoops\n");
+  EXPECT_TRUE(cfg.image_high_speed);  // second line ignored, first stands.
+}
+
+TEST(HighSpeedForFuncTest, MapsEachKnownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_high_speed = true;
+  cfg.image_high_speed = false;
+  cfg.ocr_high_speed = true;
+  cfg.email_high_speed = false;
+
+  EXPECT_TRUE(HighSpeedForFunc(cfg, "FILE"));
+  EXPECT_FALSE(HighSpeedForFunc(cfg, "IMAGE"));
+  EXPECT_TRUE(HighSpeedForFunc(cfg, "OCR"));
+  EXPECT_FALSE(HighSpeedForFunc(cfg, "EMAIL"));
+}
+
+TEST(HighSpeedForFuncTest, FallsBackToFileForUnknownFunc) {
+  Config cfg = DefaultConfig();
+  cfg.file_high_speed = true;
+  EXPECT_TRUE(HighSpeedForFunc(cfg, "BOGUS"));
+}
+
 TEST(DefaultConfigPathTest, EndsWithExpectedFilename) {
   const std::string path = DefaultConfigPath();
   const std::string suffix = ".config/brscan-scand.conf";

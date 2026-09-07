@@ -97,6 +97,21 @@ struct Config {
   int ocr_remove_background_level = 0;
   int email_remove_background_level = 0;
 
+  // Per-FUNC ADF high-speed toggle (see reference/protocol-notes-button-
+  // options.md's decode of the button config command's X=): the OFF-path
+  // counterpart of the LCD's own high-speed setting. When set, the device
+  // feeds pages landscape for throughput and returns them rotated 90
+  // degrees, so daemon/handle_event.cpp rotates each page back to portrait
+  // (daemon/image_transform.h) before writing. Mirrors
+  // file_remove_background_level/etc.'s raw-per-dest-field pattern;
+  // consulted only in daemon/button_plan.cpp's Touch-Panel-OFF branch
+  // (Touch-Panel-ON stays authoritative from the printer's own config
+  // command's X=). Defaults to false (off).
+  bool file_high_speed = false;
+  bool image_high_speed = false;
+  bool ocr_high_speed = false;
+  bool email_high_speed = false;
+
   // OCR-destination output sub-format (see daemon/action_ocr.h's
   // OcrTextFormat and output_writer.h's OutputFormat text sinks): the file
   // the OCR destination produces when its scan-button `T=` sub-format is
@@ -199,6 +214,12 @@ Config DefaultConfig();
 //                        Vision-recognized text as a .txt/.html/.rtf file
 //                        instead of a PDF; Touch-Panel-ON ignores this key
 //                        and uses the printer's own `T=` token.
+//   <dest>.high_speed    on | off (default off). The OFF-path counterpart of
+//                        the LCD's own ADF high-speed setting: when on, the
+//                        daemon rotates each landscape-fed page back to
+//                        portrait (see daemon/image_transform.h).
+//                        Touch-Panel-ON ignores this key and uses the
+//                        printer's own config command's X= instead.
 // where <dest> is one of file, image, ocr, email.
 Config ParseConfig(const std::string& text);
 
@@ -256,6 +277,14 @@ const std::string& PaperForFunc(const Config& cfg, const std::string& func);
 // ParamsForFunc's FILE-as-safe-fallback behavior. 0 means off (no
 // `<dest>.remove_background` configured, or explicitly configured off).
 int RemoveBackgroundLevelForFunc(const Config& cfg, const std::string& func);
+
+// The configured `<dest>.high_speed` toggle (see Config::file_high_speed
+// above) for a button event's FUNC (FILE/IMAGE/OCR/EMAIL, matched
+// case-sensitively per the wire protocol -- see daemon/button_listener.h's
+// ButtonEvent::func). Returns cfg.file_high_speed for any other string,
+// mirroring ParamsForFunc's FILE-as-safe-fallback behavior. False means off
+// (no `<dest>.high_speed` configured, or explicitly configured off).
+bool HighSpeedForFunc(const Config& cfg, const std::string& func);
 
 // True if `func` is one of the four known FUNCs (kFuncFile/kFuncImage/
 // kFuncOcr/kFuncEmail above), false for anything else. `func` comes
