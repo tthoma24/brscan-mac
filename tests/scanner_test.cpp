@@ -380,6 +380,80 @@ TEST(RunScan, ColorFlatbedShortSentinelChunkReassembles) {
   ASSERT_EQ(pages[0].data, jpeg);
 }
 
+// Same short-sentinel anomaly as ColorFlatbedShortSentinelChunkReassembles,
+// but on LEGACY 13-BYTE-header firmware (EncodeBlockHeader, the 0x00-prefixed
+// shape). The next block header after the short chunk leads with that 0x00, so
+// a boundary scan matching only the 12-byte shape anchors one byte late (on
+// the 0x64) and splices the stray 0x00 into the reassembled JPEG, breaking the
+// decode. The fixed scan matches the 13-byte shape too and finds the boundary
+// at the 0x00, so the JPEG reassembles byte-for-byte and decodes (L2).
+TEST(RunScan, ColorFlatbedShortSentinelChunkThirteenByteHeaderReassembles) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,3460,427,5052,"));
+
+  const auto jpeg = MakeLargeSyntheticJpeg(300, 300);
+  ASSERT_GT(jpeg.size(), 0xfff4u + 40000u)
+      << "fixture must span a short sentinel chunk plus more";
+
+  constexpr size_t kMaxChunkBytes = 0xfff4;
+  constexpr size_t kShortBody = 40000;  // < kMaxChunkBytes: the anomaly.
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+
+  // Chunk 0: 13-byte header DECLARES the 0xfff4 sentinel but carries only
+  // 40000 bytes; the next header (also 13-byte) begins there, leading 0x00.
+  append(EncodeBlockHeader(static_cast<uint16_t>(kMaxChunkBytes)));
+  stream.insert(stream.end(), jpeg.begin(), jpeg.begin() + kShortBody);
+
+  for (size_t off = kShortBody; off < jpeg.size();) {
+    const size_t remaining = jpeg.size() - off;
+    const size_t chunk_len = std::min(remaining, kMaxChunkBytes);
+    append(EncodeBlockHeader(static_cast<uint16_t>(chunk_len)));
+    stream.insert(stream.end(), jpeg.begin() + off, jpeg.begin() + off + chunk_len);
+    off += chunk_len;
+  }
+  t.QueueRead(stream);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].width, 300);
+  EXPECT_EQ(pages[0].height, 300);
+  ASSERT_EQ(pages[0].data, jpeg);
+}
+
+// A color page whose block headers keep coming but whose end-of-page marker
+// never arrives must not accumulate without bound: RunColorScan caps a page's
+// bytes at a generous multiple of the granted area's worst-case encoded size
+// and returns a protocol error past it (L4). The offer here grants a small
+// 210x200 area (cap = 210*200*3*4 = 504000 bytes), and the stream feeds honest
+// 60000-byte chunks with no marker, so the cap is crossed after ~9 chunks.
+TEST(RunScan, ColorPageWithoutEndOfPageMarkerIsCapped) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,210,427,200,"));
+
+  constexpr size_t kChunkBody = 60000;  // Honest length (< 0xfff4).
+  std::vector<uint8_t> stream;
+  for (int i = 0; i < 12; ++i) {  // 12 * 60000 = 720000 > the 504000 cap.
+    const auto header = EncodeBlockHeader12(static_cast<uint16_t>(kChunkBody));
+    stream.insert(stream.end(), header.begin(), header.end());
+    stream.insert(stream.end(), kChunkBody, uint8_t{0xab});
+  }
+  t.QueueRead(stream);  // No end-of-page marker ever follows.
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
+  EXPECT_EQ(status, brscan::Status::kProtocolError);
+  EXPECT_TRUE(pages.empty());
+}
+
 TEST(RunScan, GrayFlatbedRoundTrips) {
   brscan::FakeTransport t;
   QueuePreamble(&t);

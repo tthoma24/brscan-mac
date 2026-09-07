@@ -80,6 +80,25 @@ std::vector<uint8_t> EraseMarkerSegment(std::vector<uint8_t> jpeg,
   return jpeg;
 }
 
+// Overwrites the height and width fields of a baseline JPEG's SOF0 segment
+// (0xFFC0: FF C0 <len:2> <precision:1> <height:2 BE> <width:2 BE> ...) so
+// tjDecompressHeader3 reports the forged dimensions without the buffer ever
+// having to hold an image that large. Used to model a malicious page that
+// declares oversized dimensions in its SOF.
+std::vector<uint8_t> ForgeSofDimensions(std::vector<uint8_t> jpeg,
+                                        uint16_t width, uint16_t height) {
+  for (size_t i = 2; i + 9 < jpeg.size(); ++i) {
+    if (jpeg[i] == 0xff && jpeg[i + 1] == 0xc0) {
+      jpeg[i + 5] = static_cast<uint8_t>((height >> 8) & 0xff);
+      jpeg[i + 6] = static_cast<uint8_t>(height & 0xff);
+      jpeg[i + 7] = static_cast<uint8_t>((width >> 8) & 0xff);
+      jpeg[i + 8] = static_cast<uint8_t>(width & 0xff);
+      break;
+    }
+  }
+  return jpeg;
+}
+
 }  // namespace
 
 TEST(DecodeJpeg, RoundTripsSyntheticImage) {
@@ -114,6 +133,32 @@ TEST(DecodeJpeg, TruncatedJpegIsProtocolError) {
   brscan::Image image;
   const auto status =
       brscan::DecodeJpeg(truncated.data(), truncated.size(), &image);
+  EXPECT_EQ(status, brscan::Status::kProtocolError);
+}
+
+// A page whose SOF declares dimensions far past any real scan must be
+// rejected before the pixel buffer is sized from them: width * height * 3
+// from near-max dimensions would otherwise force a huge allocation and an
+// uncaught std::bad_alloc. 30000 x 30000 stays under the per-side ceiling but
+// its 900 Mpx exceeds the total-pixel cap, so DecodeJpeg rejects it (L5).
+TEST(DecodeJpeg, OversizedSofDimensionsIsProtocolError) {
+  const auto valid = MakeSyntheticJpeg(16, 8, 100, 100, 100, 90);
+  const auto forged = ForgeSofDimensions(valid, 30000, 30000);
+
+  // Precondition: the forged header still parses -- so the rejection comes
+  // from DecodeJpeg's dimension guard, not from a header parse failure.
+  int w = 0, h = 0, ss = 0, cs = 0;
+  tjhandle probe = tjInitDecompress();
+  ASSERT_EQ(tjDecompressHeader3(probe, forged.data(),
+                                static_cast<unsigned long>(forged.size()), &w,
+                                &h, &ss, &cs),
+            0);
+  EXPECT_EQ(w, 30000);
+  EXPECT_EQ(h, 30000);
+  tjDestroy(probe);
+
+  brscan::Image image;
+  const auto status = brscan::DecodeJpeg(forged.data(), forged.size(), &image);
   EXPECT_EQ(status, brscan::Status::kProtocolError);
 }
 

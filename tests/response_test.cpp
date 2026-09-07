@@ -66,6 +66,22 @@ TEST(ParseOffer, EmptyStringIsMalformed) {
   EXPECT_FALSE(brscan::ParseOffer("").has_value());
 }
 
+// A digit-only field can still be numerically enormous. Before the ERANGE /
+// > INT_MAX guard, strtol clamped a 20-digit run to LONG_MAX and the cast to
+// int produced a garbage dimension; the field must be rejected instead (L3).
+TEST(ParseOffer, OverRangeFieldIsMalformed) {
+  EXPECT_FALSE(
+      brscan::ParseOffer("100,100,2,292,99999999999999999999,427,1684,")
+          .has_value());
+}
+
+// A value that fits in a long but exceeds INT_MAX must also be rejected,
+// since the field is cast to int (L3). 3000000000 > INT_MAX (2147483647).
+TEST(ParseOffer, AboveIntMaxFieldIsMalformed) {
+  EXPECT_FALSE(
+      brscan::ParseOffer("100,100,2,292,3000000000,427,1684,").has_value());
+}
+
 // --- ParseBlockHeader ---------------------------------------------------
 
 TEST(ParseBlockHeader, GrayHeaderWidth) {
