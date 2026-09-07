@@ -14,7 +14,7 @@
 // be exercised hermetically against a brscan::FakeTransport in tests.
 namespace brscan::scand {
 
-// The file extension tools/scan_output.h's WriteOutput() produces for
+// The file extension output/page_writer.h's WriteOutput() produces for
 // `format`: "jpg" for a baseline-JPEG color result (PixelFormat::kRgb),
 // "pgm" for a binary-PGM gray result (PixelFormat::kGray), "pbm" for a
 // binary-PBM 1-bit result (PixelFormat::kBitonal).

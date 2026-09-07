@@ -15,6 +15,7 @@
 #include "brscan/transport_tcp.h"
 #include "brscan/types.h"
 #include "output/output_writer.h"
+#include "output/page_writer.h"
 #include "scan_output.h"
 
 namespace {
@@ -245,7 +246,7 @@ int main(int argc, char** argv) {
   const brscan::Status connect_status = transport.Connect();
   if (connect_status != brscan::Status::kOk) {
     std::cerr << "Could not connect to " << args.host << ":" << args.port
-              << ": " << brscan::cli::DescribeFailure(connect_status) << "\n";
+              << ": " << brscan::output::DescribeFailure(connect_status) << "\n";
     return brscan::cli::ExitCodeFor(connect_status) == 0
                ? 1
                : brscan::cli::ExitCodeFor(connect_status);
@@ -256,7 +257,7 @@ int main(int argc, char** argv) {
   transport.Disconnect();
 
   if (scan_status != brscan::Status::kOk) {
-    std::cerr << "Scan failed: " << brscan::cli::DescribeFailure(scan_status) << "\n";
+    std::cerr << "Scan failed: " << brscan::output::DescribeFailure(scan_status) << "\n";
     return brscan::cli::ExitCodeFor(scan_status);
   }
 
