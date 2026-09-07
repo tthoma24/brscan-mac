@@ -330,6 +330,36 @@ TEST(ParseConfigTest, OutputAndScanKeysCoexistPerDest) {
   EXPECT_EQ(cfg.file_output.format, OutputFormat::kPdf);
 }
 
+// ---------------------------------------------------------------------
+// OCR output sub-format (`ocr.ocr_format`).
+// ---------------------------------------------------------------------
+
+TEST(DefaultConfigTest, OcrTextFormatDefaultsToPdf) {
+  EXPECT_EQ(DefaultConfig().ocr_text_format, OutputFormat::kPdf);
+}
+
+TEST(ParseConfigTest, AppliesOcrFormatForEachToken) {
+  EXPECT_EQ(ParseConfig("ocr.ocr_format=pdf\n").ocr_text_format,
+            OutputFormat::kPdf);
+  EXPECT_EQ(ParseConfig("ocr.ocr_format=txt\n").ocr_text_format,
+            OutputFormat::kText);
+  EXPECT_EQ(ParseConfig("ocr.ocr_format=html\n").ocr_text_format,
+            OutputFormat::kHtml);
+  EXPECT_EQ(ParseConfig("ocr.ocr_format=rtf\n").ocr_text_format,
+            OutputFormat::kRtf);
+}
+
+TEST(ParseConfigTest, IgnoresBadOcrFormatLeavingDefault) {
+  // A bogus value leaves the default (kPdf) in place, per the tolerant-parse
+  // contract.
+  EXPECT_EQ(ParseConfig("ocr.ocr_format=docx\n").ocr_text_format,
+            OutputFormat::kPdf);
+  // `ocr_format` is OCR-only -- it is not honored under other <dest>
+  // prefixes, so a non-ocr prefix leaves ocr_text_format at its default.
+  EXPECT_EQ(ParseConfig("file.ocr_format=txt\n").ocr_text_format,
+            OutputFormat::kPdf);
+}
+
 TEST(OutputSettingsForFuncTest, MapsEachKnownFunc) {
   Config cfg = DefaultConfig();
   cfg.file_output.format = OutputFormat::kPdf;

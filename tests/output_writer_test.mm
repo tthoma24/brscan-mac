@@ -17,6 +17,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -437,6 +439,71 @@ TEST(WriteConfiguredOutputTest, CombineIgnoresSeparateN) {
   ASSERT_EQ(status, brscan::Status::kOk);
   ASSERT_EQ(written.size(), 1u);
   EXPECT_EQ(PdfPageCount(written[0]), 3);
+  RemoveAll(written);
+}
+
+// ---------------------------------------------------------------------
+// OCR text sinks (kText / kHtml / kRtf): one file, right extension.
+// ---------------------------------------------------------------------
+
+TEST(WriteConfiguredOutputTest, TextSinkWritesSingleTxtFileWithRecognizedText) {
+  const std::vector<brscan::ScanResult> pages = {
+      RenderTextGrayPage(@"HELLO BRSCAN 12345", 1000, 220)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kText;
+
+  const std::filesystem::path base = TempPath("ocr_text.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk)
+      << "OCR text sink failed -- Vision may be unavailable in a "
+         "headless/CI-like environment.";
+  ASSERT_EQ(written.size(), 1u);
+  EXPECT_EQ(written[0], TempPath("ocr_text.txt").string());
+
+  std::ifstream f(written[0], std::ios::binary);
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  const std::string contents = ss.str();
+  EXPECT_NE(contents.find("BRSCAN"), std::string::npos) << "text: " << contents;
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, HtmlSinkWritesSingleHtmlFile) {
+  const std::vector<brscan::ScanResult> pages = {
+      RenderTextGrayPage(@"HELLO BRSCAN 12345", 1000, 220)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kHtml;
+
+  const std::filesystem::path base = TempPath("ocr_html.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(written.size(), 1u);
+  EXPECT_EQ(written[0], TempPath("ocr_html.html").string());
+  EXPECT_TRUE(std::filesystem::exists(written[0]));
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, RtfSinkWritesSingleRtfFile) {
+  const std::vector<brscan::ScanResult> pages = {
+      RenderTextGrayPage(@"HELLO BRSCAN 12345", 1000, 220)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kRtf;
+
+  const std::filesystem::path base = TempPath("ocr_rtf.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(written.size(), 1u);
+  EXPECT_EQ(written[0], TempPath("ocr_rtf.rtf").string());
+  EXPECT_TRUE(std::filesystem::exists(written[0]));
   RemoveAll(written);
 }
 

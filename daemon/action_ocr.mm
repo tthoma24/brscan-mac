@@ -6,6 +6,7 @@
 // CTFontRef, CTLineRef, ...) are never ARC-managed regardless, and are
 // retained/released explicitly throughout.
 
+#import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 #import <Vision/Vision.h>
 #import <CoreText/CoreText.h>
@@ -397,6 +398,94 @@ Status WriteSearchablePdf(const std::vector<CGImageRef>& images,
     CGPDFContextClose(ctx);
     CGContextRelease(ctx);
     return Status::kOk;
+  }
+}
+
+namespace {
+
+// Collects the recognized text of one page into `out_lines` (one entry per
+// VNRecognizedTextObservation, in the order Vision returns them -- already
+// per-line, top-to-bottom). Returns false if Vision's request itself failed
+// on this page (RecognizeText returned nil), true otherwise (including a
+// page with no recognized text, which appends nothing).
+bool CollectPageLines(CGImageRef image, NSMutableArray<NSString*>* out_lines) {
+  NSArray<VNRecognizedTextObservation*>* observations = RecognizeText(image);
+  if (observations == nil) return false;
+  for (VNRecognizedTextObservation* obs in observations) {
+    VNRecognizedText* candidate = [[obs topCandidates:1] firstObject];
+    if (candidate == nil || candidate.string.length == 0) continue;
+    [out_lines addObject:candidate.string];
+  }
+  return true;
+}
+
+// Serializes `text` to `path` as an HTML or RTF document via
+// NSAttributedString's -dataFromRange:documentAttributes:, letting
+// Foundation own all escaping/encoding (no hand-rolled entities or control
+// words). `doc_type` is NSHTMLTextDocumentType or NSRTFTextDocumentType.
+// Returns kIoError if the document can't be serialized or written.
+Status WriteAttributedDocument(NSString* text, NSString* doc_type,
+                               const std::string& path) {
+  NSAttributedString* attr =
+      [[NSAttributedString alloc] initWithString:text];
+  NSError* error = nil;
+  NSData* data =
+      [attr dataFromRange:NSMakeRange(0, attr.length)
+           documentAttributes:@{NSDocumentTypeDocumentAttribute : doc_type}
+                        error:&error];
+  if (data == nil) {
+    std::cerr << "[action_ocr] could not serialize OCR text document: "
+               << (error != nil ? error.localizedDescription.UTF8String
+                                 : "unknown error")
+               << "\n";
+    return Status::kIoError;
+  }
+  NSString* ns_path = [NSString stringWithUTF8String:path.c_str()];
+  if (![data writeToFile:ns_path atomically:YES]) {
+    std::cerr << "[action_ocr] could not write OCR text document: " << path
+               << "\n";
+    return Status::kIoError;
+  }
+  return Status::kOk;
+}
+
+}  // namespace
+
+Status WriteRecognizedText(const std::vector<CGImageRef>& images,
+                           OcrTextFormat format, const std::string& path) {
+  @autoreleasepool {
+    if (images.empty()) return Status::kIoError;
+
+    // Recognize every page first: a page separator (a blank line) goes
+    // between pages, so each page's lines are collected as their own group.
+    NSMutableArray<NSString*>* pages = [NSMutableArray array];
+    for (CGImageRef image : images) {
+      NSMutableArray<NSString*>* lines = [NSMutableArray array];
+      if (!CollectPageLines(image, lines)) return Status::kProtocolError;
+      [pages addObject:[lines componentsJoinedByString:@"\n"]];
+    }
+
+    // Join pages with a blank line between them (a page that recognized no
+    // text contributes an empty string, so its separator still delimits it).
+    NSString* text = [pages componentsJoinedByString:@"\n\n"];
+
+    switch (format) {
+      case OcrTextFormat::kPlain: {
+        NSData* data = [text dataUsingEncoding:NSUTF8StringEncoding];
+        NSString* ns_path = [NSString stringWithUTF8String:path.c_str()];
+        if (data == nil || ![data writeToFile:ns_path atomically:YES]) {
+          std::cerr << "[action_ocr] could not write OCR text file: " << path
+                     << "\n";
+          return Status::kIoError;
+        }
+        return Status::kOk;
+      }
+      case OcrTextFormat::kHtml:
+        return WriteAttributedDocument(text, NSHTMLTextDocumentType, path);
+      case OcrTextFormat::kRtf:
+        return WriteAttributedDocument(text, NSRTFTextDocumentType, path);
+    }
+    return Status::kIoError;
   }
 }
 
