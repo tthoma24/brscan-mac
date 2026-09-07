@@ -31,4 +31,18 @@ final class DpiTests: XCTestCase {
     XCTAssertNil(Dpi.parse(""))
     XCTAssertNil(Dpi.parse("300dpi"))
   }
+
+  /// The daemon's `ParsePositiveInt()` uses 32-bit `std::stoi`, which throws
+  /// `out_of_range` for a value above `INT_MAX` (dropping the key), so `Dpi`
+  /// must reject `> Int32.max` even though Swift's `Int` could hold it --
+  /// otherwise the GUI would call a value "valid" that the daemon discards
+  /// (Review finding G1).
+  func testInt32MaxIsTheUpperBound() {
+    XCTAssertTrue(Dpi.isValid(Int(Int32.max)))
+    XCTAssertEqual(Dpi.parse(String(Int32.max)), Int(Int32.max))
+
+    XCTAssertFalse(Dpi.isValid(Int(Int32.max) + 1))
+    XCTAssertNil(Dpi.parse(String(Int(Int32.max) + 1)))
+    XCTAssertNil(Dpi.parse("9999999999"))
+  }
 }

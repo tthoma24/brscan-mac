@@ -228,15 +228,20 @@ public struct ConfigDocument: Equatable {
   /// written to a temp file in the same directory, then renamed into
   /// place, so a crash or a concurrent reader never sees a truncated file.
   ///
-  /// Two accepted side effects of standard temp-then-rename, worth calling
-  /// out rather than treating as bugs (Review finding M4): if `url` is a
+  /// Three accepted side effects of standard temp-then-rename, worth calling
+  /// out rather than treating as bugs (Review findings M4, G5): if `url` is a
   /// symlink, the `rename()` replaces the link itself with a regular file
-  /// (the link doesn't survive); and the temp file is created with default
+  /// (the link doesn't survive); the temp file is created with default
   /// permissions (subject to the process's umask), so a config file that
-  /// was, say, `0600` comes back `0644` after a save. Neither matters for
-  /// this app's data (a config file with no secrets, always written to a
-  /// plain path under `~/.config`), so this is a deliberate choice, not an
-  /// oversight.
+  /// was, say, `0600` comes back `0644` after a save; and the write is not
+  /// `fsync`-durable -- the `rename()` is atomic, so a concurrent reader or a
+  /// crash never sees a truncated or mixed file, but neither the temp file's
+  /// bytes nor the directory entry are flushed before the call returns, so a
+  /// power loss in the seconds right after a save can leave `url` with its
+  /// previous contents. None of the three matters for this app's data (a
+  /// config file with no secrets, always written to a plain path under
+  /// `~/.config`, that the user can simply re-save), so these are deliberate
+  /// choices, not oversights.
   public func write(to url: URL) throws {
     let text = serialized()
     let directory = url.deletingLastPathComponent()

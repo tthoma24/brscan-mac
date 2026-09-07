@@ -45,6 +45,14 @@ public enum ConfigStoreError: Error, Equatable {
 /// `BrscanConfigCore.ConfigDocument.write(to:)`'s own approach (see that
 /// type), but behind this injectable seam instead of baked into
 /// `ConfigDocument` itself.
+///
+/// Like `ConfigDocument.write(to:)`, this save is not `fsync`-durable
+/// (Review finding G5): the `rename()` keeps it atomic against a concurrent
+/// reader or a crash, but the temp file's bytes and the directory entry
+/// aren't flushed before `moveItem` returns, so a power loss right after a
+/// save can leave the file with its previous contents. That's a deliberate
+/// choice for a secret-free config the user can just re-save, matching the
+/// durability note in `ConfigDocument.write(to:)`.
 public struct LocalConfigFileSystem: ConfigFileSystem {
   public init() {}
 
