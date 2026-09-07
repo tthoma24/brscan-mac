@@ -14,6 +14,7 @@
 #include "brscan/scanner.h"
 #include "button_plan.h"
 #include "image_transform.h"
+#include "log_safe.h"
 #include "scan_output.h"
 
 namespace brscan::scand {
@@ -128,11 +129,11 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   if (!IsKnownFunc(event.func)) {
     std::cerr << "[handle_event] rejecting notification with unrecognized "
                   "FUNC '"
-               << event.func << "'; not scanning\n";
+               << LogSafe(event.func) << "'; not scanning\n";
     return Status::kProtocolError;
   }
 
-  std::cout << "[handle_event] FUNC=" << event.func
+  std::cout << "[handle_event] FUNC=" << LogSafe(event.func)
              << ": starting button scan\n";
 
   // JPEG quality is a computer-side-only setting (no Touch-Panel wire field --
@@ -164,7 +165,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     touch_panel_on = plan->touch_panel_on;
     high_speed = plan->high_speed;
     skip_blank = plan->skip_blank;
-    std::cout << "[handle_event] FUNC=" << event.func << ": "
+    std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": "
                << (plan->touch_panel_on ? "Touch-Panel-ON (printer settings)"
                                          : "Touch-Panel-OFF (daemon config)")
                << ", dpi=" << plan->params.x_dpi
@@ -183,7 +184,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   const Status scan_status =
       brscan::RunButtonScan(transport, plan_callback, &pages);
   if (scan_status != Status::kOk) {
-    std::cerr << "[handle_event] FUNC=" << event.func
+    std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
                << ": scan failed: "
                << brscan::cli::DescribeFailure(scan_status) << "\n";
     return scan_status;
@@ -193,11 +194,11 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   // invariant broke somewhere upstream. Guard it explicitly rather than
   // indexing pages[0] below on a vector that might be empty.
   if (pages.empty()) {
-    std::cerr << "[handle_event] FUNC=" << event.func
+    std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
                << ": scan reported success with no pages\n";
     return Status::kProtocolError;
   }
-  std::cout << "[handle_event] FUNC=" << event.func << ": scan complete ("
+  std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": scan complete ("
              << pages.size() << (pages.size() == 1 ? " page, " : " pages, ")
              << pages[0].width << "x" << pages[0].height << ")\n";
 
@@ -222,7 +223,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   // below. A page that could not be decoded is treated as NON-blank (kept),
   // matching IsBlankPage's ScanResult-overload contract.
   if (high_speed) {
-    std::cout << "[handle_event] FUNC=" << event.func
+    std::cout << "[handle_event] FUNC=" << LogSafe(event.func)
                << ": ADF high-speed; rotating " << pages.size()
                << (pages.size() == 1 ? " page" : " pages")
                << " back to portrait\n";
@@ -246,7 +247,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
           // best-effort, never failing the job or dropping an un-inspectable
           // page.
           if (high_speed) {
-            std::cerr << "[handle_event] FUNC=" << event.func
+            std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
                        << ": could not rotate a high-speed page; keeping it as "
                           "scanned\n";
           }
@@ -262,7 +263,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
                   RotatePortrait(page, src, jpeg_quality)) {
             page = std::move(*rotated);
           } else {
-            std::cerr << "[handle_event] FUNC=" << event.func
+            std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
                        << ": could not rotate a high-speed page; keeping it as "
                           "scanned\n";
           }
@@ -290,14 +291,14 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
       // tolerate a no-output success cleanly). `pages` is still fully intact
       // here: the loop above only moved a page out when it was kept, and in
       // the all-blank case it kept none.
-      std::cerr << "[handle_event] FUNC=" << event.func
+      std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
                  << ": skip-blank judged all " << total
                  << (total == 1 ? " page" : " pages")
                  << " blank; keeping one so the scan still produces output\n";
       kept.push_back(std::move(pages.front()));
     } else if (kept.size() < total) {
       const size_t dropped = total - kept.size();
-      std::cout << "[handle_event] FUNC=" << event.func
+      std::cout << "[handle_event] FUNC=" << LogSafe(event.func)
                  << ": skip-blank dropped " << dropped << " blank "
                  << (dropped == 1 ? "page" : "pages") << " of " << total
                  << "\n";
@@ -334,13 +335,13 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   const Status write_status =
       WriteConfiguredOutput(pages, settings, path, &written);
   if (write_status != Status::kOk) {
-    std::cerr << "[handle_event] FUNC=" << event.func
+    std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
                << ": failed to write configured output for '" << path
                << "'\n";
     return write_status;
   }
   if (written.empty()) {
-    std::cerr << "[handle_event] FUNC=" << event.func
+    std::cerr << "[handle_event] FUNC=" << LogSafe(event.func)
                << ": WriteConfiguredOutput reported success with no files "
                   "written\n";
     return Status::kIoError;
@@ -366,13 +367,13 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   *saved_path = written.front();
   const char* const precedence = touch_panel_on ? "touch-panel" : "config";
   if (written.size() == 1) {
-    std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
+    std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": wrote "
                << written.front() << " (" << precedence << " settings)\n";
   } else {
     // List every written path (not just the first) so the daemon log
     // reflects everything a multi-page/every:N-separated scan actually
     // produced.
-    std::cout << "[handle_event] FUNC=" << event.func << ": wrote "
+    std::cout << "[handle_event] FUNC=" << LogSafe(event.func) << ": wrote "
                << written.size() << " files (" << precedence
                << " settings):\n";
     for (const std::string& file : written) {
