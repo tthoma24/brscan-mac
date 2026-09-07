@@ -9,7 +9,7 @@ import BrscanConfigCore
 /// The app ships as an ad-hoc-signed `.app` bundle with `LSUIElement = true`
 /// (see `Info.plist.in` and the CMake `brscan-config-app` target), so it runs
 /// as a menu-bar-only agent with no Dock icon. `LSUIElement` does not hide the
-/// `WindowGroup`, but it can let the window open *behind* the frontmost app, so
+/// single-instance `Window`, but it can let it open *behind* the frontmost app, so
 /// every path that opens the window (`openConfigWindow`, called at launch and
 /// from the menu's "Preferences…") pairs `openWindow(id:)` with
 /// `NSApplication.shared.activate(ignoringOtherApps:)` to bring it forward.
@@ -31,7 +31,7 @@ struct BrscanConfigApp: App {
   @Environment(\.openWindow) private var openWindow
 
   var body: some Scene {
-    WindowGroup("Brscan Config", id: Self.mainWindowID) {
+    Window("Brscan Config", id: Self.mainWindowID) {
       ContentView()
         .onAppear {
           // As a menu-bar agent the app has no Dock icon to click, so make
