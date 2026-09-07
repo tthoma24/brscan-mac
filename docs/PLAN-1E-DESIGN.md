@@ -408,3 +408,38 @@ since confirmed all three:
 4. **Should skip-blank / remove-background / high-speed / OCR sub-format become
    config keys** so the UI can edit them? That is a daemon schema addition
    (Plan 1d territory), out of Plan 1e's baseline. Confirm they stay deferred.
+
+## Plan 1e resumed — deferred items resolved (2026-09-07)
+
+The three items the baseline deferred (see "Out of scope and deferred" and the
+open decisions above) were resolved in tasks 1e.12–1e.19. This section is
+authoritative where it supersedes the earlier "deferred" bullets.
+
+1. **Signable `.app` — DONE.** `gui/BrscanConfigApp` now packages as
+   `Brscan Config.app` (bundle id `me.tthoma24.brscan.config`, `LSUIElement=true`)
+   via a CMake target wrapping `swift build -c release`; ad-hoc signed. A shared
+   `cmake/BrscanCodesign.cmake` `brscan_adhoc_sign()` helper and a shared
+   `docs/DISTRIBUTION.md` (ad-hoc now; Developer-ID + notarization documented as a
+   future manual step) are reused by the Plan 2 ICA bundle. Resolves open
+   decision 2 (packaged/signed: yes, ad-hoc for local/dev; distribution deferred).
+
+2. **Panel-only toggles — DONE.** Skip-blank (`W`), ADF high-speed (`X`), and OCR
+   sub-formats (`T`=TXT/HTML/RTF) are now config keys (`<dest>.skip_blank`,
+   `<dest>.high_speed`, `ocr.ocr_format`) acted on by the daemon and editable in
+   the GUI. Skip-blank and high-speed are host-side operations (blank detection in
+   `daemon/blank_detect`, 90° re-rotation in `daemon/image_transform`) — the device
+   has no flag for them. Resolves open decision 4 (they are no longer deferred).
+
+3. **Printers & Scanners / Image Capture embedding — CLOSED, NOT FEASIBLE.**
+   The "preferred surface" aspiration is withdrawn. Both Image Capture and the
+   System Settings → Printers & Scanners → Scan tab render the **same** ICA scanner
+   UI (`IKScannerDeviceView` / `ICScannerDevice`), which exposes only the module's
+   **scan-time capabilities** — there is **no ICA module→host hook** for a
+   persistent settings/preferences pane in System Settings. The only
+   driver-launchable affordance is print-side (`APPrinterUtilityPath`), which needs
+   a legacy CUPS/PPD driver (deprecated, absent under AirPrint) and merely launches
+   an app rather than embedding config. The standalone `Brscan Config.app` is
+   therefore the config surface, not a temporary baseline. (Full interface facts:
+   `docs/ICA-PROTOCOL.md`.) One future crossover, not built: scan-time knobs added
+   via `ICScannerFeatureRange`/vendorFeatures would appear in both hosts, but that
+   is per-scan UI, not the daemon button-flow config.
