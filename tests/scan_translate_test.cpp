@@ -242,6 +242,33 @@ TEST(TranslateScanParamsTest, AdfFullAreaNotCentered) {
   EXPECT_EQ(p.area.y1, 0);
 }
 
+// Defensive: the scan dpi is clamped to the offered maximum, but the requested
+// area (req.area_*) is in the REQUEST's dpi pixels. The ADF centering must derive
+// the sensor width at that same request dpi so the requested width and the sensor
+// width stay on one scale; using the clamped dpi would put them on two scales and
+// drop the window to corner-register. Host requests never exceed the max today,
+// so this only locks the invariant.
+TEST(TranslateScanParamsTest, AdfCenteringUsesRequestDpiNotClampedDpi) {
+  ScanRequest r;
+  r.has_functional_unit = true;
+  r.functional_unit = 3;  // Document feeder.
+  r.has_resolution = true;
+  r.resolution = 600;  // Above the max supplied below.
+  r.has_area = true;
+  r.area_x0 = 0;
+  r.area_y0 = 0;
+  r.area_x1 = 4000;  // Requested width, in 600-dpi pixels.
+  r.area_y1 = 5000;
+  const Params p = TranslateScanParams(r, ScanLimits{/*max_dpi=*/300});
+  EXPECT_EQ(p.x_dpi, 300);  // Scan dpi is clamped to the max.
+  // Sensor @600 = 6944, so centered x0 = (6944 - 4000) / 2 = 1472. Deriving the
+  // sensor at the clamped 300 dpi (3472) would corner-register to 0 -- the bug.
+  EXPECT_EQ(p.area.x0, 1472);
+  EXPECT_EQ(p.area.x1, 1472 + 4000);  // Width preserved.
+  EXPECT_EQ(p.area.y0, 0);            // Vertical bounds untouched.
+  EXPECT_EQ(p.area.y1, 5000);
+}
+
 // ---------------------------------------------------------------------------
 // ADF centering math (AdfSensorWidthAtDpi / CenteredAdfX0).
 // ---------------------------------------------------------------------------
