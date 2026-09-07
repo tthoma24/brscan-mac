@@ -92,6 +92,16 @@ Status TcpTransport::Connect() {
     const int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (fd < 0) continue;
 
+    // Suppress SIGPIPE for this socket: if the scanner drops the connection
+    // mid-write, send() would otherwise raise SIGPIPE, whose default
+    // disposition kills the long-lived brscan-scand daemon. With this set,
+    // send() returns EPIPE instead and Write() surfaces kIoError. macOS has
+    // no MSG_NOSIGNAL, so the per-socket option is the right mechanism. A
+    // failed setsockopt is non-fatal; send()/recv() error handling still
+    // returns kIoError.
+    const int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+
     status = ConnectBounded(fd, ai->ai_addr, ai->ai_addrlen, connect_timeout_ms_);
     if (status == Status::kOk) {
       fd_ = fd;
