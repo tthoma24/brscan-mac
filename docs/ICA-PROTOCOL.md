@@ -289,14 +289,21 @@ clean **feeder-empty** outcome instead of a generic failure (the pure decision i
 `brscan::ica::ClassifyScanOutcome` in `ica-module/scan_outcome.h`, unit-tested in
 `tests/scan_outcome_test.cpp`). It then:
 
-1. Posts a `kICANotificationTypeDeviceStatusInfo` carrying
-   `kICANotificationSubTypeKey` = `kICANotificationSubTypeDocumentNotLoaded`
-   (device object, plain `ICDSendNotification`). This is the module-side path
-   behind the client's readonly
-   `ICScannerFunctionalUnitDocumentFeeder.documentLoaded`
-   (`ImageCaptureCore/ICScannerFunctionalUnits.h`: it changes "if the scanner
-   module has the capability to detect this state"), mirroring the documented
-   `WarmUp*` status notifications that ride the same key + type.
+1. Posts a `kICANotificationTypeDeviceStatusError` carrying
+   `kICANotificationSubTypeKey` = `CFSTR("kICAErrStrDFEmptyErr")` (device object,
+   plain `ICDSendNotification`), **before** the final `ScannerScanDone`. The
+   *Error* type is what makes Image Capture raise its built-in alert
+   ("Scanner reported an error / Document feeder is empty."); the informational
+   `kICANotificationTypeDeviceStatusInfo` type raised no dialog. The subtype
+   value is a raw localized-string **key**, not an SDK constant — Image Capture
+   resolves `kICAErrStrDFEmptyErr` → "Document feeder is empty." via
+   `ICADevices.framework/.../Resources/Error.loctable`. The type constant
+   `kICANotificationTypeDeviceStatusError` resolves from `ICADevices` (exported
+   alongside `kICANotificationTypeDeviceStatusInfo` in `ICADevices.tbd`); the
+   subtype-key mechanism mirrors the documented `WarmUp*` status notifications
+   that ride the same key. **(Task 25 — supersedes the earlier
+   `DeviceStatusInfo` + `kICANotificationSubTypeDocumentNotLoaded` post, which
+   surfaced no user-visible alert.)**
 2. Ends the scan with `ScannerScanDone` whose `kICAErrorKey` is
    **`-9931`** (`ICReturnScannerFailedToCompleteScan`,
    `ImageCaptureCore/ImageCaptureConstants.h`) rather than the generic
@@ -310,13 +317,16 @@ clean **feeder-empty** outcome instead of a generic failure (the pure decision i
 **Flatbed is unchanged** (`kTimeout`/`kNoPaper` there still map to
 `kICADeviceInternalErr`), as is any scan that produced at least one page.
 
-**Not fixed here:** the module does **not** shorten the scan timeout, so an empty
-feeder still hangs ~24 s before this clean outcome is reported. *Fast* empty-ADF
-detection in `libbrscan` is a separate follow-up pending an empty-ADF wire
-capture. **Unverified (device-in-the-loop):** that Image Capture renders `-9931`
-and `DocumentNotLoaded` as a user-visible "feeder empty" message (rather than a
-generic scan failure) is inferred from the public header names and must be
-confirmed on the device — see the re-test loop below.
+Empty-ADF detection is now *instant* — `libbrscan` reports `kNoPaper` from the
+`ESC D` ack (`0xc2`) rather than waiting out the ~24 s timeout (Task 24, PR #84).
+
+**Device-in-the-loop re-test (Task 25):** the `DeviceStatusError` +
+`kICAErrStrDFEmptyErr` post is the interface fact that raises Image Capture's
+built-in alert; confirm on the device that selecting **Document Feeder**, leaving
+it empty and pressing **Scan** promptly surfaces the alert **"Scanner reported an
+error / Document feeder is empty."** in both simplex and 2-sided modes — see the
+re-test loop below. (The superseded `DeviceStatusInfo` +
+`kICANotificationSubTypeDocumentNotLoaded` post raised no dialog.)
 
 ### Object registration
 
