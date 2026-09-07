@@ -59,6 +59,12 @@ int DefaultCommandRunner(const std::vector<std::string>& argv);
 //     per-page or `every:N`-separated output is several), addressed to
 //     `cfg.email_to` if set, and brings Mail to the front -- left for the
 //     user to review and send. The message is never sent automatically.
+//     Once Mail has ingested the attachment(s) (osascript returns 0), the
+//     source file(s) are removed, so an EMAIL press leaves no persistent
+//     copy on disk (issue #20). HandleButtonEvent writes EMAIL's scan to a
+//     private temporary directory, not save_dir, so this removal only ever
+//     deletes that throwaway copy; on an osascript failure the file(s) are
+//     kept and their paths logged rather than silently dropped.
 //   - Any other string: treated as a no-op (logged, kOk) rather than as
 //     an error, since the scan itself already succeeded and was saved.
 //

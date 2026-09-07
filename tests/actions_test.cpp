@@ -8,6 +8,12 @@
 
 #include "actions.h"
 
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <string>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "config.h"
@@ -243,6 +249,119 @@ TEST(PerformActionEmailTest, NonzeroExitIsIoError) {
 
   EXPECT_EQ(PerformAction("EMAIL", {"/tmp/scan.jpg"}, cfg, std::ref(runner)),
             Status::kIoError);
+}
+
+// A CommandRunner that, when invoked, records whether every path it was
+// told to watch still existed on disk at that moment, then returns a fixed
+// exit status. Used to prove PerformAction's EMAIL branch attaches the
+// file(s) (runs the AppleScript) *before* removing them -- so they must all
+// be present when the runner runs, and gone only afterward.
+class ExistenceCheckingRunner {
+ public:
+  explicit ExistenceCheckingRunner(int exit_status = 0)
+      : exit_status_(exit_status) {}
+
+  int operator()(const std::vector<std::string>& argv) {
+    calls_.push_back(argv);
+    all_existed_at_call_ = true;
+    for (const std::string& path : watched_) {
+      if (!std::filesystem::exists(path)) all_existed_at_call_ = false;
+    }
+    return exit_status_;
+  }
+
+  void Watch(std::vector<std::string> paths) { watched_ = std::move(paths); }
+  bool all_existed_at_call() const { return all_existed_at_call_; }
+  const std::vector<std::vector<std::string>>& calls() const { return calls_; }
+
+ private:
+  int exit_status_;
+  std::vector<std::string> watched_;
+  bool all_existed_at_call_ = false;
+  std::vector<std::vector<std::string>> calls_;
+};
+
+// Creates `path` with a little content, asserting it now exists.
+void WriteTempFile(const std::string& path) {
+  std::ofstream(path) << "scan";
+  ASSERT_TRUE(std::filesystem::exists(path));
+}
+
+// EMAIL leaves no persistent copy on disk (issue #20): HandleButtonEvent
+// writes the scan to a temp directory, and PerformAction's EMAIL branch
+// removes the file(s) once Mail has ingested them. The file(s) must still
+// exist when the AppleScript runs (attach happens before removal) and be
+// gone once PerformAction returns success.
+TEST(PerformActionEmailTest, RemovesTempAttachmentsAfterSuccessfulAttach) {
+  Config cfg = DefaultConfig();
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "brscan_actions_email_ok";
+  std::filesystem::remove_all(dir);
+  ASSERT_TRUE(std::filesystem::create_directories(dir));
+  const std::string f1 = (dir / "scan-doc001.pdf").string();
+  const std::string f2 = (dir / "scan-doc002.pdf").string();
+  WriteTempFile(f1);
+  WriteTempFile(f2);
+
+  ExistenceCheckingRunner runner;
+  runner.Watch({f1, f2});
+  const Status status = PerformAction("EMAIL", {f1, f2}, cfg, std::ref(runner));
+
+  EXPECT_EQ(status, Status::kOk);
+  ASSERT_EQ(runner.calls().size(), 1u);
+  EXPECT_TRUE(runner.all_existed_at_call())
+      << "attachments must still exist when the AppleScript runs";
+  EXPECT_FALSE(std::filesystem::exists(f1))
+      << "EMAIL must remove its temp attachment after a successful attach";
+  EXPECT_FALSE(std::filesystem::exists(f2))
+      << "EMAIL must remove its temp attachment after a successful attach";
+
+  std::filesystem::remove_all(dir);
+}
+
+// If the attach fails (osascript non-zero), the scan must be kept rather
+// than silently dropped, and the error must propagate.
+TEST(PerformActionEmailTest, KeepsTempAttachmentsWhenAttachFails) {
+  Config cfg = DefaultConfig();
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "brscan_actions_email_fail";
+  std::filesystem::remove_all(dir);
+  ASSERT_TRUE(std::filesystem::create_directories(dir));
+  const std::string f1 = (dir / "scan.pdf").string();
+  WriteTempFile(f1);
+
+  ExistenceCheckingRunner runner(/*exit_status=*/1);
+  const Status status = PerformAction("EMAIL", {f1}, cfg, std::ref(runner));
+
+  EXPECT_EQ(status, Status::kIoError);
+  EXPECT_TRUE(std::filesystem::exists(f1))
+      << "a failed EMAIL attach must keep the scan, not drop it";
+
+  std::filesystem::remove_all(dir);
+}
+
+// The counterpart to the EMAIL removal above: FILE/IMAGE/OCR are the
+// destinations whose written file *is* the deliverable, so PerformAction
+// must never remove it. (IMAGE's `open` "succeeds" through the fake runner;
+// FILE and OCR never touch the runner at all.)
+TEST(PerformActionTest, NonEmailFuncsLeaveTheirFileInPlace) {
+  Config cfg = DefaultConfig();
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "brscan_actions_nonemail";
+  std::filesystem::remove_all(dir);
+  ASSERT_TRUE(std::filesystem::create_directories(dir));
+  const std::string file = (dir / "scan.jpg").string();
+
+  for (const char* func : {"FILE", "IMAGE", "OCR"}) {
+    WriteTempFile(file);
+    RecordingRunner runner;  // returns 0: IMAGE's `open` "succeeds".
+    const Status status = PerformAction(func, {file}, cfg, std::ref(runner));
+    EXPECT_EQ(status, Status::kOk) << func;
+    EXPECT_TRUE(std::filesystem::exists(file))
+        << func << " must not remove its saved file";
+  }
+
+  std::filesystem::remove_all(dir);
 }
 
 TEST(PerformActionTest, DefaultOverloadUsesDefaultCommandRunner) {

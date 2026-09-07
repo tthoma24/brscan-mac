@@ -77,7 +77,13 @@ std::string BuildOutputPath(const std::string& save_dir,
 //
 // On success, sets `*saved_path` to the first written file and returns
 // whatever PerformAction() returned (Status::kOk today; see
-// daemon/actions.h). `*saved_path` is left untouched on failure. Returns
+// daemon/actions.h). EMAIL is the exception: it keeps no persistent copy in
+// save_dir -- its scan is written to a private temp directory, attached to
+// a Mail draft, and removed once Mail has ingested it (issue #20) -- so on
+// an EMAIL success `*saved_path` is left empty (there is no saved file to
+// point at). `*saved_path` is left untouched on a scan/write failure, and
+// on an EMAIL destination-action failure it points at the first temp file,
+// which is deliberately kept rather than dropped. Returns
 // RunButtonScan's status unchanged if the scan itself failed (including
 // Status::kProtocolError if RunButtonScan reported success with zero
 // pages -- not expected, but guarded rather than assumed, or if

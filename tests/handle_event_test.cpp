@@ -190,6 +190,23 @@ size_t CountFilesIn(const std::string& dir) {
   return count;
 }
 
+// Extracts every path an EMAIL AppleScript attaches, i.e. the strings
+// inside each `POSIX file "<path>"`. The temp paths here never contain a
+// quote or backslash, so no AppleScript un-escaping is needed.
+std::vector<std::string> AttachedPaths(const std::string& script) {
+  std::vector<std::string> paths;
+  const std::string marker = "POSIX file \"";
+  size_t pos = 0;
+  while ((pos = script.find(marker, pos)) != std::string::npos) {
+    const size_t start = pos + marker.size();
+    const size_t end = script.find('"', start);
+    if (end == std::string::npos) break;
+    paths.push_back(script.substr(start, end - start));
+    pos = end + 1;
+  }
+  return paths;
+}
+
 // A fake CommandRunner for every pipeline test below. HandleButtonEvent
 // ends by calling PerformAction (daemon/actions.h), whose IMAGE and EMAIL
 // destinations spawn a real external process (`/usr/bin/open`,
@@ -493,14 +510,14 @@ TEST_F(HandleButtonEventTest, OcrFuncProducesSearchablePdfWithNoSeparateOcrActio
   EXPECT_TRUE(runner_.calls().empty());
 }
 
-// A multi-page scan with `every:1` separation produces one document per
-// page; EMAIL must attach every one of them, not just the first.
-TEST_F(HandleButtonEventTest, EmailFuncWithSeparationAttachesAllProducedFiles) {
+// EMAIL keeps no persistent copy in save_dir (issue #20): the scan is
+// written to a private temp directory, attached to a Mail draft from there,
+// and removed once Mail has ingested it. A multi-page `every:1` scan
+// produces one document per page; EMAIL must attach every one of them (not
+// just the first) from the temp directory, remove them afterward, and leave
+// save_dir untouched -- with saved_path empty since nothing was persisted.
+TEST_F(HandleButtonEventTest, EmailAttachesFromTempAndLeavesNoCopyInSaveDir) {
   brscan::FakeTransport t;
-  // width_px=4, height_px=3 (same offer as the IMAGE multi-page test above;
-  // see that test's comment on why the offer's own height_px is dead
-  // weight once no <dest>.paper leaves the Touch-Panel-OFF default area in
-  // charge -- DefaultAutoAreaHeightAt above).
   QueueButtonPreamble(&t, "EMAIL", "300,300,2,292,4,427,3,");
 
   const int height = DefaultAutoAreaHeightAt(100);
@@ -531,29 +548,31 @@ TEST_F(HandleButtonEventTest, EmailFuncWithSeparationAttachesAllProducedFiles) {
       HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
 
   ASSERT_EQ(status, Status::kOk);
-  ASSERT_FALSE(saved_path.empty());
-  ASSERT_NE(saved_path.find("-doc001."), std::string::npos) << saved_path;
+  // EMAIL persisted nothing, so saved_path is left empty.
+  EXPECT_TRUE(saved_path.empty());
 
-  std::string doc2_path = saved_path;
-  const size_t marker_pos = doc2_path.rfind("-doc001");
-  ASSERT_NE(marker_pos, std::string::npos);
-  doc2_path.replace(marker_pos, 7, "-doc002");
-
-  ASSERT_TRUE(std::filesystem::exists(saved_path));
-  ASSERT_TRUE(std::filesystem::exists(doc2_path))
-      << "the second document must also be written: " << doc2_path;
-  EXPECT_EQ(CountFilesIn(save_dir_), 2u);
-
+  // The Mail draft was composed via osascript, attaching both documents.
   ASSERT_EQ(runner_.calls().size(), 1u);
   ASSERT_EQ(runner_.calls()[0][0], "/usr/bin/osascript");
   ASSERT_EQ(runner_.calls()[0].size(), 3u);
   const std::string& script = runner_.calls()[0][2];
-
-  EXPECT_NE(script.find(saved_path), std::string::npos)
-      << "script does not mention " << saved_path << ": " << script;
-  EXPECT_NE(script.find(doc2_path), std::string::npos)
-      << "script does not mention " << doc2_path << ": " << script;
   EXPECT_EQ(script.find("send"), std::string::npos);
+
+  const std::vector<std::string> attached = AttachedPaths(script);
+  ASSERT_EQ(attached.size(), 2u) << script;
+  for (const std::string& path : attached) {
+    // Attached from the temp directory, never from save_dir...
+    EXPECT_EQ(path.find(save_dir_), std::string::npos)
+        << "EMAIL attachment must not live in save_dir: " << path;
+    // ...and removed once the attach returned success.
+    EXPECT_FALSE(std::filesystem::exists(path))
+        << "temp attachment must be removed after emailing: " << path;
+  }
+
+  // Nothing was left behind in save_dir: it was either never created or is
+  // empty.
+  EXPECT_TRUE(!std::filesystem::exists(save_dir_) ||
+              std::filesystem::is_empty(save_dir_));
 }
 
 // Skip-blank end to end (`<dest>.skip_blank`, Touch-Panel-OFF): a 3-page

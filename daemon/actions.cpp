@@ -3,8 +3,10 @@
 #include <spawn.h>
 #include <sys/wait.h>
 
+#include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <system_error>
 
 extern "C" char** environ;
 
@@ -90,6 +92,14 @@ Status PerformImageAction(const std::vector<std::string>& written,
   return Status::kOk;
 }
 
+// EMAIL attaches every file in `written` to a new, unsent Mail draft and
+// then removes those files, so an EMAIL press leaves no persistent copy on
+// disk (issue #20). HandleButtonEvent writes EMAIL's scan to a private
+// temporary directory (not save_dir) precisely so this removal is safe --
+// FILE/IMAGE/OCR, whose written file *is* the deliverable, never reach this
+// function. Mail copies each attachment into the composed message
+// synchronously as the AppleScript adds it, so the on-disk source is no
+// longer needed once osascript returns success.
 Status PerformEmailAction(const std::vector<std::string>& written,
                            const Config& cfg, const CommandRunner& runner) {
   const std::string script = BuildEmailAppleScript(written, cfg);
@@ -97,13 +107,30 @@ Status PerformEmailAction(const std::vector<std::string>& written,
 
   const int rc = runner(argv);
   if (rc != 0) {
+    // Attaching failed. Deliberately keep the temp file(s) rather than
+    // silently dropping the scan, and report where they are so the scan
+    // isn't lost -- HandleButtonEvent leaves the temp directory in place on
+    // this failure path for the same reason.
     std::cerr << "[actions] EMAIL: '/usr/bin/osascript' exited with status "
-               << rc << "\n";
+               << rc << "; keeping the scan file(s) at:\n";
+    for (const std::string& path : written) {
+      std::cerr << "  " << path << "\n";
+    }
     return Status::kIoError;
   }
-  std::cout << "[actions] EMAIL: opened a new Mail message with "
-             << written.size() << (written.size() == 1 ? " file" : " files")
-             << " attached (left unsent)\n";
+
+  // Success: Mail now holds the attachment(s); remove the temp source(s).
+  for (const std::string& path : written) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    if (ec) {
+      std::cerr << "[actions] EMAIL: could not remove temp attachment '"
+                 << path << "': " << ec.message() << "\n";
+    }
+  }
+  std::cout << "[actions] EMAIL: attached " << written.size()
+             << (written.size() == 1 ? " file" : " files")
+             << " to a new Mail draft (left unsent, no copy kept)\n";
   return Status::kOk;
 }
 
