@@ -96,6 +96,25 @@ std::optional<int> ParseRemoveBackgroundString(const std::string& s) {
   return std::nullopt;
 }
 
+// Parses a boolean config value: "on" -> true, "off" -> false. Tolerant of
+// the other common spellings a user might reach for (true/false, yes/no,
+// 1/0), all case-insensitively. Returns nullopt for anything else, so the
+// caller leaves the field at its default, per ParseConfig()'s tolerant-parse
+// contract.
+std::optional<bool> ParseBoolString(const std::string& s) {
+  std::string lower = s;
+  for (char& c : lower) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  if (lower == "on" || lower == "true" || lower == "yes" || lower == "1") {
+    return true;
+  }
+  if (lower == "off" || lower == "false" || lower == "no" || lower == "0") {
+    return false;
+  }
+  return std::nullopt;
+}
+
 // Parses a `<dest>.separation` value into the vendor dialog's three-way
 // Document Separation shape: "combine" or "off" (all pages in one
 // container), "image:N" (a new document every N single-sided images), or
@@ -188,6 +207,17 @@ int* RemoveBackgroundForDestPrefix(Config* cfg, const std::string& dest) {
   return nullptr;
 }
 
+// Returns the high-speed toggle field this key's <dest> prefix names, or
+// nullptr for anything else -- the counterpart to RemoveBackgroundForDestPrefix
+// for the `<dest>.high_speed` key.
+bool* HighSpeedForDestPrefix(Config* cfg, const std::string& dest) {
+  if (dest == "file") return &cfg->file_high_speed;
+  if (dest == "image") return &cfg->image_high_speed;
+  if (dest == "ocr") return &cfg->ocr_high_speed;
+  if (dest == "email") return &cfg->email_high_speed;
+  return nullptr;
+}
+
 // Applies one already-trimmed, non-empty `key`/`value` pair to `cfg`.
 // Unrecognized keys and values that fail to parse are silently ignored --
 // see ParseConfig()'s doc comment for why.
@@ -273,6 +303,16 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
     if (level != nullptr) {
       if (const auto parsed_level = ParseRemoveBackgroundString(value)) {
         *level = *parsed_level;
+      }
+    }
+    return;
+  }
+
+  if (field == "high_speed") {
+    bool* const high_speed = HighSpeedForDestPrefix(cfg, dest);
+    if (high_speed != nullptr) {
+      if (const auto parsed_high_speed = ParseBoolString(value)) {
+        *high_speed = *parsed_high_speed;
       }
     }
     return;
@@ -393,6 +433,13 @@ int RemoveBackgroundLevelForFunc(const Config& cfg, const std::string& func) {
   if (func == kFuncEmail) return cfg.email_remove_background_level;
   return cfg.file_remove_background_level;  // kFuncFile, and the safe
                                              // fallback otherwise.
+}
+
+bool HighSpeedForFunc(const Config& cfg, const std::string& func) {
+  if (func == kFuncImage) return cfg.image_high_speed;
+  if (func == kFuncOcr) return cfg.ocr_high_speed;
+  if (func == kFuncEmail) return cfg.email_high_speed;
+  return cfg.file_high_speed;  // kFuncFile, and the safe fallback otherwise.
 }
 
 bool IsKnownFunc(const std::string& func) {

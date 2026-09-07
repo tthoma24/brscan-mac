@@ -11,6 +11,7 @@
 #include "actions.h"
 #include "brscan/scanner.h"
 #include "button_plan.h"
+#include "image_transform.h"
 #include "scan_output.h"
 
 namespace brscan::scand {
@@ -142,6 +143,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   // any page is read.
   OutputSettings settings;
   bool touch_panel_on = false;
+  bool high_speed = false;
   const brscan::ButtonParamsFn plan_callback =
       [&](const std::vector<uint8_t>& config_frame)
           -> std::optional<brscan::Params> {
@@ -150,6 +152,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     if (!plan) return std::nullopt;
     settings = plan->output;
     touch_panel_on = plan->touch_panel_on;
+    high_speed = plan->high_speed;
     std::cout << "[handle_event] FUNC=" << event.func << ": "
                << (plan->touch_panel_on ? "Touch-Panel-ON (printer settings)"
                                          : "Touch-Panel-OFF (daemon config)")
@@ -186,6 +189,29 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   std::cout << "[handle_event] FUNC=" << event.func << ": scan complete ("
              << pages.size() << (pages.size() == 1 ? " page, " : " pages, ")
              << pages[0].width << "x" << pages[0].height << ")\n";
+
+  // ADF high-speed (the config command's X=1): the device fed each sheet
+  // landscape and returned it rotated 90 degrees, so rotate every page back
+  // to portrait before it is written. Done here -- after the scan, before
+  // WriteConfiguredOutput -- so a later skip-blank filter (task 1e.18) can
+  // run on the already-upright pages. A page that fails to rotate is left as
+  // scanned rather than failing the whole job (see image_transform.h's
+  // RotatePortrait contract).
+  if (high_speed) {
+    std::cout << "[handle_event] FUNC=" << event.func
+               << ": ADF high-speed; rotating " << pages.size()
+               << (pages.size() == 1 ? " page" : " pages")
+               << " back to portrait\n";
+    for (brscan::ScanResult& page : pages) {
+      if (std::optional<brscan::ScanResult> rotated = RotatePortrait(page)) {
+        page = std::move(*rotated);
+      } else {
+        std::cerr << "[handle_event] FUNC=" << event.func
+                   << ": could not rotate a high-speed page; keeping it as "
+                      "scanned\n";
+      }
+    }
+  }
 
   // Best-effort: if save_dir already exists (the common case after the
   // first scan) this is a no-op; if it can't be created, WriteOutput below

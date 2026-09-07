@@ -397,6 +397,62 @@ TEST(PlanButtonScanTest, OcrFuncPreservesConfiguredSeparation) {
 }
 
 // ---------------------------------------------------------------------
+// ADF high-speed (X=): plan.high_speed by ON/OFF precedence.
+// ---------------------------------------------------------------------
+
+TEST(PlanButtonScanTest, TouchPanelOnHighSpeedSetsPlanHighSpeed) {
+  // The high-speed wire fixture from
+  // reference/protocol-notes-button-options.md:117 (R=200 + X=1). R= is
+  // present, so this is Touch-Panel-ON and plan.high_speed comes from the
+  // parsed X=.
+  const std::string payload =
+      "F=FILE\nD=SIN\nE=LON\nR=200\nM=CGRAY\nP=LETTER\nA=0\n"
+      "T=PDF(Image)\nW=0\nG=0\nX=1\n";
+  const Config cfg = DefaultConfig();
+  const auto plan = PlanButtonScan(BuildFrame(payload), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_TRUE(plan->touch_panel_on);
+  EXPECT_TRUE(plan->high_speed);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOnHighSpeedOffLeavesPlanHighSpeedFalse) {
+  // Baseline (X=0) Touch-Panel-ON: high_speed stays false even if the
+  // daemon's config would have enabled it (the ON branch ignores the key).
+  Config cfg = DefaultConfig();
+  cfg.file_high_speed = true;  // deliberately unused on the ON branch.
+  const auto plan =
+      PlanButtonScan(BuildFrame(kColorLetterPayload), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_TRUE(plan->touch_panel_on);
+  EXPECT_FALSE(plan->high_speed);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOffHighSpeedFromConfiguredDest) {
+  // A no-R= (Touch-Panel-OFF) frame takes high_speed from the daemon's
+  // `<dest>.high_speed` config key via HighSpeedForFunc.
+  const std::string short_form = "F=FILE\nD=SIN\nE=LON\n";
+  Config cfg = DefaultConfig();
+  cfg.file_high_speed = true;
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->touch_panel_on);
+  EXPECT_TRUE(plan->high_speed);
+}
+
+TEST(PlanButtonScanTest, HighSpeedDefaultsToFalse) {
+  // Neither the wire (X=0) nor the config enables it -> false.
+  const std::string short_form = "F=FILE\nD=SIN\nE=LON\n";
+  const Config cfg = DefaultConfig();
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "FILE", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->high_speed);
+}
+
+// ---------------------------------------------------------------------
 // button_flow is always true, in every branch.
 // ---------------------------------------------------------------------
 

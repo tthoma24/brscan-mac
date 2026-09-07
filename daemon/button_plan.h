@@ -25,6 +25,13 @@ struct ButtonScanPlan {
                                 // true.
   OutputSettings output;       // For WriteConfiguredOutput.
   bool touch_panel_on = false; // Which precedence branch was taken.
+  // ADF high-speed (the config command's X=1): the page was fed landscape
+  // and comes back rotated 90 degrees, so HandleButtonEvent must rotate each
+  // page back to portrait before writing (see daemon/image_transform.h).
+  // Set by the same ON/OFF precedence as the fields above -- Touch-Panel-ON
+  // from the parsed config's X=, Touch-Panel-OFF from HighSpeedForFunc(cfg,
+  // func) (the `<dest>.high_speed` key).
+  bool high_speed = false;
 };
 
 // Decides how to scan and write a button press, given the printer's pushed

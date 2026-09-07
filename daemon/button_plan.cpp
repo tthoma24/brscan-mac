@@ -79,6 +79,17 @@ std::optional<ButtonScanPlan> PlanButtonScan(
   ButtonScanPlan plan;
   plan.touch_panel_on = touch_panel_on;
 
+  // ADF high-speed (X=) follows the same ON/OFF precedence as the scan/output
+  // fields below: the LCD's own X= when the panel carried it (Touch-Panel-ON),
+  // the daemon's `<dest>.high_speed` config key otherwise (Touch-Panel-OFF).
+  // Unlike the other fields it is not a scan Param at all -- it drives a
+  // post-scan host-side rotation in HandleButtonEvent (see button_plan.h's
+  // ButtonScanPlan::high_speed and daemon/image_transform.h), since the
+  // device feeds high-speed pages landscape without transposing the area it
+  // reports.
+  plan.high_speed = touch_panel_on ? parsed->high_speed
+                                    : HighSpeedForFunc(cfg, func);
+
   // Start from this FUNC's configured Params either way, so brightness/
   // contrast/source (none of which the config command carries) come from
   // the daemon's config in both precedence branches.
@@ -191,11 +202,12 @@ std::optional<ButtonScanPlan> PlanButtonScan(
     plan.output = OutputSettingsForFunc(cfg, func);
   }
 
-  // TODO (Plan 1d follow-on): parsed->skip_blank (W=) and
-  // parsed->high_speed (X=) are decoded by ParseButtonConfig but not yet
-  // acted on here -- host-side blank-page skipping and the LCD's
-  // high-speed/rotation (landscape) mode are both deferred to a later
-  // task (see docs/BUTTON.md).
+  // TODO (task 1e.18): parsed->skip_blank (W=) is decoded by
+  // ParseButtonConfig but not yet acted on here -- host-side blank-page
+  // skipping is deferred to a later task (see docs/BUTTON.md). The other
+  // panel toggle, high-speed (X=), is now handled: plan.high_speed is set by
+  // precedence above and consumed as a post-scan rotation in
+  // HandleButtonEvent.
 
   return plan;
 }

@@ -135,6 +135,20 @@
 
 # image.remove_background = medium
 
+# --- Per-destination ADF high-speed ------------------------------------------
+#
+# Sets the "from computer" (Touch Panel OFF / Auto) ADF high-speed toggle per
+# destination -- the OFF-path counterpart of the LCD panel's own high-speed
+# setting, which stays authoritative whenever Touch Panel is ON (this key has
+# no effect on that path). In high-speed mode the scanner feeds each sheet
+# landscape for throughput and returns it rotated 90 degrees; the daemon
+# rotates every page back to portrait before saving, so the output looks the
+# same as an ordinary scan.
+#
+#   <dest>.high_speed   on | off (default off)
+
+# file.high_speed = on
+
 # --- Destination action settings --------------------------------------------
 
 # IMAGE destination: the app that opens the saved scan, as `open -a <app>`.
