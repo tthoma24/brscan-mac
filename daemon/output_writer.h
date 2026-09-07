@@ -25,7 +25,17 @@ namespace brscan::scand {
 //   color page, PGM/P5 for gray, PBM/P4 for bitonal) -- exactly what
 //   tools/scan_output.cpp's WritePages already produces, and the format
 //   used when no `<dest>.format` key is set.
-enum class OutputFormat { kNative, kPdf, kTiff, kJpeg, kPng };
+//
+// kText/kHtml/kRtf are OCR-only text sinks: rather than reproduce the
+// scanned image, they run Vision text recognition on each page and write
+// the recognized text as a single plain-text (.txt), HTML (.html), or RTF
+// (.rtf) file (see daemon/action_ocr.h's WriteRecognizedText, where the
+// Vision dependency lives). They are only ever selected for the OCR
+// destination -- the scan-button's `T=TXT/HTML/RTF` sub-format or the
+// `ocr.ocr_format` config key -- since a text sink discards the image.
+// Appended after the image formats so existing switch coverage keeps its
+// enumerator values stable.
+enum class OutputFormat { kNative, kPdf, kTiff, kJpeg, kPng, kText, kHtml, kRtf };
 
 // TIFF compression codec, as an NSTIFFCompression value at write time
 // (LZW=5, CCITT Group 3=3, CCITT Group 4=4). G3/G4 are 1-bit fax codecs
@@ -83,6 +93,10 @@ struct OutputSettings {
 //     than one page (via brscan::cli::PagePath). Separation does not apply
 //     to these per-page formats -- kEveryImage/kEveryPage behave like
 //     kCombine.
+//   - kText / kHtml / kRtf: one `.txt` / `.html` / `.rtf` file holding the
+//     Vision-recognized text of every page (see daemon/action_ocr.h's
+//     WriteRecognizedText). Single-file output, like kNative -- document
+//     separation does not apply.
 //
 // Separation (kEveryImage / kEveryPage) applies only to the container
 // formats (PDF, TIFF): it produces ceil(P / separate_n) files, each

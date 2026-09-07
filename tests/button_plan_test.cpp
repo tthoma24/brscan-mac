@@ -168,22 +168,60 @@ TEST(PlanButtonScanTest, TouchPanelOnUnknownPaperFallsBackToDefaultGuard) {
              want_area->y1);
 }
 
-TEST(PlanButtonScanTest, TouchPanelOnOcrFuncForcesSearchablePdfRegardlessOfT) {
-  // Any T= (including the OCR-only sub-formats TXT/HTML/RTF) must still
-  // yield a searchable PDF once func == OCR -- see button_plan.cpp's
-  // deferred-fields note.
-  for (const std::string& output_type : {"TXT", "HTML", "RTF"}) {
+TEST(PlanButtonScanTest, TouchPanelOnOcrSubFormatTokensMapToTextSinks) {
+  // The LCD's OCR sub-format T= tokens now drive the OCR destination's
+  // output format: TXT/HTML/RTF each map to their text sink, with
+  // searchable=false (a text sink is itself the recognized text).
+  const struct {
+    std::string token;
+    OutputFormat want;
+  } cases[] = {
+      {"TXT", OutputFormat::kText},
+      {"HTML", OutputFormat::kHtml},
+      {"RTF", OutputFormat::kRtf},
+  };
+  for (const auto& c : cases) {
     const std::string payload =
         "F=OCR\nD=SIN\nE=LON\nR=300\nM=TEXT\nP=LETTER\nA=0\n"
-        "T=" + output_type + "\nW=0\nX=0\n";
+        "T=" + c.token + "\nW=0\nX=0\n";
     const Config cfg = DefaultConfig();
     const auto plan = PlanButtonScan(BuildFrame(payload), "OCR", cfg);
-    ASSERT_TRUE(plan.has_value()) << "T=" << output_type;
+    ASSERT_TRUE(plan.has_value()) << "T=" << c.token;
 
-    EXPECT_TRUE(plan->touch_panel_on) << "T=" << output_type;
-    EXPECT_EQ(plan->output.format, OutputFormat::kPdf) << "T=" << output_type;
-    EXPECT_TRUE(plan->output.searchable) << "T=" << output_type;
+    EXPECT_TRUE(plan->touch_panel_on) << "T=" << c.token;
+    EXPECT_EQ(plan->output.format, c.want) << "T=" << c.token;
+    EXPECT_FALSE(plan->output.searchable) << "T=" << c.token;
   }
+}
+
+TEST(PlanButtonScanTest, TouchPanelOnOcrPdfTokenStaysSearchablePdf) {
+  // T=PDF(Image) on the OCR route still yields the searchable PDF.
+  const std::string payload =
+      "F=OCR\nD=SIN\nE=LON\nR=300\nM=TEXT\nP=LETTER\nA=0\n"
+      "T=PDF(Image)\nW=0\nX=0\n";
+  const Config cfg = DefaultConfig();
+  const auto plan = PlanButtonScan(BuildFrame(payload), "OCR", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_TRUE(plan->touch_panel_on);
+  EXPECT_EQ(plan->output.format, OutputFormat::kPdf);
+  EXPECT_TRUE(plan->output.searchable);
+}
+
+TEST(PlanButtonScanTest, TouchPanelOffOcrUsesConfiguredOcrFormat) {
+  // A no-R= OCR frame (Touch-Panel-OFF) takes its sub-format from the
+  // daemon's `ocr.ocr_format` config key (Config::ocr_text_format): rtf
+  // here yields kRtf with searchable=false.
+  const std::string short_form = "F=OCR\nD=SIN\nE=LON\n";
+  Config cfg = DefaultConfig();
+  cfg.ocr_text_format = OutputFormat::kRtf;
+
+  const auto plan = PlanButtonScan(BuildFrame(short_form), "OCR", cfg);
+  ASSERT_TRUE(plan.has_value());
+
+  EXPECT_FALSE(plan->touch_panel_on);
+  EXPECT_EQ(plan->output.format, OutputFormat::kRtf);
+  EXPECT_FALSE(plan->output.searchable);
 }
 
 // ---------------------------------------------------------------------

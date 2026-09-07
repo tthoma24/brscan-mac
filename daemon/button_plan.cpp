@@ -44,6 +44,22 @@ OutputFormat FormatForToken(const std::string& output_type) {
   return OutputFormat::kPdf;
 }
 
+// Maps a parsed T= output-type token (Touch-Panel-ON only) to the OCR
+// destination's OutputFormat -- the OCR counterpart of FormatForToken. OCR
+// only ever produces a searchable PDF (T=PDF(Image), or any image T= the
+// panel might report for OCR) or one of the recognized-text sinks
+// (T=TXT/HTML/RTF). Any other token falls back to kPdf, a safe,
+// always-produceable default, and logs.
+OutputFormat OcrFormatForToken(const std::string& output_type) {
+  if (output_type == "TXT") return OutputFormat::kText;
+  if (output_type == "HTML") return OutputFormat::kHtml;
+  if (output_type == "RTF") return OutputFormat::kRtf;
+  if (output_type == "PDF(Image)") return OutputFormat::kPdf;
+  std::cerr << "[button_plan] unexpected OCR T= token '" << output_type
+             << "' from LCD-set config command; defaulting to searchable PDF\n";
+  return OutputFormat::kPdf;
+}
+
 }  // namespace
 
 std::optional<ButtonScanPlan> PlanButtonScan(
@@ -145,23 +161,27 @@ std::optional<ButtonScanPlan> PlanButtonScan(
     }
   }
 
-  // OCR's deliverable is always a searchable PDF, in both precedence
-  // branches: "native" wouldn't be searchable, and `searchable` only ever
-  // means anything for a PDF page (see output_writer.h). This is the
-  // promotion daemon/handle_event.cpp used to do inline; it now lives here
-  // so every button-scan path (Touch-Panel-ON or -OFF) goes through it.
-  //
-  // TODO (Plan 1d follow-on): the LCD's OCR sub-formats (T=TXT/HTML/RTF --
-  // see button_config.h's ButtonConfig::output_type) are parsed but not
-  // yet acted on; OCR always produces a searchable PDF regardless of
-  // which of those three the panel offered.
+  // OCR's deliverable is a searchable PDF or one of the recognized-text
+  // sinks (TXT/HTML/RTF -- see output_writer.h's OutputFormat and
+  // action_ocr.h's WriteRecognizedText), chosen by the same ON/OFF
+  // precedence the scan/output fields above follow:
+  //   - Touch-Panel-ON: from the LCD's own T= sub-format (parsed->
+  //     output_type) via OcrFormatForToken.
+  //   - Touch-Panel-OFF: from the daemon's `ocr.ocr_format` config key
+  //     (Config::ocr_text_format), which defaults to kPdf.
+  // `searchable` is set true only for kPdf -- it lays the Vision text layer
+  // into a PDF page, and means nothing for the text sinks (which are
+  // themselves the recognized text). This is the promotion
+  // daemon/handle_event.cpp used to do inline; it now lives here so every
+  // button-scan path goes through it.
   if (func == kFuncOcr) {
     // Start from the daemon's configured OCR output settings (so a
     // configured separation/separate_n/tiff_compression survive), then
-    // override only the two fields OCR's deliverable always forces.
+    // override the format per precedence and set searchable to match.
     plan.output = OutputSettingsForFunc(cfg, func);
-    plan.output.format = OutputFormat::kPdf;
-    plan.output.searchable = true;
+    plan.output.format = touch_panel_on ? OcrFormatForToken(parsed->output_type)
+                                        : cfg.ocr_text_format;
+    plan.output.searchable = plan.output.format == OutputFormat::kPdf;
   } else if (touch_panel_on) {
     plan.output.format = FormatForToken(parsed->output_type);
     plan.output.tiff_compression = TiffCompression::kLzw;

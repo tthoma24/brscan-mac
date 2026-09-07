@@ -68,6 +68,37 @@ CGImageRef CreateCGImageFromScanResult(const brscan::ScanResult& page);
 Status WriteSearchablePdf(const std::vector<CGImageRef>& images,
                           bool searchable, const std::string& pdf_path);
 
+// The text document format WriteRecognizedText emits: plain UTF-8 text,
+// HTML, or RTF. Distinct from OutputFormat's kText/kHtml/kRtf (which name
+// the same three sinks at the config/output-writer layer); this enum keeps
+// action_ocr's public surface independent of daemon/output_writer.h.
+enum class OcrTextFormat { kPlain, kHtml, kRtf };
+
+// Runs Vision text recognition (VNRecognizeTextRequest, accurate level) on
+// every image in `images` (already-decoded pages, in order) and writes the
+// recognized text to `path` as `format`:
+//   - kPlain: UTF-8 plain text, one recognized line per '\n', with a blank
+//     line separating consecutive pages.
+//   - kHtml / kRtf: the same joined text built into one NSAttributedString
+//     and exported via -dataFromRange:documentAttributes: with
+//     NSHTMLTextDocumentType / NSRTFTextDocumentType (Foundation owns all
+//     escaping/encoding). A viewer opens either as the recognized text.
+//
+// The caller retains ownership of every CGImageRef in `images` (this
+// function neither retains nor releases them).
+//
+// Returns:
+//   kOk             the text file was written (a page that recognized no
+//                    text contributes no lines -- an all-blank scan yields
+//                    an empty or near-empty file, still kOk).
+//   kIoError        `images` is empty, or `path` could not be written (or,
+//                    for kHtml/kRtf, Foundation could not serialize the
+//                    document).
+//   kProtocolError  Vision's recognition request itself failed on some
+//                    page (matches WriteSearchablePdf's contract).
+Status WriteRecognizedText(const std::vector<CGImageRef>& images,
+                           OcrTextFormat format, const std::string& path);
+
 // Runs Vision text recognition (VNRecognizeTextRequest, accurate level)
 // on `image_path` and composes a searchable PDF at `pdf_path`: a single
 // page sized to the image, the image itself drawn as the page's visible

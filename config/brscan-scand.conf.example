@@ -82,12 +82,9 @@
 #                             is not yet confirmed; see daemon/config.cpp's
 #                             ParseSeparationString comment.)
 #
-# OCR is special: its deliverable is always a searchable PDF, so
-# ocr.format=native (the default) is automatically treated as pdf for OCR
-# specifically -- there's no way to get OCR to write a native per-page file
-# instead. Setting ocr.format explicitly to tiff/jpeg/png still works, but
-# then there's no searchable text layer (Vision OCR only lays text into a
-# PDF page).
+# OCR is special: it does not use <dest>.format at all. Its output is
+# chosen by the dedicated ocr.ocr_format key below (and, when the printer's
+# LCD Touch Panel is ON, by the panel's own sub-format setting).
 
 # file.format = pdf
 # file.separation = every:1
@@ -96,6 +93,23 @@
 
 # email.format = pdf
 # email.tiff_compression = g4
+
+# --- OCR output sub-format ----------------------------------------------------
+#
+# The OCR destination writes a searchable PDF by default, but the printer's
+# LCD OCR settings screen also offers plain-text, HTML, and RTF. This key
+# selects the OCR output when the scan-button press did NOT carry its own
+# sub-format -- i.e. with the LCD Touch Panel OFF ("from computer" / Auto).
+# When Touch Panel is ON, the panel's own T= sub-format wins and this key is
+# ignored (same ON/OFF precedence as the other per-destination settings).
+#
+#   ocr.ocr_format   pdf | txt | html | rtf (default pdf)
+#
+# pdf writes a searchable PDF (the image with a Vision-recognized invisible
+# text layer). txt/html/rtf instead write just the recognized text as a
+# .txt/.html/.rtf file -- no image, no searchable layer.
+
+# ocr.ocr_format = pdf
 
 # --- Per-destination paper size ----------------------------------------------
 #

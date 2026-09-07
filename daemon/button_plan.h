@@ -85,13 +85,16 @@ struct ButtonScanPlan {
 // RunButtonScan's ADF-offer fallback (whose ymax is always 0) from ever
 // producing a zero-height scan area.
 //
-// Either branch: params.button_flow is always true, and func == kFuncOcr
-// always yields output = OutputSettingsForFunc(cfg, kFuncOcr) with format
-// and searchable forced to {kPdf, true} (OCR's deliverable is always a
-// searchable PDF -- see docs/BUTTON.md's "Output format"), regardless of
-// the LCD's own T= sub-format (TXT/HTML/RTF) -- see the deferred-fields
-// note in button_plan.cpp. Every other configured OCR output setting
-// (separation/separate_n/tiff_compression) is preserved from cfg.
+// Either branch: params.button_flow is always true. func == kFuncOcr yields
+// output = OutputSettingsForFunc(cfg, kFuncOcr) with the format chosen by
+// the same ON/OFF precedence: Touch-Panel-ON maps the LCD's own T=
+// sub-format (PDF(Image)/TXT/HTML/RTF) via OcrFormatForToken; Touch-Panel-
+// OFF takes Config::ocr_text_format (the `ocr.ocr_format` key, default
+// kPdf). `searchable` is set true only when the resolved format is kPdf (a
+// text sink is itself the recognized text -- see output_writer.h's
+// OutputFormat and action_ocr.h's WriteRecognizedText). Every other
+// configured OCR output setting (separation/separate_n/tiff_compression) is
+// preserved from cfg.
 std::optional<ButtonScanPlan> PlanButtonScan(
     const std::vector<uint8_t>& config_frame, const std::string& func,
     const Config& cfg);

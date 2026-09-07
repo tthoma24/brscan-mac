@@ -290,6 +290,38 @@ brscan::Status WritePerPageImages(const std::vector<brscan::ScanResult>& pages,
   return brscan::Status::kOk;
 }
 
+// Writes every page's Vision-recognized text to a single file at `path`,
+// decoding each ScanResult to a CGImage first (kText/kHtml/kRtf are OCR
+// text sinks -- see output_writer.h). Document separation does not apply:
+// one file holds all pages' text. Returns kIoError if a page can't be
+// decoded, and otherwise propagates WriteRecognizedText's status.
+brscan::Status WriteRecognizedTextOutput(
+    const std::vector<brscan::ScanResult>& pages, OcrTextFormat format,
+    const std::string& path, std::vector<std::string>* written) {
+  std::vector<CGImageRef> images;
+  images.reserve(pages.size());
+  bool decoded = true;
+  for (const brscan::ScanResult& page : pages) {
+    CGImageRef image = CreateCGImageFromScanResult(page);
+    if (image == nullptr) {
+      decoded = false;
+      break;
+    }
+    images.push_back(image);
+  }
+  if (!decoded) {
+    for (CGImageRef image : images) CGImageRelease(image);
+    return brscan::Status::kIoError;
+  }
+
+  const brscan::Status status =
+      brscan::WriteRecognizedText(images, format, path);
+  for (CGImageRef image : images) CGImageRelease(image);
+  if (status != brscan::Status::kOk) return status;
+  written->push_back(path);
+  return brscan::Status::kOk;
+}
+
 }  // namespace
 
 brscan::Status WriteConfiguredOutput(
@@ -326,6 +358,21 @@ brscan::Status WriteConfiguredOutput(
     case OutputFormat::kPng:
       return WritePerPageImages(pages, CFSTR("public.png"),
                                 ReplaceExtension(base_path, ".png"), written);
+
+    case OutputFormat::kText:
+      return WriteRecognizedTextOutput(pages, OcrTextFormat::kPlain,
+                                       ReplaceExtension(base_path, ".txt"),
+                                       written);
+
+    case OutputFormat::kHtml:
+      return WriteRecognizedTextOutput(pages, OcrTextFormat::kHtml,
+                                       ReplaceExtension(base_path, ".html"),
+                                       written);
+
+    case OutputFormat::kRtf:
+      return WriteRecognizedTextOutput(pages, OcrTextFormat::kRtf,
+                                       ReplaceExtension(base_path, ".rtf"),
+                                       written);
   }
   return brscan::Status::kIoError;
 }

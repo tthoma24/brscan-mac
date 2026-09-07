@@ -216,6 +216,141 @@ TEST(OcrImageToSearchablePdfTest, RecognizesTextAndProducesSearchablePdf) {
   std::filesystem::remove(pdf_path);
 }
 
+// ---------------------------------------------------------------------
+// WriteRecognizedText: TXT / HTML / RTF text sinks.
+// ---------------------------------------------------------------------
+
+// Wraps `gray8` (width*height 8-bit grayscale, row-major) in a CGImageRef
+// for the Vision-backed WriteRecognizedText path. The caller owns the
+// image.
+CGImageRef MakeGray8CGImage(const std::vector<uint8_t>& gray8, int width,
+                            int height) {
+  CGColorSpaceRef colorspace = CGColorSpaceCreateDeviceGray();
+  CFDataRef cfdata = CFDataCreate(kCFAllocatorDefault, gray8.data(),
+                                  static_cast<CFIndex>(gray8.size()));
+  CGDataProviderRef provider = CGDataProviderCreateWithCFData(cfdata);
+  CFRelease(cfdata);
+  CGImageRef image = CGImageCreate(
+      static_cast<size_t>(width), static_cast<size_t>(height),
+      /*bitsPerComponent=*/8, /*bitsPerPixel=*/8,
+      /*bytesPerRow=*/static_cast<size_t>(width), colorspace,
+      kCGBitmapByteOrderDefault | kCGImageAlphaNone, provider,
+      /*decode=*/nullptr, /*shouldInterpolate=*/false,
+      kCGRenderingIntentDefault);
+  CGDataProviderRelease(provider);
+  CGColorSpaceRelease(colorspace);
+  return image;
+}
+
+std::string ReadFile(const std::filesystem::path& path) {
+  std::ifstream f(path, std::ios::binary);
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  return ss.str();
+}
+
+TEST(WriteRecognizedTextTest, PlainTextContainsRecognizedString) {
+  const int width = 1000, height = 220;
+  NSString* known_text = @"HELLO BRSCAN 12345";
+  const std::vector<uint8_t> gray8 = RenderTextToGray8(known_text, width, height);
+  CGImageRef image = MakeGray8CGImage(gray8, width, height);
+  ASSERT_NE(image, nullptr);
+
+  const std::filesystem::path path = TempPath("recognized.txt");
+  std::filesystem::remove(path);
+  const Status status =
+      WriteRecognizedText({image}, OcrTextFormat::kPlain, path.string());
+  CGImageRelease(image);
+
+  ASSERT_EQ(status, Status::kOk)
+      << "WriteRecognizedText failed -- Vision may be unavailable in a "
+         "headless/CI-like environment.";
+  ASSERT_TRUE(std::filesystem::exists(path));
+  const std::string contents = ReadFile(path);
+  EXPECT_NE(contents.find("BRSCAN"), std::string::npos)
+      << "text file was: " << contents;
+  EXPECT_NE(contents.find("12345"), std::string::npos)
+      << "text file was: " << contents;
+  std::filesystem::remove(path);
+}
+
+TEST(WriteRecognizedTextTest, HtmlDocumentParsesAndContainsRecognizedString) {
+  const int width = 1000, height = 220;
+  NSString* known_text = @"HELLO BRSCAN 12345";
+  const std::vector<uint8_t> gray8 = RenderTextToGray8(known_text, width, height);
+  CGImageRef image = MakeGray8CGImage(gray8, width, height);
+  ASSERT_NE(image, nullptr);
+
+  const std::filesystem::path path = TempPath("recognized.html");
+  std::filesystem::remove(path);
+  const Status status =
+      WriteRecognizedText({image}, OcrTextFormat::kHtml, path.string());
+  CGImageRelease(image);
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_TRUE(std::filesystem::exists(path));
+
+  // Round-trip: Foundation must be able to parse the file back as HTML, and
+  // its plain-text content must carry the recognized tokens.
+  NSData* data =
+      [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:
+                                                     path.string().c_str()]];
+  ASSERT_NE(data, nil);
+  NSError* error = nil;
+  NSAttributedString* parsed = [[NSAttributedString alloc]
+        initWithData:data
+             options:@{NSDocumentTypeDocumentAttribute : NSHTMLTextDocumentType}
+      documentAttributes:nil
+               error:&error];
+  ASSERT_NE(parsed, nil) << "produced file did not parse as HTML";
+  const std::string text = parsed.string.UTF8String;
+  EXPECT_NE(text.find("BRSCAN"), std::string::npos) << "html text was: " << text;
+  EXPECT_NE(text.find("12345"), std::string::npos) << "html text was: " << text;
+  std::filesystem::remove(path);
+}
+
+TEST(WriteRecognizedTextTest, RtfDocumentRoundTripsRecognizedString) {
+  const int width = 1000, height = 220;
+  NSString* known_text = @"HELLO BRSCAN 12345";
+  const std::vector<uint8_t> gray8 = RenderTextToGray8(known_text, width, height);
+  CGImageRef image = MakeGray8CGImage(gray8, width, height);
+  ASSERT_NE(image, nullptr);
+
+  const std::filesystem::path path = TempPath("recognized.rtf");
+  std::filesystem::remove(path);
+  const Status status =
+      WriteRecognizedText({image}, OcrTextFormat::kRtf, path.string());
+  CGImageRelease(image);
+
+  ASSERT_EQ(status, Status::kOk);
+  ASSERT_TRUE(std::filesystem::exists(path));
+
+  NSData* data =
+      [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:
+                                                     path.string().c_str()]];
+  ASSERT_NE(data, nil);
+  NSError* error = nil;
+  NSAttributedString* parsed = [[NSAttributedString alloc]
+        initWithData:data
+             options:@{NSDocumentTypeDocumentAttribute : NSRTFTextDocumentType}
+      documentAttributes:nil
+               error:&error];
+  ASSERT_NE(parsed, nil) << "produced file did not parse as RTF";
+  const std::string text = parsed.string.UTF8String;
+  EXPECT_NE(text.find("BRSCAN"), std::string::npos) << "rtf text was: " << text;
+  EXPECT_NE(text.find("12345"), std::string::npos) << "rtf text was: " << text;
+  std::filesystem::remove(path);
+}
+
+TEST(WriteRecognizedTextTest, EmptyImagesIsIoError) {
+  const std::filesystem::path path = TempPath("recognized_empty.txt");
+  std::filesystem::remove(path);
+  const Status status =
+      WriteRecognizedText({}, OcrTextFormat::kPlain, path.string());
+  EXPECT_EQ(status, Status::kIoError);
+  EXPECT_FALSE(std::filesystem::exists(path));
+}
+
 TEST(OcrImageToSearchablePdfTest, MissingSourceImageIsIoError) {
   const std::filesystem::path pdf_path = TempPath("ocr_missing_output.pdf");
   std::filesystem::remove(pdf_path);

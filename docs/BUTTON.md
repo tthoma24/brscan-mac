@@ -31,13 +31,15 @@ writes one file per page in the format the destination's scan mode implies
 behavior as before this setting existed. Any other format instead writes a
 single JPEG/PNG per page, or one combined PDF/TIFF holding every page.
 
-**OCR always yields a searchable PDF.** Because OCR's whole point is text
-you can select and search, its output format defaults to a PDF with a
-Vision-recognized text layer over each page, even if you leave
-`ocr.format` unset (or set to `native`) -- there's no native-file option
-for OCR specifically. If you set `ocr.format` to `tiff`/`jpeg`/`png`
-explicitly, that's still honored, just without a text layer (Vision only
-lays text into a PDF page).
+**OCR defaults to a searchable PDF.** Because OCR's whole point is text you
+can select and search, its output defaults to a PDF with a
+Vision-recognized text layer over each page. The OCR destination's output
+is chosen by the dedicated `ocr.ocr_format` key (`pdf|txt|html|rtf`,
+default `pdf`) and the LCD's own `T=` sub-format, not by the general
+`<dest>.format` key -- see "Touch-Panel precedence" below. `txt`/`html`/
+`rtf` write the recognized text as a `.txt`/`.html`/`.rtf` file instead of
+a PDF (only the PDF form carries an invisible text layer; the text sinks
+are themselves the recognized text).
 
 For a PDF or TIFF, `<dest>.separation` controls how many pages land in each
 file: `combine` (the default) puts every page from one button press into a
@@ -88,10 +90,14 @@ form (Touch-Panel-ON) always does -- that's the one signal this project
 uses to tell the two apart (`daemon/button_plan.h`'s `PlanButtonScan`,
 Task 1d.4).
 
-**OCR always yields a searchable PDF regardless of which form is in play**
--- see "Output format" above; this holds whether Touch-Panel-ON or -OFF,
-and even if the LCD's own destination settings screen for OCR is set to a
-sub-format like Text/HTML/RTF (see "Not yet implemented" below).
+**OCR honors its sub-format.** The OCR destination writes a searchable PDF
+by default, but the LCD's OCR settings screen also offers Text/HTML/RTF
+sub-formats: with Touch-Panel ON, the panel's `T=TXT`/`HTML`/`RTF` makes
+the daemon write the Vision-recognized text as a `.txt`/`.html`/`.rtf` file
+instead; with Touch-Panel OFF, the `ocr.ocr_format` config key
+(`pdf|txt|html|rtf`, default `pdf`) selects it. Only the PDF sub-format
+carries the invisible searchable-text layer -- the text sinks are
+themselves the recognized text.
 
 An unrecognized paper (`P=`) or output-type (`T=`) token from a
 Touch-Panel-ON config frame falls back safely (the ESC I offer's full
@@ -108,9 +114,6 @@ dropped:
   from a multi-page scan.
 - **High-speed** (`X=`): the LCD's high-speed/landscape (rotated) scan
   mode.
-- **OCR sub-formats** (`T=TXT`/`HTML`/`RTF`): OCR always produces a
-  searchable PDF today, regardless of which of these three the LCD's OCR
-  settings screen shows.
 
 ## How it works
 
@@ -223,7 +226,7 @@ identity or scan-image content.
 | `M` | `mode` | `CGRAY` (color), `TEXT` (black & white) | Raw token. |
 | `P` | `paper` | `LETTER`, `LEGAL`, `A4`, `LEDGER`, `A3`, `A5`, `EXECUTIVE`, `PHOTO`, `BCARD` | Raw token; not mapped to a scan area by this parser -- `daemon/paper_size.h`'s `AreaForPaper` does that (Touch-Panel-ON only; see "Touch-Panel precedence" above). |
 | `A` | `area_flag` | `0` | Observed always 0 (auto-area); the real scan area is computed downstream. |
-| `T` | `output_type` | `PDF(Image)`, `MULTI-TIFF`, `JPEG`, `TXT`, `HTML`, `RTF` | Raw token (parens and hyphen kept verbatim); not mapped to this project's `OutputFormat` by this parser -- `daemon/button_plan.h`'s `PlanButtonScan` does that (Touch-Panel-ON only; the OCR sub-formats `TXT`/`HTML`/`RTF` are not yet acted on -- see "Not yet implemented" above). |
+| `T` | `output_type` | `PDF(Image)`, `MULTI-TIFF`, `JPEG`, `TXT`, `HTML`, `RTF` | Raw token (parens and hyphen kept verbatim); not mapped to this project's `OutputFormat` by this parser -- `daemon/button_plan.h`'s `PlanButtonScan` does that (Touch-Panel-ON only; on the OCR route `TXT`/`HTML`/`RTF` select the recognized-text sub-format -- see "OCR honors its sub-format" above). |
 | `W` | `skip_blank` | `0`/`1` | |
 | `G` | `remove_background` | `0`/`1` | OCR config commands omit this key entirely; its absence leaves `remove_background` at its `false` default. |
 | `L` | `remove_background_level` | `64` (Low), `128` (Med), `192` (High) | Present only when `G=1`; defaults to `0`. |

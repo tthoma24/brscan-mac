@@ -97,6 +97,18 @@ struct Config {
   int ocr_remove_background_level = 0;
   int email_remove_background_level = 0;
 
+  // OCR-destination output sub-format (see daemon/action_ocr.h's
+  // OcrTextFormat and output_writer.h's OutputFormat text sinks): the file
+  // the OCR destination produces when its scan-button `T=` sub-format is
+  // NOT panel-supplied (Touch-Panel-OFF). kPdf (the default) is the
+  // searchable PDF OCR has always produced; kText/kHtml/kRtf write the
+  // recognized text as a .txt/.html/.rtf file instead. OCR-only, so a
+  // single Config field read directly by daemon/button_plan.cpp is enough
+  // -- there is no per-FUNC accessor. Touch-Panel-ON ignores this field and
+  // uses the printer's own config command's `T=` token instead (see
+  // PlanButtonScan's header comment).
+  OutputFormat ocr_text_format = OutputFormat::kPdf;
+
   // IMAGE-destination action setting (see daemon/actions.cpp's
   // PerformImageAction): the app name passed to `open -a <image_app>`
   // when opening a saved scan. Empty means no `-a` flag at all -- `open`
@@ -179,6 +191,14 @@ Config DefaultConfig();
 //                        brscan::Params::remove_background_level to;
 //                        Touch-Panel-ON ignores this key and uses the
 //                        printer's own config command's G=/L= instead)
+//   ocr.ocr_format       pdf | txt | html | rtf (default pdf -- the
+//                        searchable PDF OCR has always produced). OCR-only:
+//                        the sub-format the OCR destination writes when the
+//                        scan-button config command didn't supply its own
+//                        `T=` (Touch-Panel-OFF). txt/html/rtf write the
+//                        Vision-recognized text as a .txt/.html/.rtf file
+//                        instead of a PDF; Touch-Panel-ON ignores this key
+//                        and uses the printer's own `T=` token.
 // where <dest> is one of file, image, ocr, email.
 Config ParseConfig(const std::string& text);
 

@@ -59,6 +59,21 @@ std::optional<OutputFormat> ParseFormatString(const std::string& s) {
   return std::nullopt;
 }
 
+// Parses an `ocr.ocr_format` value into the OutputFormat the OCR
+// destination writes: "pdf" -> kPdf (the searchable PDF OCR has always
+// produced), "txt"/"html"/"rtf" -> the kText/kHtml/kRtf text sinks (see
+// output_writer.h). Returns nullopt for anything else, so the caller leaves
+// the default (kPdf) in place, per ParseConfig()'s tolerant-parse contract.
+// Note this is a distinct, OCR-specific vocabulary from ParseFormatString's
+// image formats -- OCR can only produce a PDF or one of the text sinks.
+std::optional<OutputFormat> ParseOcrFormatString(const std::string& s) {
+  if (s == "pdf") return OutputFormat::kPdf;
+  if (s == "txt") return OutputFormat::kText;
+  if (s == "html") return OutputFormat::kHtml;
+  if (s == "rtf") return OutputFormat::kRtf;
+  return std::nullopt;
+}
+
 std::optional<TiffCompression> ParseTiffCompressionString(const std::string& s) {
   if (s == "lzw") return TiffCompression::kLzw;
   if (s == "g3") return TiffCompression::kG3;
@@ -259,6 +274,16 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
       if (const auto parsed_level = ParseRemoveBackgroundString(value)) {
         *level = *parsed_level;
       }
+    }
+    return;
+  }
+
+  // OCR-only: the OCR destination's output sub-format (pdf|txt|html|rtf).
+  // No `<dest>` fan-out -- a text sink only makes sense for OCR (see
+  // Config::ocr_text_format), so this key is honored solely under `ocr.`.
+  if (dest == "ocr" && field == "ocr_format") {
+    if (const auto fmt = ParseOcrFormatString(value)) {
+      cfg->ocr_text_format = *fmt;
     }
   }
 }
