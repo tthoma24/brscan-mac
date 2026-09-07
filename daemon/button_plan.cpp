@@ -90,6 +90,16 @@ std::optional<ButtonScanPlan> PlanButtonScan(
   plan.high_speed = touch_panel_on ? parsed->high_speed
                                     : HighSpeedForFunc(cfg, func);
 
+  // Skip-blank (W=) follows the same ON/OFF precedence: the LCD's own W= when
+  // the panel carried it (Touch-Panel-ON), the daemon's `<dest>.skip_blank`
+  // config key otherwise (Touch-Panel-OFF). Like high-speed it is not a scan
+  // Param -- the device never drops blanks itself (W= is config-only, absent
+  // from ESC X; see reference/protocol-notes-button-options.md) -- so it
+  // drives a post-scan host-side filter in HandleButtonEvent (see
+  // button_plan.h's ButtonScanPlan::skip_blank and daemon/blank_detect.h).
+  plan.skip_blank = touch_panel_on ? parsed->skip_blank
+                                    : SkipBlankForFunc(cfg, func);
+
   // Start from this FUNC's configured Params either way, so brightness/
   // contrast/source (none of which the config command carries) come from
   // the daemon's config in both precedence branches.
@@ -201,13 +211,6 @@ std::optional<ButtonScanPlan> PlanButtonScan(
   } else {
     plan.output = OutputSettingsForFunc(cfg, func);
   }
-
-  // TODO (task 1e.18): parsed->skip_blank (W=) is decoded by
-  // ParseButtonConfig but not yet acted on here -- host-side blank-page
-  // skipping is deferred to a later task (see docs/BUTTON.md). The other
-  // panel toggle, high-speed (X=), is now handled: plan.high_speed is set by
-  // precedence above and consumed as a post-scan rotation in
-  // HandleButtonEvent.
 
   return plan;
 }

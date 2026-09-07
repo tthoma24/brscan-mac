@@ -116,13 +116,19 @@ scanned rather than failing the job. (The rotation direction is a single
 constant in `image_transform.mm`, flippable if a device-in-the-loop test ever
 shows pages upside-down.)
 
-### Not yet implemented
-
-The config command also carries one panel toggle this project parses but
-does not yet act on -- captured for a later task, not silently dropped:
-
-- **Skip-blank** (`W=`): host-side detection and removal of blank pages
-  from a multi-page scan.
+**Skip-blank drops blank pages host-side.** The LCD's "skip blank page"
+toggle (`W=`) is config-only -- it is never carried in the `ESC X` execute
+command, so the device never drops blanks itself. The host does: after the
+scan (and after any high-speed rotation), `HandleButtonEvent` runs
+`daemon/blank_detect.h`'s `IsBlankPage` over every page and removes the ones
+it judges empty. Detection decodes each page, downscales it to a small
+grayscale thumbnail, and measures *ink coverage* -- the fraction of pixels
+darker than a luminance threshold; a page under a small coverage epsilon is
+blank (both constants are named and tunable in `blank_detect.mm`). With
+Touch-Panel ON the panel's `W=` drives it; with Touch-Panel OFF the
+`<dest>.skip_blank` config key (`on|off`, default `off`) does. A page that
+cannot be decoded is treated as non-blank (never dropped), and if *every*
+page looks blank one page is kept so the scan still produces output.
 
 ## How it works
 

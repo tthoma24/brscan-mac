@@ -114,6 +114,7 @@ add_executable(brscan-scand
   daemon/action_ocr.mm
   daemon/output_writer.mm
   daemon/image_transform.mm
+  daemon/blank_detect.mm
   daemon/button_plan.cpp
   daemon/handle_event.cpp
   daemon/sender_check.cpp
@@ -322,6 +323,8 @@ if(BUILD_TESTING)
     tests/output_writer_test.mm
     daemon/image_transform.mm
     tests/image_transform_test.mm
+    daemon/blank_detect.mm
+    tests/blank_detect_test.mm
     daemon/button_plan.cpp
     tests/button_plan_test.cpp
     daemon/handle_event.cpp

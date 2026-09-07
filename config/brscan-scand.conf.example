@@ -149,6 +149,19 @@
 
 # file.high_speed = on
 
+# --- Per-destination skip-blank ----------------------------------------------
+#
+# Sets the "from computer" (Touch Panel OFF / Auto) skip-blank-page toggle per
+# destination -- the OFF-path counterpart of the LCD panel's own skip-blank
+# setting, which stays authoritative whenever Touch Panel is ON (this key has
+# no effect on that path). When on, the daemon detects and drops blank pages
+# host-side after the scan (the scanner never drops them itself). If every page
+# in a scan looks blank, one page is kept so the scan still produces output.
+#
+#   <dest>.skip_blank   on | off (default off)
+
+# file.skip_blank = on
+
 # --- Destination action settings --------------------------------------------
 
 # IMAGE destination: the app that opens the saved scan, as `open -a <app>`.

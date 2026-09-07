@@ -32,6 +32,16 @@ struct ButtonScanPlan {
   // from the parsed config's X=, Touch-Panel-OFF from HighSpeedForFunc(cfg,
   // func) (the `<dest>.high_speed` key).
   bool high_speed = false;
+  // Skip-blank (the config command's W=1): drop pages that host-side blank
+  // detection judges empty before writing. Unlike the device toggles this is
+  // never carried in ESC X -- the printer never drops blanks itself (see
+  // reference/protocol-notes-button-options.md) -- so it drives a post-scan
+  // host-side filter in HandleButtonEvent (daemon/blank_detect.h's
+  // IsBlankPage), not a scan Param. Set by the same ON/OFF precedence as the
+  // fields above -- Touch-Panel-ON from the parsed config's W=,
+  // Touch-Panel-OFF from SkipBlankForFunc(cfg, func) (the `<dest>.skip_blank`
+  // key).
+  bool skip_blank = false;
 };
 
 // Decides how to scan and write a button press, given the printer's pushed

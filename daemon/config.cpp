@@ -218,6 +218,17 @@ bool* HighSpeedForDestPrefix(Config* cfg, const std::string& dest) {
   return nullptr;
 }
 
+// Returns the skip-blank toggle field this key's <dest> prefix names, or
+// nullptr for anything else -- the counterpart to HighSpeedForDestPrefix for
+// the `<dest>.skip_blank` key.
+bool* SkipBlankForDestPrefix(Config* cfg, const std::string& dest) {
+  if (dest == "file") return &cfg->file_skip_blank;
+  if (dest == "image") return &cfg->image_skip_blank;
+  if (dest == "ocr") return &cfg->ocr_skip_blank;
+  if (dest == "email") return &cfg->email_skip_blank;
+  return nullptr;
+}
+
 // Applies one already-trimmed, non-empty `key`/`value` pair to `cfg`.
 // Unrecognized keys and values that fail to parse are silently ignored --
 // see ParseConfig()'s doc comment for why.
@@ -313,6 +324,16 @@ void ApplyKey(Config* cfg, const std::string& key, const std::string& value) {
     if (high_speed != nullptr) {
       if (const auto parsed_high_speed = ParseBoolString(value)) {
         *high_speed = *parsed_high_speed;
+      }
+    }
+    return;
+  }
+
+  if (field == "skip_blank") {
+    bool* const skip_blank = SkipBlankForDestPrefix(cfg, dest);
+    if (skip_blank != nullptr) {
+      if (const auto parsed_skip_blank = ParseBoolString(value)) {
+        *skip_blank = *parsed_skip_blank;
       }
     }
     return;
@@ -440,6 +461,13 @@ bool HighSpeedForFunc(const Config& cfg, const std::string& func) {
   if (func == kFuncOcr) return cfg.ocr_high_speed;
   if (func == kFuncEmail) return cfg.email_high_speed;
   return cfg.file_high_speed;  // kFuncFile, and the safe fallback otherwise.
+}
+
+bool SkipBlankForFunc(const Config& cfg, const std::string& func) {
+  if (func == kFuncImage) return cfg.image_skip_blank;
+  if (func == kFuncOcr) return cfg.ocr_skip_blank;
+  if (func == kFuncEmail) return cfg.email_skip_blank;
+  return cfg.file_skip_blank;  // kFuncFile, and the safe fallback otherwise.
 }
 
 bool IsKnownFunc(const std::string& func) {

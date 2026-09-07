@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "actions.h"
+#include "blank_detect.h"
 #include "brscan/scanner.h"
 #include "button_plan.h"
 #include "image_transform.h"
@@ -144,6 +145,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   OutputSettings settings;
   bool touch_panel_on = false;
   bool high_speed = false;
+  bool skip_blank = false;
   const brscan::ButtonParamsFn plan_callback =
       [&](const std::vector<uint8_t>& config_frame)
           -> std::optional<brscan::Params> {
@@ -153,6 +155,7 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     settings = plan->output;
     touch_panel_on = plan->touch_panel_on;
     high_speed = plan->high_speed;
+    skip_blank = plan->skip_blank;
     std::cout << "[handle_event] FUNC=" << event.func << ": "
                << (plan->touch_panel_on ? "Touch-Panel-ON (printer settings)"
                                          : "Touch-Panel-OFF (daemon config)")
@@ -211,6 +214,42 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
                       "scanned\n";
       }
     }
+  }
+
+  // Skip-blank (the config command's W=1): drop pages host-side blank
+  // detection judges empty (daemon/blank_detect.h's IsBlankPage). Run here --
+  // after the high-speed rotation loop, so detection sees upright pages, and
+  // before the write below. A page that could not be decoded is treated as
+  // NON-blank by IsBlankPage, so it is kept, not dropped.
+  if (skip_blank) {
+    const size_t total = pages.size();
+    std::vector<brscan::ScanResult> kept;
+    kept.reserve(total);
+    for (brscan::ScanResult& page : pages) {
+      if (!IsBlankPage(page)) kept.push_back(std::move(page));
+    }
+    if (kept.empty()) {
+      // Every page looked blank. The write path below requires at least one
+      // page -- WriteConfiguredOutput on an empty vector, and the
+      // written.empty() guard after it, both treat "no output" as kIoError --
+      // so keep the first page rather than hand the writer an empty vector
+      // (option (a) in the task 1e.18 brief; the surrounding code does not
+      // tolerate a no-output success cleanly). `pages` is still fully intact
+      // here: the loop above only moved a page out when it was kept, and in
+      // the all-blank case it kept none.
+      std::cerr << "[handle_event] FUNC=" << event.func
+                 << ": skip-blank judged all " << total
+                 << (total == 1 ? " page" : " pages")
+                 << " blank; keeping one so the scan still produces output\n";
+      kept.push_back(std::move(pages.front()));
+    } else if (kept.size() < total) {
+      const size_t dropped = total - kept.size();
+      std::cout << "[handle_event] FUNC=" << event.func
+                 << ": skip-blank dropped " << dropped << " blank "
+                 << (dropped == 1 ? "page" : "pages") << " of " << total
+                 << "\n";
+    }
+    pages = std::move(kept);
   }
 
   // Best-effort: if save_dir already exists (the common case after the

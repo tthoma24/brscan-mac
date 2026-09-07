@@ -112,6 +112,21 @@ struct Config {
   bool ocr_high_speed = false;
   bool email_high_speed = false;
 
+  // Per-FUNC skip-blank toggle (see reference/protocol-notes-button-
+  // options.md's decode of the button config command's W=): the OFF-path
+  // counterpart of the LCD's own skip-blank-page setting. When set,
+  // daemon/handle_event.cpp drops the pages daemon/blank_detect.h's
+  // IsBlankPage judges empty before writing. Unlike the device toggles this
+  // is purely host-side -- W= is config-only, never carried in ESC X, so the
+  // device never drops blanks itself. Mirrors file_high_speed/etc.'s
+  // raw-per-dest-field pattern; consulted only in daemon/button_plan.cpp's
+  // Touch-Panel-OFF branch (Touch-Panel-ON stays authoritative from the
+  // printer's own config command's W=). Defaults to false (off).
+  bool file_skip_blank = false;
+  bool image_skip_blank = false;
+  bool ocr_skip_blank = false;
+  bool email_skip_blank = false;
+
   // OCR-destination output sub-format (see daemon/action_ocr.h's
   // OcrTextFormat and output_writer.h's OutputFormat text sinks): the file
   // the OCR destination produces when its scan-button `T=` sub-format is
@@ -220,6 +235,12 @@ Config DefaultConfig();
 //                        portrait (see daemon/image_transform.h).
 //                        Touch-Panel-ON ignores this key and uses the
 //                        printer's own config command's X= instead.
+//   <dest>.skip_blank    on | off (default off). The OFF-path counterpart of
+//                        the LCD's own skip-blank-page setting: when on, the
+//                        daemon drops the pages daemon/blank_detect.h's
+//                        IsBlankPage judges empty before writing.
+//                        Touch-Panel-ON ignores this key and uses the
+//                        printer's own config command's W= instead.
 // where <dest> is one of file, image, ocr, email.
 Config ParseConfig(const std::string& text);
 
@@ -285,6 +306,14 @@ int RemoveBackgroundLevelForFunc(const Config& cfg, const std::string& func);
 // mirroring ParamsForFunc's FILE-as-safe-fallback behavior. False means off
 // (no `<dest>.high_speed` configured, or explicitly configured off).
 bool HighSpeedForFunc(const Config& cfg, const std::string& func);
+
+// The configured `<dest>.skip_blank` toggle (see Config::file_skip_blank
+// above) for a button event's FUNC (FILE/IMAGE/OCR/EMAIL, matched
+// case-sensitively per the wire protocol -- see daemon/button_listener.h's
+// ButtonEvent::func). Returns cfg.file_skip_blank for any other string,
+// mirroring ParamsForFunc's FILE-as-safe-fallback behavior. False means off
+// (no `<dest>.skip_blank` configured, or explicitly configured off).
+bool SkipBlankForFunc(const Config& cfg, const std::string& func);
 
 // True if `func` is one of the four known FUNCs (kFuncFile/kFuncImage/
 // kFuncOcr/kFuncEmail above), false for anything else. `func` comes
