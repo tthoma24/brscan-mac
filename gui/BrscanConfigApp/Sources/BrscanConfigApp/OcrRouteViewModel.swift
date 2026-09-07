@@ -24,6 +24,14 @@ public final class OcrRouteViewModel: ObservableObject {
   @Published public var dpi: Int
   @Published public var paper: String
 
+  /// `ocr.high_speed` -- high-speed ADF mode: the feeder scans landscape at
+  /// full speed and the daemon rotates each page back to portrait (Task
+  /// 1e.16). A plain on/off toggle, same as `RouteViewModel.highSpeed`.
+  @Published public var highSpeed: Bool
+  /// `ocr.skip_blank` -- drop blank pages from ADF output (Task 1e.18). A
+  /// plain on/off toggle, same as `RouteViewModel.skipBlank`.
+  @Published public var skipBlank: Bool
+
   /// The OCR output sub-format: `pdf` (searchable PDF) or one of the
   /// `txt`/`html`/`rtf` text sinks, backed by `OptionValueSets.ocrFormat`
   /// (the daemon's `ocr.ocr_format` key). A real, LCD-independent choice the
@@ -50,6 +58,8 @@ public final class OcrRouteViewModel: ObservableObject {
     self.dpi = route.dpi
     self.paper = route.paper
     self.format = route.ocrFormat
+    self.highSpeed = route.highSpeed
+    self.skipBlank = route.skipBlank
 
     switch route.separation {
     case .combine:
@@ -126,7 +136,9 @@ public final class OcrRouteViewModel: ObservableObject {
       tiffCompression: DaemonConfig.Route.default.tiffCompression,
       separation: separation,
       paper: paper,
-      ocrFormat: format)
+      ocrFormat: format,
+      highSpeed: highSpeed,
+      skipBlank: skipBlank)
   }
 
   // MARK: Reseeding
@@ -142,6 +154,8 @@ public final class OcrRouteViewModel: ObservableObject {
     dpi = route.dpi
     paper = route.paper
     format = route.ocrFormat
+    highSpeed = route.highSpeed
+    skipBlank = route.skipBlank
 
     switch route.separation {
     case .combine:

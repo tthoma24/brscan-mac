@@ -61,6 +61,43 @@ final class OcrRouteViewModelTests: XCTestCase {
     }
   }
 
+  // MARK: high_speed / skip_blank toggles (Tasks 1e.16/1e.18)
+
+  /// Setting the OCR route's toggles true produces the canonical
+  /// `ocr.high_speed = on` / `ocr.skip_blank = on` config lines.
+  func testSettingTogglesProducesTheOcrConfigLines() {
+    let viewModel = OcrRouteViewModel()
+    XCTAssertFalse(viewModel.highSpeed)
+    XCTAssertFalse(viewModel.skipBlank)
+
+    viewModel.highSpeed = true
+    viewModel.skipBlank = true
+
+    var config = DaemonConfig.default
+    config.ocr = viewModel.route
+    var doc = ConfigDocument()
+    config.apply(to: &doc)
+
+    XCTAssertEqual(doc.value(for: "ocr.high_speed"), "on")
+    XCTAssertEqual(doc.value(for: "ocr.skip_blank"), "on")
+  }
+
+  /// Loading a document with `ocr.skip_blank = on` selects `skipBlank` in
+  /// the view model, via both the seeding init and the in-place reseed.
+  func testLoadingSkipBlankOnSelectsIt() {
+    let doc = ConfigDocument(text: "ocr.skip_blank = on\nocr.high_speed = on\n")
+    let config = DaemonConfig.from(doc)
+
+    let viewModel = OcrRouteViewModel(route: config.ocr)
+    XCTAssertTrue(viewModel.skipBlank)
+    XCTAssertTrue(viewModel.highSpeed)
+
+    let reseeded = OcrRouteViewModel()
+    reseeded.load(config.ocr)
+    XCTAssertTrue(reseeded.skipBlank)
+    XCTAssertTrue(reseeded.highSpeed)
+  }
+
   // MARK: Separation gating by sub-format
 
   func testSeparationIsEditableSincePdfIsAContainerFormat() {

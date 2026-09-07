@@ -33,6 +33,8 @@ struct RouteEditorView: View {
           }
         }
 
+        Toggle("High-speed ADF (rotate to portrait)", isOn: $viewModel.highSpeed)
+
         VStack(alignment: .leading, spacing: 4) {
           Stepper("Resolution: \(viewModel.dpi) dpi", value: $viewModel.dpi, in: 1...9999)
           if !viewModel.isDpiValid {
@@ -93,6 +95,10 @@ struct RouteEditorView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         }
+      }
+
+      Section("Page handling") {
+        Toggle("Skip blank pages", isOn: $viewModel.skipBlank)
       }
     }
   }

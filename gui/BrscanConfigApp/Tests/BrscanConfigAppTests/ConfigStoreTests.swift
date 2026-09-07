@@ -44,6 +44,8 @@ final class ConfigStoreTests: XCTestCase {
       "file.tiff_compression = lzw",
       "file.separation = combine",
       "file.paper = letter",
+      "file.high_speed = off",
+      "file.skip_blank = off",
       "",
       "image.mode = gray",
       "image.source = adf",
@@ -52,6 +54,8 @@ final class ConfigStoreTests: XCTestCase {
       "image.tiff_compression = g3",
       "image.separation = image:3",
       "image.paper = a4",
+      "image.high_speed = on",
+      "image.skip_blank = off",
       "",
       "ocr.mode = bw",
       "ocr.source = adf-duplex",
@@ -61,6 +65,8 @@ final class ConfigStoreTests: XCTestCase {
       "ocr.separation = page:2",
       "ocr.paper = legal",
       "ocr.ocr_format = pdf",
+      "ocr.high_speed = off",
+      "ocr.skip_blank = on",
       "",
       "email.mode = errdiff",
       "email.source = flatbed",
@@ -69,6 +75,8 @@ final class ConfigStoreTests: XCTestCase {
       "email.tiff_compression = g4",
       "email.separation = combine",
       "email.paper = a5",
+      "email.high_speed = off",
+      "email.skip_blank = off",
     ].joined(separator: "\n") + "\n"
   }
 
