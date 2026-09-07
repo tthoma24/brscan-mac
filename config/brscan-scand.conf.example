@@ -28,6 +28,12 @@
 # doesn't exist. A leading ~ is expanded. Defaults to ~/Scans.
 # save_dir = ~/Scans
 
+# Which destinations this Mac advertises in the printer's Scan menu. A
+# comma-separated subset of file, image, ocr, email (case-insensitive).
+# Registering fewer FUNCs sends fewer SNMP Sets to the printer. Defaults to
+# all four; an empty value or one naming no known FUNC keeps that default.
+# register_funcs = file, ocr
+
 # --- Per-destination scan settings ------------------------------------------
 #
 # Each of the four destinations (file, image, ocr, email) takes its own

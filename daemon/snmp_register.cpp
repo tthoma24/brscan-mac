@@ -1,6 +1,7 @@
 #include "snmp_register.h"
 
 #include <algorithm>
+#include <cstring>
 #include <sstream>
 
 #include <netdb.h>
@@ -138,38 +139,104 @@ std::vector<uint8_t> BuildSnmpSetRegister(const std::string& community,
   return message;
 }
 
-Status SendSnmpRegister(const std::string& printer_host,
-                         const std::string& community,
-                         const std::string& value, uint32_t request_id) {
-  const std::vector<uint8_t> packet =
-      BuildSnmpSetRegister(community, request_id, value);
-
+std::vector<ResolvedEndpoint> DefaultSnmpResolver(const std::string& host) {
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_DGRAM;
   hints.ai_protocol = IPPROTO_UDP;
 
   addrinfo* results = nullptr;
-  const int rc =
-      getaddrinfo(printer_host.c_str(), "161", &hints, &results);
-  if (rc != 0 || results == nullptr) return Status::kIoError;
-
-  Status status = Status::kIoError;
+  std::vector<ResolvedEndpoint> endpoints;
+  if (getaddrinfo(host.c_str(), "161", &hints, &results) != 0 ||
+      results == nullptr) {
+    return endpoints;
+  }
   for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
-    const int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (fd < 0) continue;
+    if (ai->ai_addr == nullptr ||
+        ai->ai_addrlen > sizeof(sockaddr_storage)) {
+      continue;
+    }
+    ResolvedEndpoint endpoint;
+    std::memcpy(&endpoint.addr, ai->ai_addr, ai->ai_addrlen);
+    endpoint.addr_len = ai->ai_addrlen;
+    endpoints.push_back(endpoint);
+  }
+  freeaddrinfo(results);
+  return endpoints;
+}
 
-    const ssize_t n = sendto(fd, packet.data(), packet.size(), 0,
-                              ai->ai_addr, ai->ai_addrlen);
-    close(fd);
-    if (n == static_cast<ssize_t>(packet.size())) {
-      status = Status::kOk;
+bool DefaultSnmpSender(const ResolvedEndpoint& endpoint, const uint8_t* data,
+                       std::size_t len) {
+  const int fd = socket(endpoint.addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+  if (fd < 0) return false;
+  const ssize_t n =
+      sendto(fd, data, len, 0,
+             reinterpret_cast<const sockaddr*>(&endpoint.addr),
+             endpoint.addr_len);
+  close(fd);
+  return n == static_cast<ssize_t>(len);
+}
+
+SnmpRegistrar::SnmpRegistrar(std::string printer_host, std::string community,
+                             SnmpResolveFn resolver, SnmpSendFn sender)
+    : printer_host_(std::move(printer_host)),
+      community_(std::move(community)),
+      resolver_(std::move(resolver)),
+      sender_(std::move(sender)) {}
+
+bool SnmpRegistrar::EnsureResolved() {
+  if (resolved_) return true;
+  ++resolve_count_;
+  endpoints_ = resolver_ ? resolver_(printer_host_)
+                         : DefaultSnmpResolver(printer_host_);
+  resolved_ = !endpoints_.empty();
+  return resolved_;
+}
+
+Status SnmpRegistrar::Send(const std::string& value, uint32_t request_id) {
+  if (!EnsureResolved()) return Status::kIoError;
+
+  const std::vector<uint8_t> packet =
+      BuildSnmpSetRegister(community_, request_id, value);
+
+  bool sent = false;
+  for (const ResolvedEndpoint& endpoint : endpoints_) {
+    const bool ok =
+        sender_ ? sender_(endpoint, packet.data(), packet.size())
+                : DefaultSnmpSender(endpoint, packet.data(), packet.size());
+    if (ok) {
+      sent = true;
       break;
     }
   }
+  if (!sent) {
+    // The cached address may be stale (printer moved) -- drop it so the next
+    // Send() re-resolves rather than retrying a dead address forever.
+    InvalidateCache();
+    return Status::kIoError;
+  }
+  return Status::kOk;
+}
 
-  freeaddrinfo(results);
-  return status;
+void SnmpRegistrar::InvalidateCache() {
+  endpoints_.clear();
+  resolved_ = false;
+}
+
+Status RegisterDestinations(
+    SnmpRegistrar& registrar, const std::vector<FuncRegistration>& funcs,
+    const std::string& local_ip, uint16_t port, const std::string& name,
+    int duration_sec, uint32_t* next_request_id,
+    const std::function<void(const std::string& func, Status)>& on_result) {
+  Status overall = Status::kOk;
+  for (const FuncRegistration& f : funcs) {
+    const std::string value = BuildRegisterValue(local_ip, port, name, f.func,
+                                                 f.appnum, duration_sec);
+    const Status status = registrar.Send(value, (*next_request_id)++);
+    if (on_result) on_result(f.func, status);
+    if (status != Status::kOk) overall = Status::kIoError;
+  }
+  return overall;
 }
 
 }  // namespace brscan::scand
