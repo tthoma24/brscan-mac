@@ -1,5 +1,7 @@
 #pragma once
 
+#include <CoreGraphics/CGImage.h>
+
 #include "brscan/scanner.h"
 
 // Host-side blank-page detection for the scan-button "Skip Blank Page" toggle
@@ -23,5 +25,16 @@ namespace brscan::scand {
 // treated as NON-blank and logged -- a page that could not be inspected is
 // never dropped.
 bool IsBlankPage(const brscan::ScanResult& page);
+
+// Same blank verdict as above, but from an already-decoded page image rather
+// than a ScanResult -- the ScanResult overload is exactly this preceded by a
+// CreateCGImageFromScanResult() decode. It lets a caller that has already
+// decoded a page (e.g. daemon/handle_event's post-scan pipeline, which shares
+// one decode between the high-speed rotation and this check) avoid decoding it
+// a second time. Because the measure is orientation-independent, passing the
+// pre-rotation image yields the same verdict as the rotated one. `decoded`
+// must be a valid image (non-null, positive dimensions); the caller owns it
+// and is responsible for releasing it.
+bool IsBlankPage(CGImageRef decoded);
 
 }  // namespace brscan::scand

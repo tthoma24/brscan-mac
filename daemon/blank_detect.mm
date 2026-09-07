@@ -44,32 +44,28 @@ constexpr int kMaxLongEdge = 512;
 
 }  // namespace
 
-bool IsBlankPage(const brscan::ScanResult& page) {
-  if (page.width <= 0 || page.height <= 0) {
-    // Nothing to inspect -> treat as non-blank (never drop a page we can't
-    // measure).
-    std::cerr << "[blank_detect] page has no dimensions; treating as "
-                 "non-blank\n";
-    return false;
-  }
-
-  CGImageRef src = brscan::CreateCGImageFromScanResult(page);
-  if (src == nullptr) {
-    std::cerr << "[blank_detect] could not decode page; treating as "
+bool IsBlankPage(CGImageRef decoded) {
+  // The page's pixel dimensions come straight from the decoded image, so this
+  // matches the ScanResult overload's page.width/page.height (the ScanResult's
+  // native bytes always decode to an image of those dimensions).
+  const int width = static_cast<int>(CGImageGetWidth(decoded));
+  const int height = static_cast<int>(CGImageGetHeight(decoded));
+  if (width <= 0 || height <= 0) {
+    std::cerr << "[blank_detect] decoded page has no dimensions; treating as "
                  "non-blank\n";
     return false;
   }
 
   // Downscale so the long edge is at most kMaxLongEdge (never upscale).
-  const int long_edge = std::max(page.width, page.height);
+  const int long_edge = std::max(width, height);
   const double scale =
       long_edge > kMaxLongEdge
           ? static_cast<double>(kMaxLongEdge) / static_cast<double>(long_edge)
           : 1.0;
   const int out_width =
-      std::max(1, static_cast<int>(std::lround(page.width * scale)));
+      std::max(1, static_cast<int>(std::lround(width * scale)));
   const int out_height =
-      std::max(1, static_cast<int>(std::lround(page.height * scale)));
+      std::max(1, static_cast<int>(std::lround(height * scale)));
 
   std::vector<uint8_t> buffer(static_cast<size_t>(out_width) *
                               static_cast<size_t>(out_height));
@@ -81,7 +77,6 @@ bool IsBlankPage(const brscan::ScanResult& page) {
       kCGBitmapByteOrderDefault | kCGImageAlphaNone);
   CGColorSpaceRelease(colorspace);
   if (ctx == nullptr) {
-    CGImageRelease(src);
     std::cerr << "[blank_detect] could not create analysis bitmap; treating "
                  "as non-blank\n";
     return false;
@@ -97,9 +92,8 @@ bool IsBlankPage(const brscan::ScanResult& page) {
   CGContextDrawImage(ctx,
                      CGRectMake(0, 0, static_cast<CGFloat>(out_width),
                                 static_cast<CGFloat>(out_height)),
-                     src);
+                     decoded);
   CGContextRelease(ctx);
-  CGImageRelease(src);
 
   size_t ink = 0;
   for (const uint8_t sample : buffer) {
@@ -109,6 +103,34 @@ bool IsBlankPage(const brscan::ScanResult& page) {
   const double coverage =
       total == 0 ? 0.0 : static_cast<double>(ink) / static_cast<double>(total);
   return coverage < kBlankCoverageEpsilon;
+}
+
+bool IsBlankPage(const brscan::ScanResult& page) {
+  if (page.width <= 0 || page.height <= 0) {
+    // Nothing to inspect -> treat as non-blank (never drop a page we can't
+    // measure).
+    std::cerr << "[blank_detect] page has no dimensions; treating as "
+                 "non-blank\n";
+    return false;
+  }
+
+  // @autoreleasepool: CreateCGImageFromScanResult's kRgb (JPEG) path decodes
+  // through an autoreleased NSData (see daemon/action_ocr.mm). The daemon has
+  // no ambient pool -- its main loop is plain C++ with no NSRunLoop -- so
+  // without this every color page's decode buffer would leak for the process
+  // lifetime ("autoreleased with no pool in place - just leaking"). The pool
+  // drains it before this returns.
+  @autoreleasepool {
+    CGImageRef src = brscan::CreateCGImageFromScanResult(page);
+    if (src == nullptr) {
+      std::cerr << "[blank_detect] could not decode page; treating as "
+                   "non-blank\n";
+      return false;
+    }
+    const bool blank = IsBlankPage(src);
+    CGImageRelease(src);
+    return blank;
+  }
 }
 
 }  // namespace brscan::scand

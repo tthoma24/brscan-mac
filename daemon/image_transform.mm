@@ -184,15 +184,8 @@ std::vector<uint8_t> PackGray8ToBitonal(const std::vector<uint8_t>& gray,
 }  // namespace
 
 std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
+                                                 CGImageRef src,
                                                  int jpeg_quality) {
-  if (page.width <= 0 || page.height <= 0) return std::nullopt;
-
-  CGImageRef src = brscan::CreateCGImageFromScanResult(page);
-  if (src == nullptr) {
-    std::cerr << "[image_transform] could not decode page for rotation\n";
-    return std::nullopt;
-  }
-
   const int in_width = page.width;
   const int in_height = page.height;
   const int out_width = in_height;  // 90-degree rotation swaps the axes.
@@ -203,11 +196,15 @@ std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
   rotated.width = out_width;
   rotated.height = out_height;
 
+  // This operates on the caller-owned `src`; it never decodes and never
+  // releases it. Nothing here creates an autoreleased Objective-C object (the
+  // JPEG re-encode below goes through CoreFoundation/ImageIO CF types, all
+  // explicitly released), so the pool that matters lives in the decoding
+  // overload below / the caller that owns `src`.
   switch (page.format) {
     case brscan::PixelFormat::kRgb: {
       std::optional<std::vector<uint8_t>> jpeg = RotateRgbToJpeg(
           src, in_width, in_height, out_width, out_height, jpeg_quality);
-      CGImageRelease(src);
       if (!jpeg) {
         std::cerr << "[image_transform] could not re-encode rotated color "
                      "page as JPEG\n";
@@ -219,7 +216,6 @@ std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
     case brscan::PixelFormat::kGray: {
       std::vector<uint8_t> gray =
           RotateToGray8(src, in_width, in_height, out_width, out_height);
-      CGImageRelease(src);
       if (gray.empty()) {
         std::cerr << "[image_transform] could not create gray bitmap for "
                      "rotation\n";
@@ -231,7 +227,6 @@ std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
     case brscan::PixelFormat::kBitonal: {
       std::vector<uint8_t> gray =
           RotateToGray8(src, in_width, in_height, out_width, out_height);
-      CGImageRelease(src);
       if (gray.empty()) {
         std::cerr << "[image_transform] could not create bitmap for bitonal "
                      "rotation\n";
@@ -241,8 +236,30 @@ std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
       return rotated;
     }
   }
-  CGImageRelease(src);
   return std::nullopt;
+}
+
+std::optional<brscan::ScanResult> RotatePortrait(const brscan::ScanResult& page,
+                                                 int jpeg_quality) {
+  if (page.width <= 0 || page.height <= 0) return std::nullopt;
+
+  // @autoreleasepool: CreateCGImageFromScanResult's kRgb (JPEG) path decodes
+  // through an autoreleased NSData (see daemon/action_ocr.mm). The daemon has
+  // no ambient pool -- its main loop is plain C++ with no NSRunLoop -- so
+  // without this every color page's decode buffer would leak for the process
+  // lifetime ("autoreleased with no pool in place - just leaking"). The pool
+  // drains it before this returns.
+  @autoreleasepool {
+    CGImageRef src = brscan::CreateCGImageFromScanResult(page);
+    if (src == nullptr) {
+      std::cerr << "[image_transform] could not decode page for rotation\n";
+      return std::nullopt;
+    }
+    std::optional<brscan::ScanResult> rotated =
+        RotatePortrait(page, src, jpeg_quality);
+    CGImageRelease(src);
+    return rotated;
+  }
 }
 
 }  // namespace brscan::scand

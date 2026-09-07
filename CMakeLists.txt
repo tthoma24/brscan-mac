@@ -103,7 +103,7 @@ set_source_files_properties(
 # dispatch) live under daemon/ rather than in the brscan library, since
 # they're specific to this daemon and not part of the core scan protocol.
 add_executable(brscan-scand
-  tools/brscan-scand.cpp
+  tools/brscan-scand.mm
   tools/scan_output.cpp
   daemon/snmp_register.cpp
   daemon/button_listener.cpp
@@ -116,7 +116,7 @@ add_executable(brscan-scand
   daemon/image_transform.mm
   daemon/blank_detect.mm
   daemon/button_plan.cpp
-  daemon/handle_event.cpp
+  daemon/handle_event.mm
   daemon/sender_check.cpp
   daemon/notification_deduper.cpp
 )
@@ -327,7 +327,7 @@ if(BUILD_TESTING)
     tests/blank_detect_test.mm
     daemon/button_plan.cpp
     tests/button_plan_test.cpp
-    daemon/handle_event.cpp
+    daemon/handle_event.mm
     tests/handle_event_test.cpp
     daemon/sender_check.cpp
     tests/sender_check_test.cpp

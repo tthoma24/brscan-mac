@@ -260,8 +260,16 @@ brscan::Status WriteContainers(const std::vector<brscan::ScanResult>& pages,
       images.reserve(static_cast<size_t>(last - first));
       bool decoded = true;
       for (int i = first; i < last; ++i) {
-        CGImageRef image =
-            CreateCGImageFromScanResult(pages[static_cast<size_t>(i)]);
+        // Per-page @autoreleasepool: CreateCGImageFromScanResult's kRgb (JPEG)
+        // path decodes through an autoreleased NSData (daemon/action_ocr.mm),
+        // and the daemon has no ambient pool. Draining each page's decode
+        // buffer here keeps a many-page color PDF from accumulating them all
+        // until the write finishes. The CGImageRef is manually retained, so it
+        // survives the drain and is released after the write below.
+        CGImageRef image = nullptr;
+        @autoreleasepool {
+          image = CreateCGImageFromScanResult(pages[static_cast<size_t>(i)]);
+        }
         if (image == nullptr) {
           decoded = false;
           break;
@@ -320,7 +328,13 @@ brscan::Status WriteRecognizedTextOutput(
   images.reserve(pages.size());
   bool decoded = true;
   for (const brscan::ScanResult& page : pages) {
-    CGImageRef image = CreateCGImageFromScanResult(page);
+    // Per-page @autoreleasepool: see WriteContainers' decode loop -- drains
+    // each page's autoreleased JPEG decode buffer immediately, while the
+    // manually-retained CGImageRef survives to be released after the write.
+    CGImageRef image = nullptr;
+    @autoreleasepool {
+      image = CreateCGImageFromScanResult(page);
+    }
     if (image == nullptr) {
       decoded = false;
       break;
