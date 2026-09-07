@@ -121,10 +121,21 @@ public struct DaemonConfig: Equatable {
     /// FILE/IMAGE/EMAIL routes leave it at its default and never emit it.
     /// Unrecognized/missing -> default (`pdf`, `OutputFormat::kPdf`).
     public var ocrFormat: String
+    /// `<dest>.high_speed` -- `on | off`. The daemon's high-speed ADF mode
+    /// (`daemon/config.cpp`'s `ParseBoolString`/`HighSpeedForDestPrefix`,
+    /// Task 1e.16): the feeder scans landscape at full speed and the daemon
+    /// rotates each page back to portrait. A plain boolean, not a token set.
+    /// Unparsable/missing -> default (`false`, i.e. `off`).
+    public var highSpeed: Bool
+    /// `<dest>.skip_blank` -- `on | off`. Drops blank pages from ADF output
+    /// (Task 1e.18). A plain boolean, not a token set. Unparsable/missing ->
+    /// default (`false`, i.e. `off`).
+    public var skipBlank: Bool
 
     public init(
       mode: String, source: String, dpi: Int, format: String, tiffCompression: String, separation: Separation,
-      paper: String, ocrFormat: String = OptionSets.ocrFormat[0]  // "pdf"
+      paper: String, ocrFormat: String = OptionSets.ocrFormat[0],  // "pdf"
+      highSpeed: Bool = false, skipBlank: Bool = false
     ) {
       self.mode = mode
       self.source = source
@@ -134,6 +145,8 @@ public struct DaemonConfig: Equatable {
       self.separation = separation
       self.paper = paper
       self.ocrFormat = ocrFormat
+      self.highSpeed = highSpeed
+      self.skipBlank = skipBlank
     }
   }
 
@@ -308,6 +321,15 @@ extension DaemonConfig.Route {
     {
       route.ocrFormat = raw
     }
+    // <dest>.high_speed / <dest>.skip_blank: plain on/off booleans. An
+    // unparsable value, like a missing key, keeps the default (false),
+    // mirroring the daemon's ParseBoolString "leave unchanged on failure".
+    if let raw = doc.value(for: "\(dest).high_speed"), let parsed = BoolToken.parse(raw) {
+      route.highSpeed = parsed
+    }
+    if let raw = doc.value(for: "\(dest).skip_blank"), let parsed = BoolToken.parse(raw) {
+      route.skipBlank = parsed
+    }
 
     return route
   }
@@ -325,5 +347,26 @@ extension DaemonConfig.Route {
     if dest == "ocr" {
       doc.setValue(ocrFormat, for: "\(dest).ocr_format")
     }
+    doc.setValue(BoolToken.serialize(highSpeed), for: "\(dest).high_speed")
+    doc.setValue(BoolToken.serialize(skipBlank), for: "\(dest).skip_blank")
+  }
+}
+
+/// The `on`/`off` boolean spelling `daemon/config.cpp` uses for its plain
+/// boolean keys (`<dest>.high_speed`, `<dest>.skip_blank`). `parse` mirrors
+/// the daemon's `ParseBoolString` -- tolerant of the same synonyms
+/// (`on/true/yes/1` and `off/false/no/0`, case-insensitively) -- and
+/// `serialize` emits the canonical `on`/`off` the daemon itself writes.
+enum BoolToken {
+  static func parse(_ raw: String) -> Bool? {
+    switch raw.trimmingCharacters(in: .whitespaces).lowercased() {
+    case "on", "true", "yes", "1": return true
+    case "off", "false", "no", "0": return false
+    default: return nil
+    }
+  }
+
+  static func serialize(_ value: Bool) -> String {
+    value ? "on" : "off"
   }
 }

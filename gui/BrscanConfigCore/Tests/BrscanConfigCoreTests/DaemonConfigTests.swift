@@ -236,6 +236,61 @@ final class DaemonConfigTests: XCTestCase {
     XCTAssertEqual(config.file.paper, "")
   }
 
+  // MARK: Boolean toggles: high_speed / skip_blank (Tasks 1e.16/1e.18)
+
+  /// `<dest>.high_speed = on` parses to `highSpeed == true`; a missing key
+  /// takes the default (`false`). Covered on both a plain route (file) and
+  /// the OCR route.
+  func testHighSpeedOnParsesTrueAndMissingDefaultsFalse() {
+    let doc = ConfigDocument(text: "file.high_speed = on\nocr.high_speed = on\n")
+    let config = DaemonConfig.from(doc)
+    XCTAssertTrue(config.file.highSpeed)
+    XCTAssertTrue(config.ocr.highSpeed)
+    // image/email keys absent -> default false.
+    XCTAssertFalse(config.image.highSpeed)
+    XCTAssertFalse(config.email.highSpeed)
+  }
+
+  /// `<dest>.skip_blank = on` parses to `skipBlank == true`; a missing key
+  /// takes the default (`false`). Covered on both a plain route (file) and
+  /// the OCR route.
+  func testSkipBlankOnParsesTrueAndMissingDefaultsFalse() {
+    let doc = ConfigDocument(text: "file.skip_blank = on\nocr.skip_blank = on\n")
+    let config = DaemonConfig.from(doc)
+    XCTAssertTrue(config.file.skipBlank)
+    XCTAssertTrue(config.ocr.skipBlank)
+    XCTAssertFalse(config.image.skipBlank)
+    XCTAssertFalse(config.email.skipBlank)
+  }
+
+  /// Setting `highSpeed`/`skipBlank` true on a route writes the canonical
+  /// `on` value the daemon emits; false writes `off`. Checked on the file
+  /// and OCR routes.
+  func testApplyWritesOnOffForToggles() {
+    var doc = ConfigDocument()
+    var config = DaemonConfig.default
+    config.file.highSpeed = true
+    config.file.skipBlank = false
+    config.ocr.highSpeed = false
+    config.ocr.skipBlank = true
+    config.apply(to: &doc)
+
+    XCTAssertEqual(doc.value(for: "file.high_speed"), "on")
+    XCTAssertEqual(doc.value(for: "file.skip_blank"), "off")
+    XCTAssertEqual(doc.value(for: "ocr.high_speed"), "off")
+    XCTAssertEqual(doc.value(for: "ocr.skip_blank"), "on")
+  }
+
+  /// An unparsable boolean value, like a missing key, keeps the default
+  /// (`false`) -- mirroring the daemon's `ParseBoolString` leaving the field
+  /// unchanged on failure.
+  func testMalformedToggleFallsBackToDefault() {
+    let doc = ConfigDocument(text: "file.high_speed = maybe\nfile.skip_blank = sometimes\n")
+    let config = DaemonConfig.from(doc)
+    XCTAssertFalse(config.file.highSpeed)
+    XCTAssertFalse(config.file.skipBlank)
+  }
+
   // MARK: Defaults sanity
 
   func testDefaultRouteMatchesDaemonDefaults() {
@@ -247,6 +302,8 @@ final class DaemonConfigTests: XCTestCase {
     XCTAssertEqual(route.tiffCompression, "lzw")
     XCTAssertEqual(route.separation, .combine)
     XCTAssertEqual(route.paper, "")
+    XCTAssertFalse(route.highSpeed)
+    XCTAssertFalse(route.skipBlank)
   }
 
   func testDefaultGeneralHasNoPrinterHostOrDisplayName() {

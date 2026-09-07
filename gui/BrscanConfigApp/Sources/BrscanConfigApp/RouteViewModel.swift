@@ -45,6 +45,14 @@ public final class RouteViewModel: ObservableObject {
   @Published public var tiffCompression: String
   @Published public var paper: String
 
+  /// `<dest>.high_speed` -- high-speed ADF mode: the feeder scans landscape
+  /// at full speed and the daemon rotates each page back to portrait (Task
+  /// 1e.16). A plain on/off toggle.
+  @Published public var highSpeed: Bool
+  /// `<dest>.skip_blank` -- drop blank pages from ADF output (Task 1e.18). A
+  /// plain on/off toggle.
+  @Published public var skipBlank: Bool
+
   /// The separation mode and its `N`, kept as two separate published
   /// fields (rather than one `@Published var separation: Separation`) so
   /// the view can bind a mode picker and an `N` stepper independently.
@@ -61,6 +69,8 @@ public final class RouteViewModel: ObservableObject {
     self.format = route.format
     self.tiffCompression = route.tiffCompression
     self.paper = route.paper
+    self.highSpeed = route.highSpeed
+    self.skipBlank = route.skipBlank
 
     switch route.separation {
     case .combine:
@@ -131,7 +141,9 @@ public final class RouteViewModel: ObservableObject {
       format: format,
       tiffCompression: tiffCompression,
       separation: separation,
-      paper: paper)
+      paper: paper,
+      highSpeed: highSpeed,
+      skipBlank: skipBlank)
   }
 
   // MARK: Reseeding
@@ -147,6 +159,8 @@ public final class RouteViewModel: ObservableObject {
     format = route.format
     tiffCompression = route.tiffCompression
     paper = route.paper
+    highSpeed = route.highSpeed
+    skipBlank = route.skipBlank
 
     switch route.separation {
     case .combine:

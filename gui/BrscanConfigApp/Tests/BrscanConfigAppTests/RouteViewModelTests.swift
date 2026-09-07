@@ -117,6 +117,49 @@ final class RouteViewModelTests: XCTestCase {
     XCTAssertEqual(viewModel.route, DaemonConfig.Route.default)
   }
 
+  // MARK: high_speed / skip_blank toggles (Tasks 1e.16/1e.18)
+
+  /// The toggles default off and, once flipped, are reflected in the
+  /// produced route (which `DaemonConfig.Route.apply` serializes to
+  /// `<dest>.high_speed = on` / `<dest>.skip_blank = on`).
+  func testTogglesDefaultOffAndBindIntoRoute() {
+    let viewModel = RouteViewModel()
+    XCTAssertFalse(viewModel.highSpeed)
+    XCTAssertFalse(viewModel.skipBlank)
+    XCTAssertFalse(viewModel.route.highSpeed)
+    XCTAssertFalse(viewModel.route.skipBlank)
+
+    viewModel.highSpeed = true
+    viewModel.skipBlank = true
+    XCTAssertTrue(viewModel.route.highSpeed)
+    XCTAssertTrue(viewModel.route.skipBlank)
+  }
+
+  /// Seeding from a route with the toggles set populates the fields, and
+  /// producing a route round-trips them.
+  func testSeedingTogglesRoundTrips() {
+    var seed = DaemonConfig.Route.default
+    seed.highSpeed = true
+    seed.skipBlank = true
+
+    let viewModel = RouteViewModel(route: seed)
+    XCTAssertTrue(viewModel.highSpeed)
+    XCTAssertTrue(viewModel.skipBlank)
+    XCTAssertEqual(viewModel.route, seed)
+  }
+
+  /// `load` reseeds the toggles in place, same as `init(route:)`.
+  func testLoadReseedsToggles() {
+    let viewModel = RouteViewModel()
+    var reseed = DaemonConfig.Route.default
+    reseed.highSpeed = true
+    reseed.skipBlank = true
+
+    viewModel.load(reseed)
+    XCTAssertTrue(viewModel.highSpeed)
+    XCTAssertTrue(viewModel.skipBlank)
+  }
+
   // MARK: Separation editing
 
   func testSwitchingToImageModeProducesImageSeparation() {
