@@ -26,6 +26,37 @@ TEST(Session, RejectsUnknownGreeting) {
   EXPECT_EQ(s.Open(), brscan::Status::kProtocolError);
 }
 
+// TCP may split the greeting across segments, so the first Read() can return
+// fewer than the 7 bytes the "+OK 200" prefix needs. Open() must accumulate
+// across reads rather than false-failing a healthy device on a short first
+// segment. Here the greeting arrives in two chunks, the first only 4 bytes.
+TEST(Session, AccumulatesFragmentedReadyGreeting) {
+  brscan::FakeTransport t;
+  t.QueueRead("+OK ");     // Short first segment (< 7 bytes).
+  t.QueueRead("200\r\n");  // Remainder, completing the line.
+  brscan::Session s(&t);
+  EXPECT_EQ(s.Open(), brscan::Status::kOk);
+}
+
+// The same fragmentation for the busy greeting, split mid-prefix.
+TEST(Session, AccumulatesFragmentedBusyGreeting) {
+  brscan::FakeTransport t;
+  t.QueueRead("-NG");
+  t.QueueRead(" 401\r\n");
+  brscan::Session s(&t);
+  EXPECT_EQ(s.Open(), brscan::Status::kBusy);
+}
+
+// A device that goes quiet after a short partial greeting (no '\n', fewer
+// than 7 bytes) times out rather than being misread as a valid greeting.
+TEST(Session, TimesOutOnPartialGreetingThenSilence) {
+  brscan::FakeTransport t;
+  t.QueueRead("+OK");     // Partial prefix, then no more data.
+  t.QueueTimeout();       // Stream goes quiet.
+  brscan::Session s(&t);
+  EXPECT_EQ(s.Open(), brscan::Status::kTimeout);
+}
+
 // Bounded-connect regression test. 192.0.2.1 is RFC 5737 TEST-NET-1,
 // reserved for documentation: it is a routable-looking address that no host
 // answers, so packets to it are silently dropped rather than promptly

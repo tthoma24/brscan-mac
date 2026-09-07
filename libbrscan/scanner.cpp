@@ -467,23 +467,32 @@ Status ReadBlockHeader(Framer* framer, int timeout_ms, BlockHeader* header) {
 // data where either the next block header or the end-of-page marker begins:
 //   - block header (12-byte shape): <type> 07 00 <pidx> 00 84 .. .. 00 00,
 //     type in {0x64, 0x40, 0x42};
+//   - block header (legacy 13-byte shape): 00 <type> 07 00 <pidx> 00 84 .. ..
+//     00 00 -- the same anchors with the constant leading 0x00 older firmware
+//     prepends (see DetectHeaderLength);
 //   - end-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00.
-// Both shapes are matched on all of their fixed bytes -- the 07/84 anchors
-// AND the constant zero bytes -- not just a two- or three-byte anchor.
-// That precision matters: a looser 0x82/0x07/../0x84 marker test (three
-// bytes) false-matches ordinary JPEG entropy about once every 16 MB, and
-// real ADF duplex page 1 (~3.7 MB) hit exactly such a false positive
-// mid-payload, truncating the page. The full fixed-byte match survived
-// both the ~10 MB simplex and duplex captures with no false positive.
+// Every shape is matched on all of its fixed bytes -- the 07/84 anchors AND
+// the constant zero bytes -- not just a two- or three-byte anchor. That
+// precision matters: a looser 0x82/0x07/../0x84 marker test (three bytes)
+// false-matches ordinary JPEG entropy about once every 16 MB, and real ADF
+// duplex page 1 (~3.7 MB) hit exactly such a false positive mid-payload,
+// truncating the page. The full fixed-byte match survived both the ~10 MB
+// simplex and duplex captures with no false positive.
+//
+// Matching the 13-byte shape too is what keeps a short sentinel (0xfff4)
+// chunk's boundary from being found one byte late on 13-byte firmware: its
+// next header leads with 0x00, so a 12-byte-only scan would anchor on the
+// following 0x64 and splice that stray 0x00 into the reassembled JPEG. (The
+// end-of-page marker has no 13-byte variant -- RunColorScan only ever reads
+// the 10-byte 0x82-led shape.)
 //
 // On a match, sets *pos to the boundary offset (the sentinel chunk's true
 // data length) and *is_end_of_page to which pattern matched, and returns
 // true. Returns false when no boundary appears within the scanned range --
 // a genuinely full chunk that still continues. The scan stops at
-// kMaxChunkBytes so a legacy 13-byte header (whose leading 0x00 sits
-// exactly at offset 0xfff4 after a full chunk, one byte before its 0x64
-// anchor) is left to the "no boundary -> read exactly kMaxChunkBytes" path
-// rather than being mismatched one byte late.
+// kMaxChunkBytes so a full chunk that is followed by more data (rather than a
+// boundary) is read exactly, via the "no boundary -> read kMaxChunkBytes"
+// path.
 bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
                        bool* is_end_of_page) {
   const size_t limit =
@@ -510,6 +519,22 @@ bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
         window[p + 1] == 0x07 && window[p + 2] == 0x00 &&
         window[p + 4] == 0x00 && window[p + 5] == 0x84 &&
         window[p + 8] == 0x00 && window[p + 9] == 0x00) {
+      *pos = p;
+      *is_end_of_page = false;
+      return true;
+    }
+    // Next block header (legacy 13-byte shape): 00 <type> 07 00 <pidx> 00 84
+    // .. .. 00 00. Same anchors and zero bytes as the 12-byte shape, shifted
+    // one byte later by the leading 0x00. Anchoring on this 0x00 (not the
+    // 0x64 one byte on) is what puts the boundary at the chunk's true end on
+    // 13-byte firmware. Guarded separately because it reads one byte past the
+    // 10-byte window the checks above need.
+    if (p + 11 <= window.size() && window[p] == 0x00 &&
+        (window[p + 1] == 0x64 || window[p + 1] == 0x40 ||
+         window[p + 1] == 0x42) &&
+        window[p + 2] == 0x07 && window[p + 3] == 0x00 &&
+        window[p + 5] == 0x00 && window[p + 6] == 0x84 &&
+        window[p + 9] == 0x00 && window[p + 10] == 0x00) {
       *pos = p;
       *is_end_of_page = false;
       return true;
@@ -639,8 +664,26 @@ Status ReadOneChunkBody(Framer* framer, const BlockHeader& header,
 // the header parser, which would misframe it.
 constexpr int kBlockTypeColor = 0x64;
 
+// Ceiling on the bytes a single color page may accumulate before its
+// end-of-page marker arrives (L4 hardening). A device that streams chunk
+// headers indefinitely but never sends the marker would otherwise grow a
+// page's buffer without bound, since each chunk resets the inter-read
+// timeout. A baseline JPEG of the granted area is never meaningfully larger
+// than its raw RGB size (width * height * 3); pad that by a generous factor
+// for header/entropy/framing overhead. When the area is unknown (never set by
+// the offer fallback), fall back to a fixed generous cap so the bound still
+// holds.
+size_t ColorPageByteCap(const Area& area) {
+  constexpr size_t kSlack = 4;
+  constexpr size_t kUnknownAreaCap = 256u * 1024 * 1024;  // 256 MiB.
+  const long w = area.x1 - area.x0;
+  const long h = area.y1 - area.y0;
+  if (w <= 0 || h <= 0) return kUnknownAreaCap;
+  return static_cast<size_t>(w) * static_cast<size_t>(h) * 3 * kSlack;
+}
+
 Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
-                    std::vector<ScanResult>* out) {
+                    size_t max_page_bytes, std::vector<ScanResult>* out) {
   std::map<int, std::vector<uint8_t>> in_progress;  // page index -> JPEG bytes.
   // Per-page suspending decoders, live only when streaming. A duplex feed
   // interleaves two pages' chunks, so each page index keeps its own decoder
@@ -736,6 +779,11 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
     const size_t before = jpeg.size();
     s = ReadOneChunkBody(framer, header, timeout_ms, &jpeg);
     if (s != Status::kOk) return s;
+    // Guard against a device that streams chunks forever without ever sending
+    // this page's end-of-page marker (which is what frees the buffer): cap the
+    // accumulation and treat an overrun as a protocol error rather than
+    // growing memory without bound.
+    if (jpeg.size() > max_page_bytes) return Status::kProtocolError;
 
     if (on_band) {
       // Feed only this chunk's fresh bytes into the page's decoder, emitting
@@ -945,7 +993,8 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
   // one-whole-page-at-a-time sequential loop below. RunColorScan handles
   // simplex, duplex, and single-page flatbed alike.
   if (exec_params.mode == ScanMode::kColor) {
-    return RunColorScan(framer, timeout_ms, on_band, out);
+    return RunColorScan(framer, timeout_ms, on_band,
+                        ColorPageByteCap(exec_params.area), out);
   }
 
   // TODO(duplex gray/RLENGTH): the gray (GRAY64/C=NONE) and RLENGTH

@@ -1,6 +1,8 @@
 #include "response.h"
 
 #include <cctype>
+#include <cerrno>
+#include <climits>
 #include <cstdlib>
 
 namespace brscan {
@@ -33,9 +35,15 @@ bool ParseUnsignedField(const std::string& field, int* out) {
   for (char c : field) {
     if (!std::isdigit(static_cast<unsigned char>(c))) return false;
   }
+  errno = 0;
   char* end = nullptr;
   const long value = std::strtol(field.c_str(), &end, 10);
   if (end != field.c_str() + field.size()) return false;
+  // A digit-only field can still be numerically huge (e.g. a 20-digit run):
+  // strtol then clamps to LONG_MAX with errno == ERANGE, and even an in-range
+  // long can exceed INT_MAX. Either would truncate to garbage on the cast, so
+  // reject both rather than store a wrong value.
+  if (errno == ERANGE || value > INT_MAX) return false;
   *out = static_cast<int>(value);
   return true;
 }
