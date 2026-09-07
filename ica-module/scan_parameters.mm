@@ -167,15 +167,19 @@ NSArray* ResolutionArray() {
 // Builds the ICAP_* capability set for one functional unit, flat (each key maps
 // to a TWAIN-style container). Capabilities are scoped per unit because the
 // flatbed and feeder differ: the flatbed exposes the platten
-// (ICScannerDocumentTypeDefault) and the flatbed-only sizes and has the larger
-// maximum extent, while the feeder omits the platten and the flatbed-only sizes.
+// (ICScannerDocumentTypeDefault) plus the flatbed-only sizes (A6, 3R, 5R,
+// business card, 4x6 photo) and has the larger maximum extent, while the feeder
+// omits the flatbed-only sizes and reads Default as Auto / mixed-size.
 // Only the selected unit's set is advertised this task (see
 // BuildScannerParameters); the `feeder` parameter keeps the per-unit geometry
 // correct and lets a follow-up switch the flat set when the host reselects.
 NSDictionary* BuildUnit(bool feeder) {
   NSMutableArray* supportedSizes = [NSMutableArray array];
-  // The platten "default" size is meaningful only for the flatbed.
-  if (!feeder) [supportedSizes addObject:Int(kDocumentTypeDefault)];
+  // ICScannerDocumentTypeDefault (0) heads both units: it is the platten size for
+  // the flatbed and the Auto / mixed-size choice for the feeder (the ADF has no
+  // fixed page size, so the host lets the device auto-detect the sheet). Listing
+  // it first makes it the current/default supported size for each unit.
+  [supportedSizes addObject:Int(kDocumentTypeDefault)];
 
   int maxWidthPx = 0;
   int maxHeightPx = 0;
@@ -204,8 +208,22 @@ NSDictionary* BuildUnit(bool feeder) {
   [supportedSizes addObject:Int(kDocumentTypeJISB5)];
   [supportedSizes addObject:Int(kDocumentTypeJISB4)];
 
-  // Current/default supported size: the platten for the flatbed, else the first
-  // feeder size (US Letter). Both are guaranteed present in supportedSizes.
+  // A6 (105x148 mm) and the small photo sizes 3R (3.5x5) and 5R (5x7) are
+  // FLATBED-ONLY: each is under the 148 mm ADF minimum width, so the feeder
+  // cannot take them (the ADF is plain-paper only). Like JIS B4/B5 they carry no
+  // daemon/paper_size.cpp geometry (the host supplies the scan rectangle per
+  // document type), so their ICScannerDocumentType values are advertised
+  // directly. All three fit well inside the advertised platen extent, so the
+  // physical bounds computed above do not regress.
+  if (!feeder) {
+    [supportedSizes addObject:Int(kDocumentTypeA6)];
+    [supportedSizes addObject:Int(kDocumentType3R)];
+    [supportedSizes addObject:Int(kDocumentType5R)];
+  }
+
+  // Current/default supported size: the first entry, which is the platten Default
+  // for the flatbed and the Auto (Default) choice for the feeder. Guaranteed
+  // present (Default is added to both units above).
   const int defaultSize =
       supportedSizes.count > 0
           ? [(NSNumber*)supportedSizes.firstObject intValue]

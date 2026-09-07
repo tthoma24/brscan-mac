@@ -49,6 +49,11 @@ inline constexpr int kDocumentTypeA5 = 5;
 inline constexpr int kDocumentTypeUSLedger = 9;
 inline constexpr int kDocumentTypeUSExecutive = 10;
 inline constexpr int kDocumentTypeA3 = 11;
+// A6 = ICScannerDocumentTypeA6 = 13, documented "A6, 105.00 mm x 148.00 mm"
+// (ICScannerFunctionalUnits.h enum line 214, doc comment line 135). Flatbed only
+// -- 105 mm is under the 148 mm ADF minimum. Carries no daemon/paper_size.cpp
+// geometry (the host supplies the scan rectangle per document type).
+inline constexpr int kDocumentTypeA6 = 13;
 // JIS B4 = ICScannerDocumentTypeJISB4 = 38, documented "JIS B4, 257.00 mm x
 // 364.00 mm" (ICScannerFunctionalUnits.h enum line 239, doc comment line 160).
 inline constexpr int kDocumentTypeJISB4 = 38;
@@ -56,11 +61,23 @@ inline constexpr int kDocumentTypeJISB4 = 38;
 // Card, 90.00 mm x 55.00 mm" (ICScannerFunctionalUnits.h enum line 254). Our
 // BCARD paper token maps here (flatbed only -- under the 148 mm ADF minimum).
 inline constexpr int kDocumentTypeBusinessCard = 53;
+// 3R = ICScannerDocumentType3R = 61, documented "3R, 3.5\" x 5\", 88.90 mm x
+// 127.00 mm" (ICScannerFunctionalUnits.h enum line 257; the photo region is
+// E=60, 3R=61, 4R=62, 5R=63). A 3.5x5 photo; flatbed only -- 88.9 mm is under
+// the 148 mm ADF minimum. Carries no daemon/paper_size.cpp geometry (the host
+// supplies the scan rectangle per document type).
+inline constexpr int kDocumentType3R = 61;
 // 4R = ICScannerDocumentType4R = 62, documented "4R, 4\" x 6\", 101.60 mm x
 // 152.40 mm" (ICScannerFunctionalUnits.h enum line 258; the 4R/5R photo region
 // is E=60, 3R=61, 4R=62, 5R=63). Our PHOTO (4x6) paper token maps here (flatbed
 // only -- 101.6 mm is under the 148 mm ADF minimum).
 inline constexpr int kDocumentType4R = 62;
+// 5R = ICScannerDocumentType5R = 63, documented "5R, 5\" x 7\", 127.00 mm x
+// 177.80 mm" (ICScannerFunctionalUnits.h enum line 259; same photo region). A
+// 5x7 photo; flatbed only -- 127 mm is under the 148 mm ADF minimum. Carries no
+// daemon/paper_size.cpp geometry (the host supplies the scan rectangle per
+// document type).
+inline constexpr int kDocumentType5R = 63;
 
 // Maps a daemon/paper_size.cpp paper token to its ICScannerDocumentType value,
 // or kDocumentTypeNone for tokens with no clean standard case (PHOTO, BCARD --
