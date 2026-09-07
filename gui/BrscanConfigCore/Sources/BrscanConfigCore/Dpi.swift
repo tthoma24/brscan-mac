@@ -5,9 +5,12 @@
 /// `GeneratedOptionSets.swift`'s `OptionSets.dpiDefault` for the documented
 /// default (300).
 public enum Dpi {
-  /// Whether `value` is a dpi the daemon would accept: strictly positive.
+  /// Whether `value` is a dpi the daemon would accept: strictly positive and
+  /// within the daemon's 32-bit `std::stoi` range. A value above `Int32.max`
+  /// throws `out_of_range` in `ParsePositiveInt` and gets dropped, so it's
+  /// invalid here too (see `PositiveInt`).
   public static func isValid(_ value: Int) -> Bool {
-    value > 0
+    value > 0 && value <= Int(Int32.max)
   }
 
   /// Parses a `<dest>.dpi` config value the way the daemon does, returning

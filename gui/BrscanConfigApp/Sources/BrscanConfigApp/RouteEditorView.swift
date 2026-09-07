@@ -35,14 +35,7 @@ struct RouteEditorView: View {
 
         Toggle("High-speed ADF (rotate to portrait)", isOn: $viewModel.highSpeed)
 
-        VStack(alignment: .leading, spacing: 4) {
-          Stepper("Resolution: \(viewModel.dpi) dpi", value: $viewModel.dpi, in: 1...9999)
-          if !viewModel.isDpiValid {
-            Text("Resolution must be a positive number.")
-              .font(.caption)
-              .foregroundStyle(.red)
-          }
-        }
+        Stepper("Resolution: \(viewModel.dpi) dpi", value: $viewModel.dpi, in: 1...9999)
 
         Picker("Paper", selection: $viewModel.paper) {
           Text("Unspecified").tag("")
@@ -101,18 +94,11 @@ struct RouteEditorView: View {
         .disabled(!viewModel.isSeparationEditable)
 
         if viewModel.separationMode != .combine {
-          VStack(alignment: .leading, spacing: 4) {
-            Stepper(
-              "Every \(viewModel.separationCount) \(viewModel.separationMode == .image ? "images" : "pages")",
-              value: $viewModel.separationCount, in: 1...999
-            )
-            .disabled(!viewModel.isSeparationEditable)
-            if !viewModel.isSeparationCountValid {
-              Text("Count must be a positive number.")
-                .font(.caption)
-                .foregroundStyle(.red)
-            }
-          }
+          Stepper(
+            "Every \(viewModel.separationCount) \(viewModel.separationMode == .image ? "images" : "pages")",
+            value: $viewModel.separationCount, in: 1...999
+          )
+          .disabled(!viewModel.isSeparationEditable)
         }
 
         if !viewModel.isSeparationEditable {
