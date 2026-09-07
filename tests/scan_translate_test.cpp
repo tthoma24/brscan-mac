@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include "brscan/types.h"
+#include "paper_size.h"  // Read-only cross-check of the centered ADF x0.
 
 namespace brscan::ica {
 namespace {
@@ -162,6 +163,123 @@ TEST(TranslateScanParamsTest, DegenerateAreaMeansFull) {
   EXPECT_EQ(p.area.y0, 0);
   EXPECT_EQ(p.area.x1, 0);
   EXPECT_EQ(p.area.y1, 0);
+}
+
+// A flatbed request keeps the host's 0-based rectangle unchanged (the flatbed
+// corner-registers; only the ADF is re-centered). This guards the "flatbed
+// path unchanged" invariant against the ADF-centering added in this task.
+TEST(TranslateScanParamsTest, FlatbedAreaNotRecentered) {
+  ScanRequest r;
+  r.has_functional_unit = true;
+  r.functional_unit = 0;  // Flatbed.
+  r.has_area = true;
+  r.area_x0 = 0;
+  r.area_y0 = 0;
+  r.area_x1 = 2550;  // Letter width @300, 0-based.
+  r.area_y1 = 3300;
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.source, Source::kFlatbed);
+  EXPECT_EQ(p.area.x0, 0);
+  EXPECT_EQ(p.area.x1, 2550);
+  EXPECT_EQ(p.area.y0, 0);
+  EXPECT_EQ(p.area.y1, 3300);
+}
+
+// An ADF request re-centers the requested width horizontally in the sensor,
+// preserving the width and leaving y0/y1 alone. Letter width 2512 @300 centers
+// at x0 = (3472 - 2512) / 2 = 480 (vs the flatbed's 0), so the blank left margin
+// and right-edge cutoff of the un-centered 0-based rectangle are gone.
+TEST(TranslateScanParamsTest, AdfAreaIsCenteredInSensor) {
+  ScanRequest r;
+  r.has_functional_unit = true;
+  r.functional_unit = 3;  // Document feeder.
+  r.has_resolution = true;
+  r.resolution = 300;
+  r.has_area = true;
+  r.area_x0 = 0;
+  r.area_y0 = 0;
+  r.area_x1 = 2512;  // Letter ADF width @300.
+  r.area_y1 = 3253;
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.source, Source::kAdf);
+  EXPECT_EQ(p.area.x0, 480);
+  EXPECT_EQ(p.area.x1, 480 + 2512);  // Width preserved.
+  EXPECT_EQ(p.area.y0, 0);           // Vertical bounds untouched.
+  EXPECT_EQ(p.area.y1, 3253);
+}
+
+// A non-zero requested offset does not survive ADF centering: the window is
+// re-anchored from the sensor center, not shifted by the host's offset.
+TEST(TranslateScanParamsTest, AdfCenteringIgnoresRequestedOffset) {
+  ScanRequest r;
+  r.has_functional_unit = true;
+  r.functional_unit = 3;
+  r.has_resolution = true;
+  r.resolution = 300;
+  r.has_area = true;
+  r.area_x0 = 999;  // Arbitrary host offset -- discarded by centering.
+  r.area_y0 = 12;
+  r.area_x1 = 999 + 2512;
+  r.area_y1 = 12 + 3253;
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.area.x0, 480);
+  EXPECT_EQ(p.area.x1, 480 + 2512);
+  EXPECT_EQ(p.area.y0, 12);  // y offset preserved.
+  EXPECT_EQ(p.area.y1, 12 + 3253);
+}
+
+// The full-area default ({0,0,0,0}) is never centered -- it means "full offered
+// area", not an explicit zero-width window.
+TEST(TranslateScanParamsTest, AdfFullAreaNotCentered) {
+  ScanRequest r;
+  r.has_functional_unit = true;
+  r.functional_unit = 3;  // Feeder, but no explicit area.
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.source, Source::kAdf);
+  EXPECT_EQ(p.area.x0, 0);
+  EXPECT_EQ(p.area.x1, 0);
+  EXPECT_EQ(p.area.y0, 0);
+  EXPECT_EQ(p.area.y1, 0);
+}
+
+// ---------------------------------------------------------------------------
+// ADF centering math (AdfSensorWidthAtDpi / CenteredAdfX0).
+// ---------------------------------------------------------------------------
+
+TEST(AdfCenteringTest, SensorWidthScalesWithDpi) {
+  EXPECT_EQ(AdfSensorWidthAtDpi(300), kAdfSensorWidthAt300);  // 3472.
+  EXPECT_EQ(AdfSensorWidthAtDpi(600), 6944);                  // 3472 * 2.
+  EXPECT_EQ(AdfSensorWidthAtDpi(150), 1736);                  // 3472 / 2.
+  EXPECT_EQ(AdfSensorWidthAtDpi(0), 0);                       // Guard.
+}
+
+TEST(AdfCenteringTest, CentersNarrowWindow) {
+  // (3472 - 2512) / 2 = 480.
+  EXPECT_EQ(CenteredAdfX0(3472, 2512), 480);
+}
+
+TEST(AdfCenteringTest, ClampsWhenWidthMeetsOrExceedsSensor) {
+  EXPECT_EQ(CenteredAdfX0(3472, 3472), 0);  // Exactly fills the sensor.
+  EXPECT_EQ(CenteredAdfX0(3472, 4000), 0);  // Wider than the sensor -> clamp.
+}
+
+// Cross-check the centering against daemon/paper_size.cpp's captured ADF areas:
+// centering a page's requested width (captured x1 - x0) in the sensor lands
+// within a few px of the captured (device-registered) x0 for every ADF token.
+// This is the read-only ground-truth check the brief calls for.
+TEST(AdfCenteringTest, MatchesCapturedAreaForPaper) {
+  constexpr int kDpi = 300;
+  constexpr int kTolerance = 3;  // Brother's per-dpi rounding drift.
+  for (const char* token : {"LETTER", "LEGAL", "A4", "LEDGER", "A3"}) {
+    const std::optional<brscan::Area> captured =
+        brscan::scand::AreaForPaper(token, kDpi);
+    ASSERT_TRUE(captured.has_value()) << token;
+    const int requested_width = captured->x1 - captured->x0;
+    const int centered_x0 =
+        CenteredAdfX0(AdfSensorWidthAtDpi(kDpi), requested_width);
+    EXPECT_NEAR(centered_x0, captured->x0, kTolerance)
+        << token << " requested_width=" << requested_width;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -139,6 +139,30 @@ Read the scan area in the request's own `ICAP_UNITS` and convert to pixels at
 the chosen DPI (inches × dpi; cm × dpi / 2.54; pixels pass through). The host
 switches its unit to whatever the module advertises for the platen.
 
+### Scan-area registration (ADF centering)
+
+The host always sends a **0-based** rectangle (`offsetX = 0`), e.g. Letter at
+300 dpi comes in as `(0, 0, 2550, 3300)`. Where that rectangle registers on the
+device differs by source:
+
+- **Flatbed** — **corner-registers** at `x0 = 0`. The 0-based rectangle is
+  correct as sent, so the module passes it straight through.
+- **ADF (document feeder)** — **center-registers** the page across the feeder's
+  full sensor width (`xmax = 3472 px @300 dpi`, the ADF width baked into
+  `daemon/paper_size.cpp`'s `kPaperTable`; A3 fills it, `0 … 3472`). The device
+  scans exactly the horizontal rectangle it is handed *within that sensor*, so a
+  0-based rectangle scans `0 … width`: the left `(3472 − width)/2` px is blank
+  sensor margin and the page's right edge is cut off.
+
+So for an ADF scan the module re-centers the requested width horizontally before
+building `brscan::Params` (`scan_translate.cpp::TranslateScanParams`, via
+`CenteredAdfX0`): `sensor = 3472 × dpi / 300`, `x0 = max(0, (sensor − width)/2)`,
+`x1 = x0 + width` (clamped to `x0 = 0` when `width ≥ sensor`); `y0`/`y1` are left
+alone. This reproduces the captured center-registration offsets (Letter → 480 ≈
+478, A4 → 512 ≈ 513, Legal → 480 ≈ 478, Ledger → 104 ≈ 103, A3 → 0). The
+full-area default (`{0,0,0,0}`, "full offered area") is left untouched, and the
+flatbed path is unchanged.
+
 ### Source selection (flatbed vs feeder)
 
 The host does **not** always echo `selectedFunctionalUnitType` in the scan

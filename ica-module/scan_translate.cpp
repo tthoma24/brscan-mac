@@ -151,7 +151,23 @@ constexpr int kPixelTypeRGB = 2;
 
 int Clamp(int v, int lo, int hi) { return std::max(lo, std::min(v, hi)); }
 
+// ADF full sensor width scaled to `dpi`, per PLAN-2-DESIGN.md's rounding
+// contract (dpi/300, lround), matching daemon/paper_size.cpp.
+constexpr int kAdfCaptureDpi = 300;
+
 }  // namespace
+
+int AdfSensorWidthAtDpi(int dpi) {
+  if (dpi <= 0) return 0;
+  return static_cast<int>(std::lround(
+      kAdfSensorWidthAt300 * (static_cast<double>(dpi) / kAdfCaptureDpi)));
+}
+
+int CenteredAdfX0(int sensor_width_at_dpi, int requested_width) {
+  // The window already spans (or overflows) the sensor -> corner-register.
+  if (requested_width >= sensor_width_at_dpi) return 0;
+  return std::max(0, (sensor_width_at_dpi - requested_width) / 2);
+}
 
 Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
   Params p;  // brscan defaults: kColor, kFlatbed, 300 dpi, 50/50, full area.
@@ -197,7 +213,18 @@ Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
 
   // Scan area: an explicit positive rectangle in pixels, else full area.
   if (req.has_area && req.area_x1 > req.area_x0 && req.area_y1 > req.area_y0) {
-    p.area = Area{req.area_x0, req.area_y0, req.area_x1, req.area_y1};
+    int x0 = req.area_x0;
+    int x1 = req.area_x1;
+    // The ADF center-registers pages within its sensor width, but the host
+    // sends a 0-based rectangle. Re-center the requested width horizontally so
+    // the page is framed correctly (no blank left margin / right-edge cutoff).
+    // The flatbed corner-registers, so its rectangle is left exactly as sent.
+    if (feeder) {
+      const int width = x1 - x0;
+      x0 = CenteredAdfX0(AdfSensorWidthAtDpi(dpi), width);
+      x1 = x0 + width;
+    }
+    p.area = Area{x0, req.area_y0, x1, req.area_y1};
   } else {
     p.area = Area{0, 0, 0, 0};  // Full offered area (RunScan honours this).
   }

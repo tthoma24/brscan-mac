@@ -259,11 +259,38 @@ inline constexpr int kDefaultDpi = 300;
 // Default brightness / contrast (mid-scale) when the host supplies none.
 inline constexpr int kDefaultBrightnessContrast = 50;
 
+// The Brother ADF's full sensor width in pixels at 300 dpi. The feeder
+// CENTER-registers a page across this width (unlike the flatbed, which
+// corner-registers at x0=0), so the device scans exactly the horizontal
+// rectangle we hand it within this sensor. This is the ADF xmax documented in
+// daemon/paper_size.cpp's kPaperTable (the A3 ADF area fills 0..3472). The host
+// sends a 0-based rectangle, so for an ADF scan the requested width must be
+// re-centered here or the left margin comes back blank and the page's right
+// edge is cut off.
+inline constexpr int kAdfSensorWidthAt300 = 3472;
+
+// Scales the ADF sensor's full pixel width (kAdfSensorWidthAt300) to `dpi`,
+// rounding to the nearest pixel (matching AreaForPaper's dpi/300 scaling). `dpi`
+// must be > 0. Pure.
+int AdfSensorWidthAtDpi(int dpi);
+
+// Left edge (x0) that horizontally centers a `requested_width` scan window
+// within `sensor_width_at_dpi` (the ADF sensor width at the scan dpi): x0 =
+// max(0, (sensor - width) / 2). If the requested width is >= the sensor width,
+// x0 is clamped to 0 (the window already spans, or overflows, the sensor). Pure;
+// used only for the ADF -- the flatbed corner-registers at x0=0 and is left
+// exactly as the host requested.
+int CenteredAdfX0(int sensor_width_at_dpi, int requested_width);
+
 // Translates `req` into a brscan::Params for a normal host-initiated RunScan.
 // button_flow stays false throughout (this is the driver flow, not the scan
 // button). Defaults per PLAN-2-DESIGN.md: 300 dpi (clamped to limits.max_dpi),
 // RGB -> ScanMode::kColor, flatbed, brightness/contrast 50, full area. Duplex is
-// forced off for the flatbed. brightness/contrast are clamped to 0..100.
+// forced off for the flatbed. brightness/contrast are clamped to 0..100. For an
+// ADF scan with an explicit requested rectangle, the scan window is
+// horizontally re-centered in the ADF sensor width (via CenteredAdfX0) because
+// the feeder center-registers pages; the flatbed and the full-area default are
+// left untouched.
 Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits);
 
 }  // namespace brscan::ica
