@@ -111,20 +111,34 @@ guaranteed 1:1 key identity): `ICAP_XRESOLUTION` → `supportedResolutions` /
 
 The size set is scoped to the selected unit (`scan_parameters.mm::BuildUnit`).
 The Brother ADF feeds 148–297 mm wide × 148–431.8 mm long (A5 up through
-A3/Ledger), so:
+A3/Ledger) and is plain-paper only, so:
 
-- **Feeder** — the full document set that fits that envelope: `USLetter (3)`,
-  `USLegal (4)`, `A4 (1)`, `USLedger (9)`, `A3 (11)`, `A5 (5)`,
-  `USExecutive (10)`, `JISB5 (2)`, `JISB4 (38)`. No platten `Default`; no
-  `4R`/`BusinessCard` (both under the 148 mm ADF minimum).
-- **Flatbed** — that set plus the platten `Default (0)`, `4R (62)` (4×6 photo,
-  from the `PHOTO` token) and `BusinessCard (53)` (from the `BCARD` token).
+- **Feeder** — `Default (0)` (Auto / mixed-size; the ADF auto-detects the sheet)
+  plus the document set that fits that envelope: `USLetter (3)`, `USLegal (4)`,
+  `A4 (1)`, `USLedger (9)`, `A3 (11)`, `A5 (5)`, `USExecutive (10)`,
+  `JISB5 (2)`, `JISB4 (38)`. No `A6`, photos, or `BusinessCard` — all are under
+  the 148 mm ADF minimum width.
+- **Flatbed** — that document set (with `Default (0)` = platten) plus the
+  flatbed-only sizes: `A6 (13)`, `3R (61)` (3.5×5 photo), `4R (62)` (4×6 photo,
+  from the `PHOTO` token), `5R (63)` (5×7 photo), and `BusinessCard (53)` (from
+  the `BCARD` token).
 
 `DocumentTypeForPaperToken` maps `PHOTO → 4R (62)` and `BCARD → BusinessCard
-(53)`; those two tokens are advertised on the flatbed only. `JISB5`/`JISB4`
-carry no `daemon/paper_size.cpp` geometry (the host supplies the scan rectangle
-per document type) and are advertised on both units. (A5/Executive/JIS B4 on the
-*feeder* are inferred from the spec envelope, not from a live capture.)
+(53)`. `JISB5`/`JISB4`/`A6`/`3R`/`5R` carry no `daemon/paper_size.cpp` geometry
+(the host supplies the scan rectangle per document type), so they are advertised
+as raw `ICScannerDocumentType` values. (A5/Executive/JIS B4 on the *feeder* are
+inferred from the spec envelope, not from a live capture.)
+
+**Dropdown ordering.** Image Capture renders the size menu in
+`ICScannerDocumentType` **enum-value order**: the client `supportedDocumentTypes`
+is an `NSIndexSet`, which is inherently value-sorted, so the module cannot group
+or reorder the entries (e.g. photos do not cluster together). This is expected —
+no reordering is attempted.
+
+**Sizes with no Apple enum.** Some sizes the Brother apps offer have no
+`ICScannerDocumentType` value — Folio, Mexico Legal, India Legal, 5×8, and
+5.8×7.9 — so they cannot be named menu entries. They remain reachable via
+Auto/crop (the host's free-form scan rectangle), just without a labelled size.
 
 ## Scan request (`ICD_ScannerSetParameters`)
 
