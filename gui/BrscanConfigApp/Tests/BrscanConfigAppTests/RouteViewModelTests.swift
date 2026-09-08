@@ -108,6 +108,63 @@ final class RouteViewModelTests: XCTestCase {
     }
   }
 
+  // MARK: Format coercion on load
+
+  /// `load` seeds `mode` then `format` explicitly, so a hand-edited config
+  /// with an already-invalid pair (`bw` + `heic`) must be coerced to `pdf`
+  /// on load -- not left undefined until the user touches the mode.
+  func testLoadingInvalidBwHeicPairCoercesFormatToPdf() {
+    let viewModel = RouteViewModel()
+    let seed = DaemonConfig.Route(
+      mode: "bw", source: "adf", dpi: 300, format: "heic", tiffCompression: "g4",
+      separation: .combine, paper: "A4")
+
+    viewModel.load(seed)
+
+    XCTAssertEqual(viewModel.mode, "bw")
+    XCTAssertEqual(viewModel.format, "pdf")
+    XCTAssertTrue(
+      OptionRules.allowedFormats(forMode: viewModel.route.mode).contains(viewModel.route.format),
+      "route \(viewModel.route.mode)+\(viewModel.route.format) should be a valid pair")
+  }
+
+  /// Seeding via `init(route:)` normalizes an invalid pair the same way.
+  func testSeedingInvalidBwHeicPairCoercesFormatToPdf() {
+    let seed = DaemonConfig.Route(
+      mode: "bw", source: "adf", dpi: 300, format: "heic", tiffCompression: "g4",
+      separation: .combine, paper: "A4")
+
+    let viewModel = RouteViewModel(route: seed)
+
+    XCTAssertEqual(viewModel.format, "pdf")
+  }
+
+  /// A valid loaded pair (`color` + `heic`) is left untouched.
+  func testLoadingValidColorHeicPairIsUntouched() {
+    let viewModel = RouteViewModel()
+    let seed = DaemonConfig.Route(
+      mode: "color", source: "flatbed", dpi: 300, format: "heic", tiffCompression: "g4",
+      separation: .combine, paper: "LETTER")
+
+    viewModel.load(seed)
+
+    XCTAssertEqual(viewModel.format, "heic")
+    XCTAssertEqual(viewModel.route, seed)
+  }
+
+  /// A valid loaded container pair (`bw` + `tiff`) is left untouched.
+  func testLoadingValidBwTiffPairIsUntouched() {
+    let viewModel = RouteViewModel()
+    let seed = DaemonConfig.Route(
+      mode: "bw", source: "adf", dpi: 200, format: "tiff", tiffCompression: "g4",
+      separation: .combine, paper: "A4")
+
+    viewModel.load(seed)
+
+    XCTAssertEqual(viewModel.format, "tiff")
+    XCTAssertEqual(viewModel.route, seed)
+  }
+
   // MARK: Binding
 
   func testSettingEachFieldUpdatesTheProducedRoute() {

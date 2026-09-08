@@ -49,11 +49,7 @@ public final class RouteViewModel: ObservableObject {
   /// in the setter, not just the view -- so `route` never emits, and a save
   /// never persists, an invalid mode+format pair.
   @Published public var mode: String {
-    didSet {
-      if !OptionRules.allowedFormats(forMode: mode).contains(format) {
-        format = Self.safeFormat
-      }
-    }
+    didSet { coerceFormatIfInvalid() }
   }
   @Published public var source: String
   @Published public var dpi: Int
@@ -106,6 +102,11 @@ public final class RouteViewModel: ObservableObject {
       self.separationMode = .page
       self.separationCount = n
     }
+
+    // `didSet` does not fire during initialization, so seed-time coercion is
+    // explicit here -- mirroring `load` -- so a `RouteViewModel` built from an
+    // already-invalid pair also normalizes it up front.
+    coerceFormatIfInvalid()
   }
 
   // MARK: Gating (reuses `OptionRules`, task 1e.3 -- never reinvented here)
@@ -210,6 +211,23 @@ public final class RouteViewModel: ObservableObject {
     case .page(let n):
       separationMode = .page
       separationCount = n
+    }
+
+    // The load path seeds `mode` then `format` explicitly, so the `mode`
+    // setter's coercion (which fired against the *old* format) can't catch a
+    // loaded pair that is already invalid -- e.g. a hand-edited `bw` + `heic`.
+    // Coerce once more here, after both are seeded, so an invalid loaded pair
+    // is normalized immediately and never re-persisted.
+    coerceFormatIfInvalid()
+  }
+
+  /// Coerces `format` to `safeFormat` when it isn't in the current `mode`'s
+  /// allowed set. Shared by the `mode` setter (a user mode change) and `load`
+  /// (a freshly seeded pair) so both normalize an invalid mode+format pair
+  /// the same way. A pair that is already valid is left untouched.
+  private func coerceFormatIfInvalid() {
+    if !OptionRules.allowedFormats(forMode: mode).contains(format) {
+      format = Self.safeFormat
     }
   }
 }
