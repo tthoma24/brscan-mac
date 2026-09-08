@@ -1685,6 +1685,23 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         ++idx;
       }
     }
+
+    // Anti-hang guard: a scan that ended without an error yet handed back no
+    // page (and was not a clean host cancel) would send a bare
+    // ScannerScanDone(noErr) with no preceding ScannerPageDone -- which leaves
+    // Image Capture waiting forever for a page that never arrives (the scan UI
+    // hangs, unrecoverable except by quitting the app). Surface it as a device
+    // error so the host dismisses the scan UI with a failure instead. The
+    // feeder-empty (kAdfFeederEmpty) and failure (kFailed) outcomes already set
+    // finalErr, so this only catches the otherwise-silent kOk-with-zero-pages
+    // gap; a successful scan has at least one page and is unaffected.
+    if (finalErr == noErr && !canceled && pages.empty()) {
+      finalErr = kICADeviceInternalErr;
+      os_log_error(Log(),
+                   "SyncScan: scan reported success but produced no page -> "
+                   "device error err=%d (avoids host hang)",
+                   finalErr);
+    }
   }
 
   transport.Disconnect();
@@ -1709,9 +1726,14 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         done, deviceObject, kICANotificationTypeScannerScanDone,
         /*waitForReply=*/false);
     CFRelease(done);
+    // `sendErr` is the notification-DELIVERY status; `doneErr` is the scan
+    // result actually carried to the host in kICAErrorKey. Log both so a
+    // delivered-fine notification (sendErr=0) that reports a scan failure
+    // (doneErr!=0) is not misread as a successful scan.
     os_log(Log(),
-           "SyncScan: ScannerScanDone sent err=%d (finalErr=%d canceled=%d)",
-           sendErr, finalErr, canceled);
+           "SyncScan: ScannerScanDone delivered (sendErr=%d) doneErr=%d "
+           "(finalErr=%d canceled=%d)",
+           sendErr, doneErr, finalErr, canceled);
   }
   os_log(Log(), "SyncScan: end (ran on callback thread)");
   return doneErr;
