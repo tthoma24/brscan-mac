@@ -44,4 +44,50 @@ final class OptionRulesTests: XCTestCase {
         "jpegQualityApplies(to: \(format)) should be \(expected)")
     }
   }
+
+  // MARK: allowedFormats(forMode:)
+
+  /// Formats every mode can produce (all pixel classes): the lossless and
+  /// container formats, plus `native`.
+  private static let universalFormats = ["native", "pdf", "tiff", "png", "gif", "bmp"]
+
+  func testColorModeAllowsEveryFormat() {
+    XCTAssertEqual(OptionRules.allowedFormats(forMode: "color"), OptionSets.format)
+  }
+
+  func testGrayscaleModesAllowEveryFormatExceptHeic() {
+    let expected = OptionSets.format.filter { $0 != "heic" }
+    for mode in ["gray", "truegray"] {
+      XCTAssertEqual(
+        OptionRules.allowedFormats(forMode: mode), expected,
+        "allowedFormats(forMode: \(mode)) should exclude only heic")
+    }
+  }
+
+  func testBitonalModesExcludeLossyPhotoFormats() {
+    let expected = OptionSets.format.filter { !["heic", "jpeg", "jp2"].contains($0) }
+    for mode in ["bw", "errdiff"] {
+      XCTAssertEqual(
+        OptionRules.allowedFormats(forMode: mode), expected,
+        "allowedFormats(forMode: \(mode)) should exclude heic/jpeg/jp2")
+      XCTAssertEqual(
+        OptionRules.allowedFormats(forMode: mode), Self.universalFormats,
+        "the bitonal set is exactly the universal formats")
+    }
+  }
+
+  /// An unrecognized mode falls back to the most permissive (color) set so
+  /// nothing is wrongly hidden.
+  func testUnknownModeDefaultsToEveryFormat() {
+    XCTAssertEqual(OptionRules.allowedFormats(forMode: "sepia"), OptionSets.format)
+  }
+
+  /// `pdf`, the view model's coercion fallback, is valid in every mode.
+  func testPdfIsAllowedForEveryMode() {
+    for mode in OptionSets.mode {
+      XCTAssertTrue(
+        OptionRules.allowedFormats(forMode: mode).contains("pdf"),
+        "pdf should be allowed for mode \(mode)")
+    }
+  }
 }

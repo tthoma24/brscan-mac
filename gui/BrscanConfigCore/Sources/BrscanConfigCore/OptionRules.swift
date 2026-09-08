@@ -37,4 +37,33 @@ public enum OptionRules {
   public static func jpegQualityApplies(to format: String) -> Bool {
     format == "jpeg" || format == "heic" || format == "jp2"
   }
+
+  /// The `<dest>.format` values that make sense for a given `<dest>.mode`,
+  /// as a subset of `OptionValueSets.format`'s `options` (order preserved).
+  /// This mirrors the vendor: Image Capture gates its Format menu by pixel
+  /// type, but the daemon button-flow path doesn't, so the GUI hides a
+  /// format a mode can't sensibly produce instead of letting the daemon
+  /// silently transcode it (e.g. a B&W route to color HEIC).
+  ///
+  /// The mode maps to a pixel class, which the encoders constrain:
+  /// - `color` -> RGB: every format is allowed.
+  /// - `gray`, `truegray` -> grayscale: every format except `heic` (HEVC
+  ///   rejects single-channel input).
+  /// - `bw`, `errdiff` -> bitonal (1-bit): every format except the lossy
+  ///   photo formats `heic`, `jpeg`, and `jp2` (which need >= 8-bit).
+  ///
+  /// An unrecognized mode token defaults to the most permissive (color)
+  /// set, so nothing is wrongly hidden.
+  public static func allowedFormats(forMode mode: String) -> [String] {
+    let excluded: Set<String>
+    switch mode {
+    case "gray", "truegray":
+      excluded = ["heic"]
+    case "bw", "errdiff":
+      excluded = ["heic", "jpeg", "jp2"]
+    default:  // "color", or any unrecognized mode -> allow every format.
+      excluded = []
+    }
+    return OptionValueSets.format.options.filter { !excluded.contains($0) }
+  }
 }

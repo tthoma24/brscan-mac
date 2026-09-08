@@ -46,8 +46,12 @@ struct RouteEditorView: View {
       }
 
       Section("Output format") {
+        // Only the formats the selected mode can sensibly produce, gated
+        // by OptionRules.allowedFormats(forMode:) so a hidden format can't
+        // be chosen (the view model coerces an already-set format that a
+        // mode change invalidates -- see RouteViewModel.mode).
         Picker("Format", selection: $viewModel.format) {
-          ForEach(OptionValueSets.format.options, id: \.self) { option in
+          ForEach(OptionRules.allowedFormats(forMode: viewModel.mode), id: \.self) { option in
             Text(option).tag(option)
           }
         }
