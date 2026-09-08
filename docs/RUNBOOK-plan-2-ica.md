@@ -181,6 +181,7 @@ Legend for the `ICScannerDocumentType` values referenced below is in
 | **C6. Multi-page feed** | Kind = Document Feeder; several sheets loaded | Scan | **Multi-page output** — one page per fed sheet, in order | ☐ | File transfer appends a page index |
 | **C7. Empty ADF — simplex** | Kind = Document Feeder; **no paper**; Duplex off | Press **Scan** | Image Capture promptly shows the **native alert "Scanner reported an error / Document feeder is empty."** (#84, #85) | ☐ | Instant via the `ESC D` ack (`0xc2`), not a timeout |
 | **C8. Empty ADF — 2-sided** | Kind = Document Feeder; **no paper**; Duplex on | Press **Scan** | Same native "Document feeder is empty." alert, promptly (#84, #85) | ☐ | Must fire for duplex as well as simplex |
+| **C9. Cancel mid-ADF-scan** | Kind = Document Feeder; several sheets loaded; a scan running | Press **Cancel** while pages are still feeding | The scan aborts cleanly; the device **feeds the remaining sheets out until the feeder is empty**, then stops; Image Capture returns to ready **without hanging**, and a new scan starts normally | ☐ | Guards mid-feed abort + recovery; no wedged session |
 
 ### D. Packaging and signing
 
