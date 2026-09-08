@@ -15,6 +15,7 @@ namespace {
 constexpr char kUtiTiff[] = "public.tiff";
 constexpr char kUtiJpeg[] = "public.jpeg";
 constexpr char kUtiPng[] = "public.png";
+constexpr char kUtiHeic[] = "public.heic";
 
 std::string ToLower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
@@ -110,6 +111,10 @@ std::string TransferFilenameForPage(const TransferPlan& plan, int page_index) {
   }
   name += "." + plan.extension;
   return name;
+}
+
+bool HeicNeedsRgbTranscode(const std::string& uti, bool source_is_grayscale) {
+  return source_is_grayscale && uti == kUtiHeic;
 }
 
 }  // namespace brscan::ica

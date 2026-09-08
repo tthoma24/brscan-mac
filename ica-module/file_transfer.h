@@ -61,4 +61,13 @@ TransferPlan PlanTransfer(const std::string& document_format,
 // overwrite itself. Negative indices are treated as 0.
 std::string TransferFilenameForPage(const TransferPlan& plan, int page_index);
 
+// True when a page must be transcoded to RGB before it is encoded to `uti`.
+// Apple's HEIC/HEVC encoder rejects a single-channel (grayscale/bitonal)
+// source, so a grayscale or B&W scan the host asked to save as HEIC has to be
+// drawn into an RGB buffer first. Scoped strictly to the HEIC UTI: every other
+// format encodes from its native colorspace untouched. `source_is_grayscale`
+// is true for the kGray/kBitonal pixel formats. This is the pure decision;
+// the CoreGraphics transcode that acts on it lives in module_main.mm.
+bool HeicNeedsRgbTranscode(const std::string& uti, bool source_is_grayscale);
+
 }  // namespace brscan::ica

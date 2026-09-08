@@ -101,5 +101,24 @@ TEST(TransferFilenameForPageTest, NegativeIndexTreatedAsZero) {
   EXPECT_EQ(TransferFilenameForPage(p, -5), "Scan.tif");
 }
 
+TEST(HeicNeedsRgbTranscodeTest, GrayscaleHeicNeedsTranscode) {
+  EXPECT_TRUE(HeicNeedsRgbTranscode("public.heic", /*source_is_grayscale=*/true));
+}
+
+TEST(HeicNeedsRgbTranscodeTest, RgbHeicDoesNotTranscode) {
+  EXPECT_FALSE(
+      HeicNeedsRgbTranscode("public.heic", /*source_is_grayscale=*/false));
+}
+
+TEST(HeicNeedsRgbTranscodeTest, GrayscaleNonHeicIsUntouched) {
+  // Strictly scoped to HEIC: TIFF/JPEG/PNG grayscale sources encode natively.
+  EXPECT_FALSE(
+      HeicNeedsRgbTranscode("public.tiff", /*source_is_grayscale=*/true));
+  EXPECT_FALSE(
+      HeicNeedsRgbTranscode("public.jpeg", /*source_is_grayscale=*/true));
+  EXPECT_FALSE(
+      HeicNeedsRgbTranscode("public.png", /*source_is_grayscale=*/true));
+}
+
 }  // namespace
 }  // namespace brscan::ica

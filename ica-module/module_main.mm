@@ -909,7 +909,7 @@ void DetectTransferMode(DeviceContext* ctx, CFDictionaryRef dict) {
     ctx->documentFolderPath = docFolder;
     ctx->transferPlan = brscan::ica::PlanTransfer(docFormat, docExt, docName);
     os_log(Log(),
-           "SetParameters: FILE transfer -> folder='%{public}s' scopedURL=%d "
+           "SetParameters: FILE transfer -> folder='%{private}s' scopedURL=%d "
            "uti=%{public}s ext=%{public}s stem=%{public}s",
            docFolder.c_str(), scoped != nullptr,
            ctx->transferPlan.uti.c_str(), ctx->transferPlan.extension.c_str(),
@@ -1327,8 +1327,38 @@ CGImageRef CreatePageImage(brscan::PixelFormat format, const uint8_t* bytes,
   return img;
 }
 
+// Draws `src` into a freshly allocated 8-bit RGB bitmap and returns the RGB
+// CGImage (caller owns it: CGImageRelease). Used to satisfy Apple's HEIC/HEVC
+// encoder, which rejects a single-channel (grayscale/bitonal) source. The
+// colorspace and bitmap context are released on every path. Returns null on a
+// bad geometry or a CoreGraphics failure.
+CGImageRef CopyImageAsRGB(CGImageRef src) {
+  if (src == nullptr) return nullptr;
+  const size_t width = CGImageGetWidth(src);
+  const size_t height = CGImageGetHeight(src);
+  if (width == 0 || height == 0) return nullptr;
+
+  CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+  if (rgb == nullptr) return nullptr;
+  CGContextRef ctx = CGBitmapContextCreate(
+      nullptr, width, height, /*bitsPerComponent=*/8, /*bytesPerRow=*/0, rgb,
+      kCGImageAlphaNoneSkipLast | kCGBitmapByteOrderDefault);
+  if (ctx == nullptr) {
+    CGColorSpaceRelease(rgb);
+    return nullptr;
+  }
+
+  CGContextDrawImage(ctx, CGRectMake(0, 0, width, height), src);
+  CGImageRef out = CGBitmapContextCreateImage(ctx);
+  CGContextRelease(ctx);
+  CGColorSpaceRelease(rgb);
+  return out;
+}
+
 // Encodes `image` to `fileURL` as the ImageIO type `uti`. Returns true on a
-// finalized write.
+// finalized write. On a finalize failure the destination file that
+// CGImageDestinationCreateWithURL already created/truncated is removed, so a
+// failed page never leaves a partial (e.g. 0-byte) artifact behind.
 bool WriteImageToURL(CGImageRef image, NSURL* fileURL, CFStringRef uti) {
   if (image == nullptr || fileURL == nil || uti == nullptr) return false;
   CGImageDestinationRef dst = CGImageDestinationCreateWithURL(
@@ -1337,6 +1367,9 @@ bool WriteImageToURL(CGImageRef image, NSURL* fileURL, CFStringRef uti) {
   CGImageDestinationAddImage(dst, image, nullptr);
   const bool ok = CGImageDestinationFinalize(dst);
   CFRelease(dst);
+  if (!ok) {
+    [[NSFileManager defaultManager] removeItemAtURL:fileURL error:nil];
+  }
   return ok;
 }
 
@@ -1391,10 +1424,30 @@ PageResult PostFilePage(CFURLRef securityScopedURL,
 
     CGImageRef image = CreatePageImage(format, bytes, byteCount, width, height);
     if (image != nullptr) {
+      // HEIC/HEVC rejects a single-channel source, so a grayscale/bitonal page
+      // the host asked to save as HEIC is transcoded to RGB first. Strictly
+      // scoped to the HEIC UTI (HeicNeedsRgbTranscode); every other format
+      // encodes from its native colorspace untouched. On a transcode failure
+      // keep the original image -- the encode then fails cleanly and the
+      // partial file is unlinked below.
+      const bool grayscale = (format != brscan::PixelFormat::kRgb);
+      if (brscan::ica::HeicNeedsRgbTranscode(transferPlan.uti, grayscale)) {
+        CGImageRef rgb = CopyImageAsRGB(image);
+        if (rgb != nullptr) {
+          CGImageRelease(image);
+          image = rgb;
+          os_log(Log(), "PostFilePage[%d]: transcoded grayscale->RGB for HEIC",
+                 pageIndex);
+        } else {
+          os_log_error(Log(),
+                       "PostFilePage[%d]: HEIC RGB transcode failed %dx%d",
+                       pageIndex, width, height);
+        }
+      }
       NSString* utiStr =
           [NSString stringWithUTF8String:transferPlan.uti.c_str()];
       os_log(Log(),
-             "file transfer: writing %{public}@ format=%{public}s %dx%d",
+             "file transfer: writing %{private}@ format=%{public}s %dx%d",
              fileURL.path, transferPlan.uti.c_str(), width, height);
       wrote = WriteImageToURL(image, fileURL, (__bridge CFStringRef)utiStr);
       CGImageRelease(image);
@@ -1410,7 +1463,7 @@ PageResult PostFilePage(CFURLRef securityScopedURL,
       [fileURL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
       const char* pathC = fileURL.path.UTF8String;
       writtenPath = pathC ? pathC : "";
-      os_log(Log(), "file transfer: wrote %lld bytes to %{public}@",
+      os_log(Log(), "file transfer: wrote %lld bytes to %{private}@",
              (long long)size.longLongValue, fileURL.path);
     }
 
@@ -1420,7 +1473,7 @@ PageResult PostFilePage(CFURLRef securityScopedURL,
     // (`<document folder>/<document name>.<document extension>`), so the host
     // picks up the saved file. Log the exact value sent.
     os_log(Log(),
-           "PostFilePage[%d]: documentName key path=%{public}s (wrote=%d)",
+           "PostFilePage[%d]: documentName key path=%{private}s (wrote=%d)",
            pageIndex, writtenPath.c_str(), wrote);
     CFMutableDictionaryRef pageDict = CFDictionaryCreateMutable(
         nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
@@ -1613,9 +1666,21 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         }
 
         if (ready) {
-          PostFilePage(securityScopedURL, documentFolderPath, transferPlan,
-                       deviceObject, outFormat, bytes, byteCount, outWidth,
-                       outHeight, idx);
+          const PageResult r = PostFilePage(
+              securityScopedURL, documentFolderPath, transferPlan, deviceObject,
+              outFormat, bytes, byteCount, outWidth, outHeight, idx);
+          if (r == PageResult::kSendFailed) {
+            // A hard write/delivery fault (kSendFailed "must not be silently
+            // ignored"). Mirror the band path: report a device error and stop
+            // -- writing later pages after a hard fault would still end the job
+            // noErr and could scatter more partial files, so break here.
+            finalErr = kICADeviceInternalErr;
+            os_log_error(Log(),
+                         "SyncScan: file page %d hard write failure -> device "
+                         "error err=%d (stopping)",
+                         idx, finalErr);
+            break;
+          }
         }
         ++idx;
       }
