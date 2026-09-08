@@ -940,7 +940,9 @@ ICAError SetParameters(const ScannerObjectInfo* deviceObjectInfo,
       // pass it in; -1 means "no context" so the fallback is skipped.
       const int trackedUnit = ctx ? ctx->selectedFunctionalUnit : -1;
       brscan::ica::ScanRequest req = ReadScanRequest(pb->theDict, trackedUnit);
-      brscan::ica::ScanLimits limits;  // default max_dpi = highest offer (600).
+      // Default per-source caps: flatbed 2400 dpi, ADF 1200 dpi (Brother
+      // optical maxima). TranslateScanParams clamps by the request's source.
+      brscan::ica::ScanLimits limits;
       brscan::Params params = brscan::ica::TranslateScanParams(req, limits);
       if (ctx) ctx->params = params;
 

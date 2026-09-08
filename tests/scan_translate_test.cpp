@@ -86,19 +86,99 @@ TEST(TranslateScanParamsTest, ResolutionAppliedToBothAxes) {
   ScanRequest r;
   r.has_resolution = true;
   r.resolution = 400;
-  const Params p = TranslateScanParams(r, ScanLimits{/*max_dpi=*/600});
+  const Params p = TranslateScanParams(r, ScanLimits{});
   EXPECT_EQ(p.x_dpi, 400);
   EXPECT_EQ(p.y_dpi, 400);
 }
 
-// Resolution above the offered maximum is clamped down.
-TEST(TranslateScanParamsTest, ResolutionClampedToMax) {
+// The default limits are the two sources' optical maxima (Brother spec): the
+// flatbed reaches 2400 dpi, the ADF 1200 dpi.
+TEST(TranslateScanParamsTest, DefaultLimitsMatchSourceOpticalMaxes) {
+  EXPECT_EQ(kMaxFlatbedDpi, 2400);
+  EXPECT_EQ(kMaxFeederDpi, 1200);
+  EXPECT_EQ(ScanLimits{}.max_dpi_flatbed, kMaxFlatbedDpi);
+  EXPECT_EQ(ScanLimits{}.max_dpi_feeder, kMaxFeederDpi);
+}
+
+// The flatbed advertises and honours up to its 2400 dpi optical maximum.
+TEST(TranslateScanParamsTest, FlatbedAllowsUpTo2400) {
   ScanRequest r;
   r.has_resolution = true;
-  r.resolution = 1200;  // beyond the offer.
-  const Params p = TranslateScanParams(r, ScanLimits{/*max_dpi=*/600});
-  EXPECT_EQ(p.x_dpi, 600);
-  EXPECT_EQ(p.y_dpi, 600);
+  r.resolution = 2400;
+  r.has_functional_unit = true;
+  r.functional_unit = 0;  // Flatbed.
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.x_dpi, 2400);
+  EXPECT_EQ(p.y_dpi, 2400);
+}
+
+// With no functional unit the flatbed is the default source, so 2400 stands.
+TEST(TranslateScanParamsTest, FlatbedIsDefaultSourceForResolutionCap) {
+  ScanRequest r;
+  r.has_resolution = true;
+  r.resolution = 2400;  // No functional_unit -> flatbed cap (2400) applies.
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.x_dpi, 2400);
+  EXPECT_EQ(p.y_dpi, 2400);
+}
+
+// A 2400 dpi request on the ADF is clamped to the feeder's 1200 dpi optical max.
+TEST(TranslateScanParamsTest, FeederClampsResolutionTo1200) {
+  ScanRequest r;
+  r.has_resolution = true;
+  r.resolution = 2400;  // Beyond the ADF's 1200 dpi optical max.
+  r.has_functional_unit = true;
+  r.functional_unit = 3;  // Document feeder.
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.x_dpi, 1200);
+  EXPECT_EQ(p.y_dpi, 1200);
+}
+
+// 1200 dpi is valid on either source.
+TEST(TranslateScanParamsTest, Resolution1200AllowedOnBothSources) {
+  ScanRequest flatbed;
+  flatbed.has_resolution = true;
+  flatbed.resolution = 1200;
+  flatbed.has_functional_unit = true;
+  flatbed.functional_unit = 0;
+  EXPECT_EQ(TranslateScanParams(flatbed, ScanLimits{}).x_dpi, 1200);
+
+  ScanRequest feeder;
+  feeder.has_resolution = true;
+  feeder.resolution = 1200;
+  feeder.has_functional_unit = true;
+  feeder.functional_unit = 3;
+  EXPECT_EQ(TranslateScanParams(feeder, ScanLimits{}).x_dpi, 1200);
+}
+
+// An over-max request clamps to the SELECTED source's maximum, not a flat cap.
+TEST(TranslateScanParamsTest, OverMaxResolutionClampsToSourceMax) {
+  ScanRequest flatbed;
+  flatbed.has_resolution = true;
+  flatbed.resolution = 9600;  // Absurdly high.
+  flatbed.has_functional_unit = true;
+  flatbed.functional_unit = 0;
+  EXPECT_EQ(TranslateScanParams(flatbed, ScanLimits{}).x_dpi, 2400);
+
+  ScanRequest feeder;
+  feeder.has_resolution = true;
+  feeder.resolution = 9600;
+  feeder.has_functional_unit = true;
+  feeder.functional_unit = 3;
+  EXPECT_EQ(TranslateScanParams(feeder, ScanLimits{}).x_dpi, 1200);
+}
+
+// Custom per-source caps are honoured (a lower ceiling clamps the request).
+TEST(TranslateScanParamsTest, CustomSourceCapsAreHonoured) {
+  ScanRequest flatbed;
+  flatbed.has_resolution = true;
+  flatbed.resolution = 1200;
+  flatbed.has_functional_unit = true;
+  flatbed.functional_unit = 0;
+  EXPECT_EQ(
+      TranslateScanParams(flatbed, ScanLimits{/*flatbed=*/600, /*feeder=*/600})
+          .x_dpi,
+      600);
 }
 
 // A non-positive or absent resolution falls back to the default.
@@ -259,7 +339,10 @@ TEST(TranslateScanParamsTest, AdfCenteringUsesRequestDpiNotClampedDpi) {
   r.area_y0 = 0;
   r.area_x1 = 4000;  // Requested width, in 600-dpi pixels.
   r.area_y1 = 5000;
-  const Params p = TranslateScanParams(r, ScanLimits{/*max_dpi=*/300});
+  // A low feeder cap forces the clamp; the request is a feeder scan, so the
+  // feeder cap (300) is what applies here.
+  const Params p =
+      TranslateScanParams(r, ScanLimits{/*flatbed=*/2400, /*feeder=*/300});
   EXPECT_EQ(p.x_dpi, 300);  // Scan dpi is clamped to the max.
   // Sensor @600 = 6944, so centered x0 = (6944 - 4000) / 2 = 1472. Deriving the
   // sensor at the clamped 300 dpi (3472) would corner-register to 0 -- the bug.
@@ -484,6 +567,41 @@ TEST(DocumentTypeSizeConstantsTest, JisValuesDistinctFromExistingSizes) {
       EXPECT_NE(values[i], values[j]) << "collision at " << i << "," << j;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-unit ICAP_XRESOLUTION / ICAP_YRESOLUTION membership. The advertised list
+// lives in scan_parameters.mm (BuildUnit -> ResolutionArray), which needs
+// Foundation; these pure tests pin the INTENDED per-unit maxima so a regression
+// there is caught without a device. Both units share the base set
+// {100,150,200,300,400,600}; the high resolutions differ because the two sensors
+// differ (Brother spec): the flatbed's optical maximum is 2400 dpi, the ADF's is
+// 1200 dpi. So the flatbed advertises up to 2400 and the ADF up to 1200 (no
+// 2400). The maxima are the same source caps TranslateScanParams clamps to
+// (kMaxFlatbedDpi / kMaxFeederDpi), so the advertised list and the runtime clamp
+// can never diverge.
+TEST(ResolutionsPerUnitTest, FlatbedIncludes2400) {
+  const int flatbed[] = {100, 150, 200, 300, 400, 600, 1200, 2400};
+  auto contains = [&](int v) {
+    for (int x : flatbed)
+      if (x == v) return true;
+    return false;
+  };
+  EXPECT_TRUE(contains(1200));
+  EXPECT_TRUE(contains(2400));
+  EXPECT_EQ(flatbed[std::size(flatbed) - 1], kMaxFlatbedDpi);  // 2400.
+}
+
+TEST(ResolutionsPerUnitTest, FeederStopsAt1200) {
+  const int feeder[] = {100, 150, 200, 300, 400, 600, 1200};
+  auto contains = [&](int v) {
+    for (int x : feeder)
+      if (x == v) return true;
+    return false;
+  };
+  EXPECT_TRUE(contains(1200));
+  EXPECT_FALSE(contains(2400));  // The ADF sensor tops out at 1200 dpi.
+  EXPECT_EQ(feeder[std::size(feeder) - 1], kMaxFeederDpi);  // 1200.
 }
 
 // ---------------------------------------------------------------------------

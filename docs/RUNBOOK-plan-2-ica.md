@@ -199,6 +199,22 @@ feeder-empty note (C7) requires.
 | **CE2. Empty ADF still reads "Document feeder is empty."** | Scan Mode = Document Feeder; **no paper** | Press **Scan** | Still the native **"Document feeder is empty."** alert (`kICAErrStrDFEmptyErr`) | ☐ | Regression check that generalizing the notifier (`PostScannerError`) preserved C7/C8 |
 | **CE3. Paper jam — discovery** | Scan Mode = Document Feeder; feed a sheet, then **physically jam the ADF mid-feed** | Scan and induce a jam | **Record what Image Capture shows** (message text and timing) | ☐ | DISCOVERY only. The device's jam signature is uncaptured, so a jam is not yet mapped to `kICAErrStrDFPaperErr` ("Document feeder has a paper jam or paper feed error."). Note the observed behavior; mapping the jam key is a follow-up pending a captured jam signature |
 
+### CR. High-resolution scanning (1200 / 2400 dpi)
+
+Device-in-the-loop re-tests for the 1200/2400 dpi support (PR D). Two caps used
+to hide these: the advertised `ICAP_XRESOLUTION`/`ICAP_YRESOLUTION` list stopped
+at 600, and `TranslateScanParams` clamped every request to 600. Both are now
+source-dependent — the flatbed reaches 2400 dpi and the ADF 1200 dpi (Brother
+optical maxima) — so the Resolution menu and the runtime clamp match each
+source's sensor. Confirm each row against the running host.
+
+| Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |
+|---|---|---|---|---|---|
+| **CR1. 1200 dpi flatbed scan** | Scan Mode = Flatbed; original on the glass | Set **Resolution = 1200 dpi**; Scan | The scan **completes at 1200 dpi**; pixel dimensions are 2x the 600 dpi scan of the same area | ☐ | The flatbed now advertises 1200 and 2400 (the manufacturer driver exposes 1200; 2400 is the flatbed optical max). Confirm the menu offers both |
+| **CR2. 2400 dpi flatbed scan** | Scan Mode = Flatbed; original on the glass | Set **Resolution = 2400 dpi**; **crop to a SMALL area** (e.g. a 1x1 in region), then Scan | The scan **completes at 2400 dpi** over the cropped region | ☐ | **Use a small cropped area, not full A3.** A full-glass A3 page at 2400 dpi is ~28k x 40k px (~3 GB decoded RGB) — expect heavy memory and time. The whole-page buffer math is 64-bit (`buffer_descriptor` accumulates stride/size in `int64_t`; the delivery path carries page byte counts as `size_t`), so the size does not wrap, but the scan is still large and slow |
+| **CR3. ADF Resolution menu stops at 1200** | Scan Mode = Document Feeder | Open the **Resolution** menu | Offers up to **1200 dpi** and **NOT 2400** — the ADF's optical maximum is 1200 dpi (the 2400 x 1200 sensor asymmetry) | ☐ | The flatbed menu (CR1) still lists 2400; only the feeder drops it. Both share the base set 100/150/200/300/400/600 |
+| **CR4. 1200 dpi ADF scan** | Scan Mode = Document Feeder; a sheet in the ADF | Set **Resolution = 1200 dpi**; Scan | The fed page **completes at 1200 dpi**, centered as C2 (no left padding, no right-edge cut-off) | ☐ | A 2400 dpi request on the ADF (if the host somehow sends one) is clamped to 1200 by the per-source runtime cap |
+
 ### D. Packaging and signing
 
 | Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |

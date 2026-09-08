@@ -26,8 +26,14 @@ constexpr int kReferenceDpi = 300;
 // Resolutions the Brother MFC-J6920DW offers over the raw-scan protocol (device
 // black-box facts; the scan-execution path clamps the chosen value to the live
 // ESC I offer per PLAN-2-DESIGN.md). Advertised as ICAP_XRESOLUTION /
-// ICAP_YRESOLUTION.
-constexpr int kResolutions[] = {100, 150, 200, 300, 400, 600};
+// ICAP_YRESOLUTION, but SOURCE-DEPENDENT: the flatbed's optical maximum is 2400
+// dpi and the ADF's is 1200 dpi (Brother spec, cited in reference/sdd-ledger.md;
+// the 2400 x 1200 ADF asymmetry is what drives the 200x400 / 300x600 pairs), so
+// the flatbed offers the full table up to 2400 while the feeder stops at 1200.
+// ResolutionArray(feeder) drops the entries above the feeder's optical max.
+// kMaxFeederDpi is the single source of truth shared with the runtime clamp
+// (scan_translate.h ScanLimits), so the advertised list and the clamp agree.
+constexpr int kResolutions[] = {100, 150, 200, 300, 400, 600, 1200, 2400};
 constexpr int kDefaultResolution = 300;
 
 // ICScannerBitDepth values (SDK ICScannerFunctionalUnits.h): 1-bit for
@@ -158,9 +164,17 @@ NSDictionary* OneValue(int value) {
   };
 }
 
-NSArray* ResolutionArray() {
+// The advertised resolution enumeration for one unit. The flatbed gets the full
+// table (up to kMaxFlatbedDpi = 2400); the feeder drops everything above its
+// optical maximum (kMaxFeederDpi = 1200), since the ADF sensor cannot resolve
+// past 1200 dpi for a square scan. The clamp maxima live in scan_translate.h, so
+// the two never diverge.
+NSArray* ResolutionArray(bool feeder) {
   NSMutableArray* r = [NSMutableArray array];
-  for (int dpi : kResolutions) [r addObject:Int(dpi)];
+  for (int dpi : kResolutions) {
+    if (feeder && dpi > kMaxFeederDpi) continue;
+    [r addObject:Int(dpi)];
+  }
   return r;
 }
 
@@ -246,10 +260,10 @@ NSDictionary* BuildUnit(bool feeder) {
       static_cast<double>(maxHeightPx) / kReferenceDpi;
 
   return @{
-    @"ICAP_XRESOLUTION" :
-        Enumeration(ResolutionArray(), kDefaultResolution, kDefaultResolution),
-    @"ICAP_YRESOLUTION" :
-        Enumeration(ResolutionArray(), kDefaultResolution, kDefaultResolution),
+    @"ICAP_XRESOLUTION" : Enumeration(ResolutionArray(feeder),
+                                      kDefaultResolution, kDefaultResolution),
+    @"ICAP_YRESOLUTION" : Enumeration(ResolutionArray(feeder),
+                                      kDefaultResolution, kDefaultResolution),
     @"ICAP_BITDEPTH" : Enumeration(@[ Int(kBitDepth1), Int(kBitDepth8) ],
                                    kDefaultBitDepth, kDefaultBitDepth),
     @"ICAP_PIXELTYPE" : Enumeration(
