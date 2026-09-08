@@ -28,10 +28,13 @@ public enum OptionRules {
     format == "pdf"
   }
 
-  /// `<dest>.jpeg_quality` (the Brother driver's "File Size" control) only
-  /// affects output when `format == "jpeg"` -- the daemon writes a JPEG's
-  /// bytes at that quality; every other format ignores it.
+  /// `<dest>.jpeg_quality` (the Brother driver's "File Size" control) affects
+  /// output for the lossy image formats -- `jpeg`, `heic`, and `jp2`. The
+  /// daemon encodes each of those at that quality (output/output_writer.mm's
+  /// `kJpeg`/`kHeic`/`kJpeg2000` all pass `settings.jpeg_quality`); every
+  /// other format (the lossless `png`/`gif`/`bmp`, the multi-page `pdf`/
+  /// `tiff`, and `native`) ignores it.
   public static func jpegQualityApplies(to format: String) -> Bool {
-    format == "jpeg"
+    format == "jpeg" || format == "heic" || format == "jp2"
   }
 }

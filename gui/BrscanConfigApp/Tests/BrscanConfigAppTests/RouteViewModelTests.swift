@@ -172,13 +172,15 @@ final class RouteViewModelTests: XCTestCase {
     XCTAssertEqual(viewModel.route.jpegQuality, 60)
   }
 
-  /// The File size slider is only surfaced for the jpeg format.
-  func testJpegQualityEditableOnlyForJpeg() {
+  /// The File size slider is surfaced for the lossy image formats (jpeg,
+  /// heic, jp2) and hidden for every other format.
+  func testJpegQualityEditableForLossyFormats() {
+    let lossy: Set<String> = ["jpeg", "heic", "jp2"]
     let viewModel = RouteViewModel()
     for format in OptionSets.format {
       viewModel.format = format
       XCTAssertEqual(
-        viewModel.isJpegQualityEditable, format == "jpeg",
+        viewModel.isJpegQualityEditable, lossy.contains(format),
         "jpeg-quality gating mismatch for \(format)")
     }
   }
@@ -198,6 +200,23 @@ final class RouteViewModelTests: XCTestCase {
     reseed.jpegQuality = 30
     viewModel.load(reseed)
     XCTAssertEqual(viewModel.jpegQuality, 30)
+  }
+
+  /// A HEIC route round-trips `<dest>.jpeg_quality` through the view model:
+  /// the slider is editable and the produced route carries the value, since
+  /// the daemon encodes HEIC at that quality too.
+  func testHeicRouteRoundTripsJpegQuality() {
+    var seed = DaemonConfig.Route.default
+    seed.format = "heic"
+    seed.jpegQuality = 45
+
+    let viewModel = RouteViewModel(route: seed)
+    XCTAssertTrue(viewModel.isJpegQualityEditable)
+    XCTAssertEqual(viewModel.jpegQuality, 45)
+    XCTAssertEqual(viewModel.route, seed)
+
+    viewModel.jpegQuality = 70
+    XCTAssertEqual(viewModel.route.jpegQuality, 70)
   }
 
   // MARK: Separation editing

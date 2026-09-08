@@ -59,10 +59,11 @@ struct RouteEditorView: View {
         }
         .disabled(!viewModel.isCompressionEditable)
 
-        // JPEG-only "File size" slider, mirroring the Brother driver's
-        // "File Size: Small ... High Quality" control. Shown only when the
-        // selected format is jpeg (see RouteViewModel.isJpegQualityEditable),
-        // the same way tiff_compression is gated on tiff above.
+        // "File size / quality" slider, mirroring the Brother driver's
+        // "File Size: Small ... High Quality" control. Shown for the lossy
+        // formats that honor jpeg_quality -- jpeg, heic, jp2 (see
+        // RouteViewModel.isJpegQualityEditable), the same way tiff_compression
+        // is gated on tiff above.
         if viewModel.isJpegQualityEditable {
           VStack(alignment: .leading, spacing: 4) {
             Slider(
@@ -72,7 +73,7 @@ struct RouteEditorView: View {
               in: Double(JpegQuality.range.lowerBound)...Double(JpegQuality.range.upperBound),
               step: 1
             ) {
-              Text("File size")
+              Text("File size / quality")
             } minimumValueLabel: {
               Text("Small")
             } maximumValueLabel: {

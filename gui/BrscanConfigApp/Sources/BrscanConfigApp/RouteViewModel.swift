@@ -106,15 +106,20 @@ public final class RouteViewModel: ObservableObject {
     OptionRules.separationApplies(to: format)
   }
 
-  /// `<dest>.jpeg_quality` is only meaningful when `format == "jpeg"` -- for
-  /// every other format the daemon ignores it (see
+  /// `<dest>.jpeg_quality` is only meaningful for the lossy image formats
+  /// (`jpeg`, `heic`, `jp2`) -- every other format ignores it (see
   /// `OptionRules.jpegQualityApplies(to:)`), so the view only surfaces the
-  /// File size slider then.
+  /// file-size/quality slider for those.
   public var isJpegQualityEditable: Bool {
     OptionRules.jpegQualityApplies(to: format)
   }
 
   // MARK: Validation
+  //
+  // `isDpiValid`/`isSeparationCountValid` no longer gate any inline UI (#120
+  // moved dpi/separation-count entry off the route editor); they remain to
+  // mirror the daemon's validation for the unit tests that assert the GUI's
+  // notion of "valid" matches `ParsePositiveInt`.
 
   /// Whether `dpi` is a value the daemon would accept: strictly positive.
   /// Reuses `Dpi.isValid(_:)` (task 1e.3) rather than reinventing the
