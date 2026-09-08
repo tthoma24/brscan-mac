@@ -180,6 +180,24 @@ bool StartsWithPdfMagic(const std::string& path) {
          std::string(buf, sizeof(buf)) == "%PDF";
 }
 
+// Every `brscan-email-*` entry currently under the system temp directory
+// (where HandleButtonEvent's mkdtemp creates EMAIL's per-press temp dir).
+// Snapshotting this before and after a call detects a temp directory the
+// pipeline created but failed to remove (issue #132).
+std::vector<std::string> EmailTempDirs() {
+  std::vector<std::string> dirs;
+  std::error_code ec;
+  const std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+  if (ec) return dirs;
+  for (std::filesystem::directory_iterator it(base, ec), end;
+       !ec && it != end; it.increment(ec)) {
+    if (it->path().filename().string().rfind("brscan-email-", 0) == 0) {
+      dirs.push_back(it->path().string());
+    }
+  }
+  return dirs;
+}
+
 // The number of directory entries directly under `dir` (non-recursive).
 size_t CountFilesIn(const std::string& dir) {
   size_t count = 0;
@@ -350,8 +368,8 @@ TEST_F(HandleButtonEventTest, ImageFuncUsesImageParamsDistinctFromFile) {
   EXPECT_EQ(runner_.calls()[0].back(), saved_path);
 }
 
-// Regression test for a Task 1c.1 review finding: WritePages (tools/
-// scan_output.h) never writes the bare, unnumbered base path for a
+// Regression test for a Task 1c.1 review finding: WritePages
+// (output/page_writer.h, brscan::output) never writes the bare, unnumbered base path for a
 // multi-page scan -- only "-001", "-002", etc. HandleButtonEvent must
 // report the actual numbered page-1 file as saved_path, not a path that
 // was never written to disk, and IMAGE must open every numbered page
@@ -395,7 +413,7 @@ TEST_F(HandleButtonEventTest, ImageFuncMultiPageSavesAllPagesAndOpensBoth) {
   ASSERT_EQ(status, Status::kOk);
   ASSERT_FALSE(saved_path.empty());
 
-  // saved_path must be the numbered page-1 file (tools/scan_output.h's
+  // saved_path must be the numbered page-1 file (output/page_writer.h's
   // PagePath(base, 1, 2)), never the unnumbered base BuildOutputPath()
   // built -- that exact path is never written for a 2-page scan.
   ASSERT_NE(saved_path.find("-001."), std::string::npos)
@@ -542,6 +560,8 @@ TEST_F(HandleButtonEventTest, EmailAttachesFromTempAndLeavesNoCopyInSaveDir) {
   cfg.email_output.separate_n = 1;
   cfg.save_dir = save_dir_;
 
+  const std::vector<std::string> before = EmailTempDirs();
+
   const ButtonEvent event = MakeEvent("EMAIL", "8008");
   std::string saved_path;
   const Status status =
@@ -550,6 +570,15 @@ TEST_F(HandleButtonEventTest, EmailAttachesFromTempAndLeavesNoCopyInSaveDir) {
   ASSERT_EQ(status, Status::kOk);
   // EMAIL persisted nothing, so saved_path is left empty.
   EXPECT_TRUE(saved_path.empty());
+
+  // The per-press temp directory was removed on success too -- no
+  // brscan-email-* directory is left behind (issue #132).
+  std::vector<std::string> after = EmailTempDirs();
+  for (const std::string& dir : before) {
+    after.erase(std::remove(after.begin(), after.end(), dir), after.end());
+  }
+  EXPECT_TRUE(after.empty())
+      << "successful EMAIL press left a temp directory behind";
 
   // The Mail draft was composed via osascript, attaching both documents.
   ASSERT_EQ(runner_.calls().size(), 1u);
@@ -573,6 +602,62 @@ TEST_F(HandleButtonEventTest, EmailAttachesFromTempAndLeavesNoCopyInSaveDir) {
   // empty.
   EXPECT_TRUE(!std::filesystem::exists(save_dir_) ||
               std::filesystem::is_empty(save_dir_));
+}
+
+// EMAIL write-failure cleanup (issue #132): the scan is written to a
+// private mkdtemp'd temp directory, so a failure on the write path must
+// remove that directory (and any partial scan in it) rather than leaving
+// scanned content behind in $TMPDIR. Here process umask forces mkdtemp's
+// 0700 directory down to 0500 (no owner write), so WriteConfiguredOutput
+// can't create its file inside it and returns kIoError -- exercising the
+// early-return cleanup that the happy path
+// (EmailAttachesFromTempAndLeavesNoCopyInSaveDir) doesn't.
+TEST_F(HandleButtonEventTest, EmailWriteFailureLeavesNoTempDir) {
+  if (::geteuid() == 0) {
+    GTEST_SKIP() << "running as root: permission bits don't block writes";
+  }
+
+  brscan::FakeTransport t;
+  QueueButtonPreamble(&t, "EMAIL", "300,300,2,292,4,427,3,");
+
+  const int height = DefaultAutoAreaHeightAt(100);
+  auto block = EncodeBlockHeader(4);
+  const std::vector<uint8_t> raw(4 * static_cast<size_t>(height), 0x11);
+  block.insert(block.end(), raw.begin(), raw.end());
+  t.QueueRead(block);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  Config cfg = DefaultConfig();
+  cfg.email_params.mode = brscan::ScanMode::kGray;
+  cfg.email_params.x_dpi = 100;
+  cfg.email_params.y_dpi = 100;
+  cfg.email_output.format = OutputFormat::kPdf;
+  cfg.save_dir = save_dir_;
+
+  const std::vector<std::string> before = EmailTempDirs();
+
+  const ButtonEvent event = MakeEvent("EMAIL", "8009");
+  std::string saved_path;
+  const mode_t old_umask = ::umask(0200);  // Clears owner-write.
+  const Status status =
+      HandleButtonEvent(event, cfg, t, &saved_path, std::ref(runner_));
+  ::umask(old_umask);
+
+  EXPECT_EQ(status, Status::kIoError);
+  EXPECT_TRUE(saved_path.empty());
+  // The write never reached PerformAction, so the email action never ran.
+  EXPECT_TRUE(runner_.calls().empty());
+
+  // No new brscan-email-* temp directory was left behind: the failed press
+  // cleaned up after itself.
+  std::vector<std::string> after = EmailTempDirs();
+  for (const std::string& dir : before) {
+    after.erase(std::remove(after.begin(), after.end(), dir), after.end());
+  }
+  EXPECT_TRUE(after.empty())
+      << "EMAIL write failure left " << after.size()
+      << " temp director(y/ies) behind, first: "
+      << (after.empty() ? "" : after.front());
 }
 
 // Skip-blank end to end (`<dest>.skip_blank`, Touch-Panel-OFF): a 3-page

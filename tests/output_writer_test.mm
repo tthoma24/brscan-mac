@@ -167,6 +167,35 @@ std::string ImageUti(const std::filesystem::path& path) {
   return result;
 }
 
+// True if the single image at `path` decodes back as a grayscale
+// (monochrome) image. Used to confirm the HEIC path transcoded a grayscale
+// source to RGB rather than leaving it monochrome (which the HEVC encoder
+// rejects).
+bool ImageIsMonochrome(const std::filesystem::path& path) {
+  NSURL* url =
+      [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+  CGImageSourceRef src =
+      CGImageSourceCreateWithURL((__bridge CFURLRef)url, nullptr);
+  if (src == nullptr) return false;
+  CGImageRef image = CGImageSourceCreateImageAtIndex(src, 0, nullptr);
+  CFRelease(src);
+  if (image == nullptr) return false;
+  CGColorSpaceRef colorspace = CGImageGetColorSpace(image);
+  const bool mono =
+      colorspace != nullptr &&
+      CGColorSpaceGetModel(colorspace) == kCGColorSpaceModelMonochrome;
+  CGImageRelease(image);
+  return mono;
+}
+
+// A kRgb page whose `data` is not a valid JPEG stream, so
+// CreateCGImageFromScanResult (output/action_ocr.mm) fails to decode it.
+// Used to force a mid-write encode failure without a real device.
+brscan::ScanResult MakeUndecodableRgbPage(int width, int height) {
+  const std::vector<uint8_t> junk = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01};
+  return brscan::ScanResult{brscan::PixelFormat::kRgb, width, height, junk};
+}
+
 int PdfPageCount(const std::filesystem::path& path) {
   NSURL* url =
       [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
@@ -375,6 +404,75 @@ TEST(WriteConfiguredOutputTest, HeicWritesOneDecodableFilePerPage) {
   RemoveAll(written);
 }
 
+TEST(WriteConfiguredOutputTest, HeicGrayscalePageTranscodesToRgbAndSucceeds) {
+  // Apple's HEIC (HEVC) encoder rejects a grayscale (DeviceGray) source, so
+  // the writer transcodes such a page to RGB before encoding it (issue
+  // #134). A grayscale scan saved as HEIC must therefore still succeed and
+  // decode back as a non-monochrome (RGB) HEIC file.
+  const std::vector<brscan::ScanResult> pages = {MakeGrayPage(20, 10, 128)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kHeic;
+
+  const std::filesystem::path base = TempPath("heic_gray.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  ASSERT_EQ(status, brscan::Status::kOk)
+      << "grayscale HEIC write failed -- if this fails in a headless/CI-like "
+         "environment, the HEVC encoder HEIC needs may be unavailable there.";
+  ASSERT_EQ(written.size(), 1u);
+  EXPECT_EQ(written[0], TempPath("heic_gray.heic").string());
+  EXPECT_EQ(ImageUti(written[0]), "public.heic");
+  EXPECT_FALSE(ImageIsMonochrome(written[0]))
+      << "grayscale source must be transcoded to RGB for HEIC";
+  int w = 0, h = 0;
+  ASSERT_TRUE(ImageDims(written[0], &w, &h));
+  EXPECT_EQ(w, 20);
+  EXPECT_EQ(h, 10);
+  RemoveAll(written);
+}
+
+TEST(WriteConfiguredOutputTest, HeicEncodeFailureLeavesNoPartialFile) {
+  // A page that can't be decoded fails the single-image encode; no
+  // broken/partial .heic must be left behind in the output directory (issue
+  // #134).
+  const std::vector<brscan::ScanResult> pages = {
+      MakeUndecodableRgbPage(20, 10)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kHeic;
+
+  const std::filesystem::path base = TempPath("heic_fail.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  EXPECT_EQ(status, brscan::Status::kIoError);
+  EXPECT_TRUE(written.empty());
+  EXPECT_FALSE(std::filesystem::exists(TempPath("heic_fail.heic")))
+      << "a failed HEIC encode must not leave a partial file";
+}
+
+TEST(WriteConfiguredOutputTest, TiffEncodeFailureLeavesNoPartialFile) {
+  // WriteMultipageTiff creates its destination (truncating the file) before
+  // decoding pages, so a mid-write decode failure must unlink the partial
+  // TIFF rather than leave it in the output directory (issue #134).
+  const std::vector<brscan::ScanResult> pages = {
+      MakeUndecodableRgbPage(20, 10)};
+  OutputSettings settings;
+  settings.format = OutputFormat::kTiff;
+
+  const std::filesystem::path base = TempPath("tiff_fail.jpg");
+  std::vector<std::string> written;
+  const brscan::Status status =
+      WriteConfiguredOutput(pages, settings, base.string(), &written);
+
+  EXPECT_EQ(status, brscan::Status::kIoError);
+  EXPECT_TRUE(written.empty());
+  EXPECT_FALSE(std::filesystem::exists(TempPath("tiff_fail.tif")))
+      << "a failed TIFF encode must not leave a partial file";
+}
+
 TEST(WriteConfiguredOutputTest, Jpeg2000WritesOneDecodableFilePerPage) {
   const std::vector<brscan::ScanResult> pages = {MakeGrayPage(20, 10, 200),
                                                  MakeGrayPage(30, 15, 100)};
@@ -454,7 +552,7 @@ brscan::ScanResult MakeBusyGrayPage(int width, int height) {
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
       data[static_cast<size_t>(y) * width + x] =
-          static_cast<uint8_t>((x * 13 + y * 7) ^ (x * 5) & 0xFF);
+          static_cast<uint8_t>((x * 13 + y * 7) ^ (x * 5));
     }
   }
   return brscan::ScanResult{brscan::PixelFormat::kGray, width, height, data};
