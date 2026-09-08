@@ -26,11 +26,18 @@ public enum JpegQuality {
   }
 
   /// Parses a `<dest>.jpeg_quality` config value into a clamped `0...100`
-  /// quality, returning `nil` for a non-integer (blank, non-numeric) so the
-  /// caller can fall back to the default -- mirroring the daemon leaving the
-  /// field at its default when the value doesn't parse as an integer.
+  /// quality, returning `nil` for a value the daemon wouldn't parse as an
+  /// integer -- a non-integer (blank, non-numeric) or a value outside the
+  /// 32-bit range -- so the caller can fall back to the default. The daemon's
+  /// `ParseJpegQuality` uses a 32-bit `std::stoi`, so a value above
+  /// `Int32.max` throws `out_of_range` and leaves the field at its default;
+  /// rejecting it here first (before clamping) keeps the GUI in step rather
+  /// than reading e.g. `3000000000` as a clamped 100. Same guard `Dpi`/
+  /// `PositiveInt` use (see #120).
   public static func parse(_ string: String) -> Int? {
-    guard let value = Int(string) else { return nil }
+    guard let value = Int(string), value >= Int(Int32.min), value <= Int(Int32.max) else {
+      return nil
+    }
     return clamp(value)
   }
 }

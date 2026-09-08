@@ -34,4 +34,14 @@ final class OptionRulesTests: XCTestCase {
         "searchableApplies(to: \(format)) should be \(expected)")
     }
   }
+
+  func testJpegQualityAppliesToLossyImageFormats() {
+    let lossy: Set<String> = ["jpeg", "heic", "jp2"]
+    for format in OptionSets.format {
+      let expected = lossy.contains(format)
+      XCTAssertEqual(
+        OptionRules.jpegQualityApplies(to: format), expected,
+        "jpegQualityApplies(to: \(format)) should be \(expected)")
+    }
+  }
 }
