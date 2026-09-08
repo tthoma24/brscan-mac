@@ -59,6 +59,7 @@
 #include "buffer_descriptor.h"
 #include "decode_jpeg.h"  // libbrscan private header (on the libbrscan inc dir).
 #include "file_transfer.h"
+#include "page_delivery.h"
 #include "scan_outcome.h"
 #include "scan_parameters.h"
 #include "scan_translate.h"
@@ -1064,9 +1065,22 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 //     ("Scanning document" hang) nor rendered the overview. The device object is
 //     captured in OpenSession/Start from deviceObjectInfo->icaObject.
 //     It does NOT use kICANotificationDeviceICAObjectKey here.
-//   - MEMORY / overview path: the bands ARE the complete delivery. There is no
-//     end-of-scan whole-image ScanProgressStatus and no per-page
-//     ScannerPageDone; a single kICANotificationTypeScannerScanDone ends the job.
+//   - MEMORY / overview path: the bands ARE the pixel delivery -- there is no
+//     end-of-scan whole-image ScanProgressStatus. The host accumulates every
+//     band into ONE overview image keyed on the band's row offset, and each
+//     page's bands restart at row 0, so a multi-page / duplex ADF scan viewed
+//     IN-APP would paint pages 2..N on top of page 1 unless the module marks
+//     where one page ends. PR B fixes that: on a page-index CHANGE the module
+//     posts a (path-less) kICANotificationTypeScannerPageDone for the FINISHED
+//     page before the next page's first band, so the host finalizes the current
+//     image and starts a fresh one -- N pages emit N-1 boundary PageDones and a
+//     single kICANotificationTypeScannerScanDone closes the last page and ends
+//     the job. The boundary decision is the pure InMemoryPageSplitter
+//     (page_delivery.h); a SINGLE-page scan crosses no boundary, so it emits
+//     zero ScannerPageDone and behaves exactly as before. That a document-name-
+//     less PageDone makes Image Capture snapshot the overview into a distinct
+//     image is the assumption this rests on -- confirm device-in-the-loop
+//     (docs/RUNBOOK-plan-2-ica.md row C11).
 //   - FILE / final path: the same bands stream back to drive the progress bar,
 //     AND RunScan still accumulates each whole page into `out`, so after RunScan
 //     returns the finished page is encoded to the destination file and a
@@ -1277,6 +1291,40 @@ PageResult PostBand(ICAObject icaObject, const brscan::ScanBand& band,
     return PageResult::kSendFailed;
   }
   return PageResult::kOk;
+}
+
+// Posts a bare ScannerPageDone that finalizes the current IN-MEMORY (in-app)
+// overview image at a page boundary (PR B). On the MEMORY path the host
+// accumulates every band into one overview image, and each page's bands restart
+// at row 0, so a multi-page / duplex ADF scan viewed in the Image Capture window
+// would collapse pages 2..N onto page 1. Posting this at each page boundary --
+// decided by the pure InMemoryPageSplitter -- tells the host the current image
+// is complete and the next page's bands begin a fresh one.
+//
+// Unlike the FILE path's PostFilePage this carries NO
+// kICANotificationScannerDocumentNameKey: there is no file, and the page's
+// pixels were already delivered live via the accumulated ScanProgressStatus
+// bands, so this notification is purely a page-boundary marker. Referenced to
+// the DEVICE object like every scanner notification (Task 15) and sent
+// fire-and-forget, mirroring the FILE-path PageDone (a failed page-done delivery
+// does not itself abort the scan). Clean-room:
+// kICANotificationTypeScannerPageDone is an interface fact (ICADevices.tbd);
+// that Image Capture snapshots the overview into a distinct image on a
+// document-name-less PageDone is the ASSUMPTION this fix rests on and must be
+// confirmed device-in-the-loop (docs/RUNBOOK-plan-2-ica.md row C11).
+void PostInMemoryPageDone(ICAObject deviceObject, int pageIndex) {
+  CFMutableDictionaryRef pageDict = CFDictionaryCreateMutable(
+      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  if (pageDict == nullptr) return;
+  const ICAError err = SendScannerNotification(
+      pageDict, deviceObject, kICANotificationTypeScannerPageDone,
+      /*waitForReply=*/false);
+  CFRelease(pageDict);
+  os_log(Log(),
+         "SyncScan: in-memory page %d boundary -> ScannerPageDone (no path) "
+         "err=%d",
+         pageIndex, err);
 }
 
 // ---------------------------------------------------------------------------
@@ -1587,11 +1635,28 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
     bool loggedFirstBand = false;
     bool sendFailed = false;
     long bandCount = 0;
+    // MEMORY / in-app per-page delivery (PR B). Only the MEMORY path streams
+    // pages into the host's single overview accumulator, so only it needs a
+    // boundary ScannerPageDone to split pages -- the FILE path delivers each
+    // page via PostFilePage in the post-loop below. The splitter reports the
+    // finished page's index on each page-index change; a single-page scan
+    // crosses no boundary, so nothing is posted and behavior is unchanged.
+    brscan::ica::InMemoryPageSplitter pageSplitter;
     const brscan::BandCallback onBand =
         [&](const brscan::ScanBand& band) -> bool {
       const bool logArgs = !loggedFirstBand;
       loggedFirstBand = true;
       ++bandCount;
+      if (!fileTransfer) {
+        // Finalize the previous in-memory page BEFORE this band's rows land, so
+        // the host closes that image and the new page's row-0 band starts a
+        // fresh one instead of overwriting the previous page.
+        const brscan::ica::PageBoundary boundary =
+            pageSplitter.Observe(band.page_index);
+        if (boundary.finalize_previous) {
+          PostInMemoryPageDone(deviceObject, boundary.page_index);
+        }
+      }
       const PageResult r = PostBand(deviceObject, band, logArgs);
       if (r == PageResult::kCanceled) {
         canceled = true;
@@ -1610,8 +1675,10 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
     const brscan::Status scanStatus =
         brscan::RunScan(transport, params, &pages, onBand);
     os_log(Log(),
-           "SyncScan: RunScan -> status=%d pages=%zu bands=%ld canceled=%d",
-           (int)scanStatus, pages.size(), bandCount, canceled);
+           "SyncScan: RunScan -> status=%d pages=%zu bands=%ld canceled=%d "
+           "inMemPageBoundaries=%d",
+           (int)scanStatus, pages.size(), bandCount, canceled,
+           pageSplitter.boundaries());
 
     // Classify the finished scan (pure; unit-tested in scan_outcome_test).
     const brscan::ica::ScanOutcome outcome = brscan::ica::ClassifyScanOutcome(
@@ -1666,8 +1733,10 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
     } else if (fileTransfer) {
       // FILE path only: the bands drove the progress bar; now encode each whole
       // page to the destination file and post ScannerPageDone(path). The MEMORY
-      // path needs no post-processing -- its bands were the complete delivery,
-      // so it sends only the final ScannerScanDone below.
+      // path needs no post-processing here -- its bands were the pixel delivery
+      // and it already posted a boundary ScannerPageDone per finished page in
+      // the band callback (PR B), so it only sends the final ScannerScanDone
+      // below.
       int idx = 0;
       for (const brscan::ScanResult& page : pages) {
         os_log(Log(), "SyncScan: file page %d %dx%d format=%{public}s payload=%zu",
