@@ -51,6 +51,63 @@ final class RouteViewModelTests: XCTestCase {
     }
   }
 
+  // MARK: Format coercion on mode change
+
+  /// Changing to a mode that can't produce the current format coerces the
+  /// format to `pdf`, so the produced route never pairs an invalid
+  /// mode+format (e.g. bw + heic, which the daemon would transcode).
+  func testChangingModeToBwCoercesInvalidHeicFormatToPdf() {
+    let viewModel = RouteViewModel()
+    viewModel.mode = "color"
+    viewModel.format = "heic"
+
+    viewModel.mode = "bw"
+
+    XCTAssertEqual(viewModel.format, "pdf")
+    XCTAssertEqual(viewModel.route.mode, "bw")
+    XCTAssertEqual(viewModel.route.format, "pdf")
+  }
+
+  /// Grayscale rejects only heic; a jpeg route survives the switch.
+  func testChangingModeToGrayCoercesHeicButKeepsJpeg() {
+    let viewModel = RouteViewModel()
+    viewModel.mode = "color"
+    viewModel.format = "heic"
+    viewModel.mode = "gray"
+    XCTAssertEqual(viewModel.format, "pdf")
+
+    viewModel.format = "jpeg"
+    viewModel.mode = "truegray"
+    XCTAssertEqual(viewModel.format, "jpeg")
+  }
+
+  /// A format still valid for the new mode is left untouched.
+  func testChangingModeLeavesAValidFormatUntouched() {
+    let viewModel = RouteViewModel()
+    viewModel.format = "tiff"
+
+    viewModel.mode = "bw"
+    XCTAssertEqual(viewModel.format, "tiff")
+
+    viewModel.mode = "color"
+    XCTAssertEqual(viewModel.format, "tiff")
+  }
+
+  /// The produced route is always a valid mode+format pair across every
+  /// mode, given a format that some modes disallow.
+  func testProducedRouteNeverPairsAnInvalidModeAndFormat() {
+    for startFormat in ["heic", "jpeg", "jp2"] {
+      let viewModel = RouteViewModel()
+      viewModel.format = startFormat
+      for mode in OptionSets.mode {
+        viewModel.mode = mode
+        XCTAssertTrue(
+          OptionRules.allowedFormats(forMode: viewModel.route.mode).contains(viewModel.route.format),
+          "route \(viewModel.route.mode)+\(viewModel.route.format) should be a valid pair")
+      }
+    }
+  }
+
   // MARK: Binding
 
   func testSettingEachFieldUpdatesTheProducedRoute() {

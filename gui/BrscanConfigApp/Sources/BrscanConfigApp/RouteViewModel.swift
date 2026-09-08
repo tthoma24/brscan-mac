@@ -38,7 +38,23 @@ public final class RouteViewModel: ObservableObject {
     }
   }
 
-  @Published public var mode: String
+  /// The safe format the mode setter falls back to when a mode change makes
+  /// the current `format` invalid. `pdf` is in every mode's allowed set (see
+  /// `OptionRules.allowedFormats(forMode:)`), so it is always a valid pair.
+  private static let safeFormat = "pdf"
+
+  /// `<dest>.mode`. Changing it re-gates the allowed formats
+  /// (`OptionRules.allowedFormats(forMode:)`); if the current `format` is no
+  /// longer allowed for the new mode, it is coerced to `safeFormat` here --
+  /// in the setter, not just the view -- so `route` never emits, and a save
+  /// never persists, an invalid mode+format pair.
+  @Published public var mode: String {
+    didSet {
+      if !OptionRules.allowedFormats(forMode: mode).contains(format) {
+        format = Self.safeFormat
+      }
+    }
+  }
   @Published public var source: String
   @Published public var dpi: Int
   @Published public var format: String
