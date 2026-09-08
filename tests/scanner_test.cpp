@@ -428,6 +428,71 @@ TEST(RunScan, ColorFlatbedShortSentinelChunkThirteenByteHeaderReassembles) {
   ASSERT_EQ(pages[0].data, jpeg);
 }
 
+// Same short-sentinel anomaly, on the real 12-BYTE-header firmware
+// (EncodeBlockHeader12), with the byte immediately before the true boundary
+// forced to be a 0x00 JPEG entropy byte. That 0x00 makes the genuine 12-byte
+// next header (0x64 07 00 ..) byte-identical to a legacy 13-byte header
+// (00 64 07 00 ..) starting one byte earlier, so an unconditional 13-byte
+// matcher anchors at boundary-1, drops the 0x00 from the reassembled JPEG,
+// and corrupts the page (R1). Gating the 13-byte matcher to 13-byte firmware
+// keeps the 12-byte scan from ever seeing that shape, so the boundary lands
+// at its true offset and the JPEG reassembles byte-for-byte. Reverting the
+// gate makes this test fail (the reassembled data loses the 0x00).
+TEST(RunScan, ColorFlatbedShortSentinelChunkTwelveByteZeroBeforeBoundary) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,3460,427,5052,"));
+
+  const auto jpeg = MakeLargeSyntheticJpeg(300, 300);
+  ASSERT_GT(jpeg.size(), 0xfff4u + 40000u)
+      << "fixture must span a short sentinel chunk plus more";
+
+  constexpr size_t kMaxChunkBytes = 0xfff4;
+
+  // Split the first (short sentinel) chunk right after a naturally occurring
+  // 0x00 byte, so the byte immediately before the boundary is 0x00 -- the
+  // exact condition that lets the 13-byte matcher misfire one byte early.
+  size_t boundary = 0;
+  for (size_t i = 40000; i < jpeg.size(); ++i) {
+    if (jpeg[i - 1] == 0x00) {
+      boundary = i;
+      break;
+    }
+  }
+  ASSERT_NE(boundary, 0u) << "fixture must contain a 0x00 byte near the split";
+  ASSERT_EQ(jpeg[boundary - 1], 0x00);
+  ASSERT_LT(boundary, kMaxChunkBytes);
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+
+  // Chunk 0: 12-byte header DECLARES the 0xfff4 sentinel but carries only
+  // `boundary` bytes; the next 12-byte header begins there, so window[B-1] is
+  // the 0x00 that must NOT be spliced away.
+  append(EncodeBlockHeader12(static_cast<uint16_t>(kMaxChunkBytes)));
+  stream.insert(stream.end(), jpeg.begin(), jpeg.begin() + boundary);
+
+  for (size_t off = boundary; off < jpeg.size();) {
+    const size_t remaining = jpeg.size() - off;
+    const size_t chunk_len = std::min(remaining, kMaxChunkBytes);
+    append(EncodeBlockHeader12(static_cast<uint16_t>(chunk_len)));
+    stream.insert(stream.end(), jpeg.begin() + off, jpeg.begin() + off + chunk_len);
+    off += chunk_len;
+  }
+  t.QueueRead(stream);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, ColorParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].width, 300);
+  EXPECT_EQ(pages[0].height, 300);
+  ASSERT_EQ(pages[0].data, jpeg);
+}
+
 // A color page whose block headers keep coming but whose end-of-page marker
 // never arrives must not accumulate without bound: RunColorScan caps a page's
 // bytes at a generous multiple of the granted area's worst-case encoded size

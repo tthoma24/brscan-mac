@@ -442,19 +442,25 @@ Status DetectHeaderLength(Framer* framer, int timeout_ms, int* header_len) {
 }
 
 // Reads one block header (12 or 13 bytes, per DetectHeaderLength) and
-// parses it.
-Status ReadBlockHeader(Framer* framer, int timeout_ms, BlockHeader* header) {
-  int header_len = 0;
-  Status s = DetectHeaderLength(framer, timeout_ms, &header_len);
+// parses it. When `header_len` is non-null, reports which shape was on the
+// wire (12 or 13) so the caller can gate the chunk-boundary scan on the
+// firmware's own shape (see FindChunkBoundary); DetectHeaderLength is
+// consistent for a session, so this is the session's shape.
+Status ReadBlockHeader(Framer* framer, int timeout_ms, BlockHeader* header,
+                       int* header_len = nullptr) {
+  int detected_len = 0;
+  Status s = DetectHeaderLength(framer, timeout_ms, &detected_len);
   if (s != Status::kOk) return s;
+  if (header_len != nullptr) *header_len = detected_len;
   std::vector<uint8_t> header_bytes;
-  s = framer->ReadExact(static_cast<size_t>(header_len), timeout_ms, &header_bytes);
+  s = framer->ReadExact(static_cast<size_t>(detected_len), timeout_ms,
+                        &header_bytes);
   if (s != Status::kOk) return s;
   // ParseBlockHeader expects the legacy 13-byte shape; normalize a
   // detected 12-byte header onto it by restoring the dropped leading byte.
   // Its value doesn't matter -- only the anchor bytes and the trailing
   // length/width field, both preserved by this shift, are read.
-  if (header_len == 12) header_bytes.insert(header_bytes.begin(), uint8_t{0});
+  if (detected_len == 12) header_bytes.insert(header_bytes.begin(), uint8_t{0});
   const auto parsed = ParseBlockHeader(header_bytes.data(), header_bytes.size());
   if (!parsed.has_value()) return Status::kProtocolError;
   *header = *parsed;
@@ -479,12 +485,20 @@ Status ReadBlockHeader(Framer* framer, int timeout_ms, BlockHeader* header) {
 // truncating the page. The full fixed-byte match survived both the ~10 MB
 // simplex and duplex captures with no false positive.
 //
-// Matching the 13-byte shape too is what keeps a short sentinel (0xfff4)
-// chunk's boundary from being found one byte late on 13-byte firmware: its
-// next header leads with 0x00, so a 12-byte-only scan would anchor on the
-// following 0x64 and splice that stray 0x00 into the reassembled JPEG. (The
-// end-of-page marker has no 13-byte variant -- RunColorScan only ever reads
-// the 10-byte 0x82-led shape.)
+// Exactly ONE next-header shape is matched, chosen by `header_len` (12 or
+// 13, the session's DetectHeaderLength result): a header shape only ever
+// appears on the wire in the firmware's own length, so running the other
+// shape's matcher can only misfire. That gating is load-bearing on 12-byte
+// firmware: a genuine 12-byte header at boundary B whose preceding byte
+// window[B-1] is a 0x00 JPEG entropy byte is byte-identical to the 13-byte
+// shape starting at B-1, so an unconditional 13-byte matcher would match at
+// B-1 first (the scan ascends) and drop that 0x00 from the reassembled JPEG
+// -- silent corruption. Only the 13-byte firmware runs the 13-byte matcher,
+// where anchoring on the leading 0x00 is correct: it keeps a short sentinel
+// (0xfff4) chunk's boundary from being found one byte late, since that
+// firmware's next header genuinely leads with 0x00. (The end-of-page marker
+// has no 13-byte variant -- RunColorScan only ever reads the 10-byte 0x82-led
+// shape -- so its matcher stays unconditional.)
 //
 // On a match, sets *pos to the boundary offset (the sentinel chunk's true
 // data length) and *is_end_of_page to which pattern matched, and returns
@@ -493,8 +507,8 @@ Status ReadBlockHeader(Framer* framer, int timeout_ms, BlockHeader* header) {
 // kMaxChunkBytes so a full chunk that is followed by more data (rather than a
 // boundary) is read exactly, via the "no boundary -> read kMaxChunkBytes"
 // path.
-bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
-                       bool* is_end_of_page) {
+bool FindChunkBoundary(const std::vector<uint8_t>& window, int header_len,
+                       size_t* pos, bool* is_end_of_page) {
   const size_t limit =
       std::min<size_t>(window.size(), static_cast<size_t>(kMaxChunkBytes));
   for (size_t p = 1; p <= limit; ++p) {
@@ -514,8 +528,10 @@ bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
     }
     // Next block header (12-byte shape): <type> 07 00 <pidx> 00 84 .. .. 00
     // 00, with type in {0x64, 0x40, 0x42}. The [+2] and [+4] zeros are
-    // required for the same anti-false-match reason.
-    if ((window[p] == 0x64 || window[p] == 0x40 || window[p] == 0x42) &&
+    // required for the same anti-false-match reason. Runs only on 12-byte
+    // firmware.
+    if (header_len == 12 &&
+        (window[p] == 0x64 || window[p] == 0x40 || window[p] == 0x42) &&
         window[p + 1] == 0x07 && window[p + 2] == 0x00 &&
         window[p + 4] == 0x00 && window[p + 5] == 0x84 &&
         window[p + 8] == 0x00 && window[p + 9] == 0x00) {
@@ -527,9 +543,11 @@ bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
     // .. .. 00 00. Same anchors and zero bytes as the 12-byte shape, shifted
     // one byte later by the leading 0x00. Anchoring on this 0x00 (not the
     // 0x64 one byte on) is what puts the boundary at the chunk's true end on
-    // 13-byte firmware. Guarded separately because it reads one byte past the
-    // 10-byte window the checks above need.
-    if (p + 11 <= window.size() && window[p] == 0x00 &&
+    // 13-byte firmware. Runs only on 13-byte firmware -- see the header note
+    // on why matching it against 12-byte firmware corrupts the page. Guarded
+    // on window size too because it reads one byte past the 10-byte window the
+    // checks above need.
+    if (header_len == 13 && p + 11 <= window.size() && window[p] == 0x00 &&
         (window[p + 1] == 0x64 || window[p + 1] == 0x40 ||
          window[p + 1] == 0x42) &&
         window[p + 2] == 0x07 && window[p + 3] == 0x00 &&
@@ -590,7 +608,8 @@ bool FindChunkBoundary(const std::vector<uint8_t>& window, size_t* pos,
 // EOI (that is a per-page finalization check the caller does once the page's
 // end-of-page marker arrives).
 Status ReadOneChunkBody(Framer* framer, const BlockHeader& header,
-                        int timeout_ms, std::vector<uint8_t>* out) {
+                        int header_len, int timeout_ms,
+                        std::vector<uint8_t>* out) {
   if (header.width <= 0) return Status::kProtocolError;
 
   if (header.width != kMaxChunkBytes) {
@@ -614,7 +633,7 @@ Status ReadOneChunkBody(Framer* framer, const BlockHeader& header,
 
   size_t boundary = 0;
   bool is_end_of_page = false;
-  if (FindChunkBoundary(window, &boundary, &is_end_of_page)) {
+  if (FindChunkBoundary(window, header_len, &boundary, &is_end_of_page)) {
     std::vector<uint8_t> chunk;
     s = framer->ReadExact(boundary, timeout_ms, &chunk);
     if (s != Status::kOk) return s;
@@ -772,12 +791,13 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
     // Otherwise a block header: read it and route its one chunk by page
     // index.
     BlockHeader header;
-    s = ReadBlockHeader(framer, timeout_ms, &header);
+    int header_len = 0;
+    s = ReadBlockHeader(framer, timeout_ms, &header, &header_len);
     if (s != Status::kOk) return s;
 
     std::vector<uint8_t>& jpeg = in_progress[header.page_index];
     const size_t before = jpeg.size();
-    s = ReadOneChunkBody(framer, header, timeout_ms, &jpeg);
+    s = ReadOneChunkBody(framer, header, header_len, timeout_ms, &jpeg);
     if (s != Status::kOk) return s;
     // Guard against a device that streams chunks forever without ever sending
     // this page's end-of-page marker (which is what frees the buffer): cap the
