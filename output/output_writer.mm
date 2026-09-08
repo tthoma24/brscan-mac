@@ -11,9 +11,11 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "output/action_ocr.h"
@@ -138,6 +140,51 @@ NSURL* FileUrl(const std::string& path) {
   return [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
 }
 
+// Removes a partial output file left at `path` by a destination that was
+// created (which truncates the file) but never finalized. Best-effort: a
+// failed encode must not leave a broken/empty file behind in save_dir (see
+// issue #134). Ignores errors -- the file may simply not exist.
+void RemovePartialFile(const std::string& path) {
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+// True if `image` is a grayscale (single-channel DeviceGray/monochrome)
+// image. The scanner's kGray and kBitonal pages decode to DeviceGray (see
+// output/action_ocr.mm's CreateCGImageFromScanResult); kRgb pages do not.
+bool ImageIsGrayscale(CGImageRef image) {
+  CGColorSpaceRef colorspace = CGImageGetColorSpace(image);
+  return colorspace != nullptr &&
+         CGColorSpaceGetModel(colorspace) == kCGColorSpaceModelMonochrome;
+}
+
+// Draws `image` into an RGB bitmap and returns the resulting RGB CGImage, or
+// nullptr on failure. Used only for the HEIC path: Apple's HEIC (HEVC)
+// encoder rejects a 1-channel DeviceGray source, so a grayscale/B&W scan
+// saved as HEIC must be transcoded to RGB first (issue #134). The caller
+// owns the returned image.
+CGImageRef CreateRgbCopy(CGImageRef image) {
+  const size_t width = CGImageGetWidth(image);
+  const size_t height = CGImageGetHeight(image);
+  if (width == 0 || height == 0) return nullptr;
+
+  CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+  CGContextRef ctx = CGBitmapContextCreate(
+      /*data=*/nullptr, width, height, /*bitsPerComponent=*/8,
+      /*bytesPerRow=*/0, rgb,
+      kCGImageAlphaNoneSkipLast | kCGBitmapByteOrderDefault);
+  CGColorSpaceRelease(rgb);
+  if (ctx == nullptr) return nullptr;
+
+  CGContextDrawImage(
+      ctx, CGRectMake(0, 0, static_cast<CGFloat>(width),
+                      static_cast<CGFloat>(height)),
+      image);
+  CGImageRef out = CGBitmapContextCreateImage(ctx);
+  CGContextRelease(ctx);
+  return out;
+}
+
 // Writes `pages` as one multi-page TIFF at `path`, each page carrying its
 // own Compression tag per EffectiveTiffCompression. Returns kIoError if the
 // destination can't be created, a page can't be decoded, or finalizing
@@ -171,13 +218,21 @@ brscan::Status WriteMultipageTiff(
       CGImageRelease(image);
     }
 
+    // Creating the destination above truncated the file at `path`, so any
+    // failure from here must unlink it rather than leave a partial TIFF
+    // behind in save_dir (issue #134).
     if (!ok) {
       CFRelease(dest);
+      RemovePartialFile(path);
       return brscan::Status::kIoError;
     }
     const bool finalized = CGImageDestinationFinalize(dest);
     CFRelease(dest);
-    return finalized ? brscan::Status::kOk : brscan::Status::kIoError;
+    if (!finalized) {
+      RemovePartialFile(path);
+      return brscan::Status::kIoError;
+    }
+    return brscan::Status::kOk;
   }
 }
 
@@ -211,6 +266,20 @@ brscan::Status WriteSingleImageFile(const brscan::ScanResult& page,
     CGImageRef image = CreateCGImageFromScanResult(page);
     if (image == nullptr) return brscan::Status::kIoError;
 
+    // HEIC only: Apple's HEVC encoder rejects a grayscale (DeviceGray,
+    // 1-channel) source, so a grayscale/B&W scan saved as HEIC would fail.
+    // Transcode such a source to RGB so HEIC succeeds in every scan mode
+    // (issue #134); JPEG/JPEG 2000/PNG/GIF/BMP encode the image untouched.
+    // If the transcode itself fails, fall through with the original image
+    // (the encode below then fails cleanly, unlinking any partial file).
+    if (CFEqual(uti, CFSTR("public.heic")) && ImageIsGrayscale(image)) {
+      CGImageRef rgb = CreateRgbCopy(image);
+      if (rgb != nullptr) {
+        CGImageRelease(image);
+        image = rgb;
+      }
+    }
+
     CGImageDestinationRef dest = CGImageDestinationCreateWithURL(
         (__bridge CFURLRef)FileUrl(path), uti, 1, nullptr);
     if (dest == nullptr) {
@@ -222,7 +291,13 @@ brscan::Status WriteSingleImageFile(const brscan::ScanResult& page,
     const bool finalized = CGImageDestinationFinalize(dest);
     CFRelease(dest);
     CGImageRelease(image);
-    return finalized ? brscan::Status::kOk : brscan::Status::kIoError;
+    // Creating the destination truncated the file at `path`, so a failed
+    // finalize would otherwise leave a broken/partial file behind.
+    if (!finalized) {
+      RemovePartialFile(path);
+      return brscan::Status::kIoError;
+    }
+    return brscan::Status::kOk;
   }
 }
 

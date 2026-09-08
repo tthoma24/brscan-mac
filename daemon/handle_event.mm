@@ -3,10 +3,12 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "output/action_ocr.h"  // CreateCGImageFromScanResult (shared per-page decode)
@@ -61,6 +63,27 @@ bool IsPathWithinDirectory(const std::filesystem::path& path,
   if (rel_str.rfind("../", 0) == 0) return false;
   return true;
 }
+
+// Runs `fn` when it goes out of scope, unless Dismiss() was called first.
+// Used to guarantee the EMAIL temp directory (and any partial scan left in
+// it) is removed on every early-return path -- so a failed EMAIL press
+// never leaves scanned content behind in $TMPDIR (issue #132). Dismissed
+// once the write has succeeded and the temp directory is being handed off
+// to PerformAction, which owns its fate from there.
+class ScopeExit {
+ public:
+  explicit ScopeExit(std::function<void()> fn) : fn_(std::move(fn)) {}
+  ~ScopeExit() {
+    if (fn_) fn_();
+  }
+  void Dismiss() { fn_ = nullptr; }
+
+  ScopeExit(const ScopeExit&) = delete;
+  ScopeExit& operator=(const ScopeExit&) = delete;
+
+ private:
+  std::function<void()> fn_;
+};
 
 }  // namespace
 
@@ -344,6 +367,19 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     output_dir = email_temp_dir.string();
   }
 
+  // Guarantee the EMAIL temp directory never outlives a failed press: from
+  // here on, every early return below (containment refusal, write failure,
+  // empty-output guard, post-write containment refusal) removes it and any
+  // partial scan it holds. For FILE/IMAGE/OCR `email_temp_dir` is empty, so
+  // this is a no-op; the guard is dismissed at the PerformAction hand-off
+  // below, after which the success/failure cleanup decides its fate.
+  ScopeExit temp_dir_cleanup([&email_temp_dir] {
+    if (!email_temp_dir.empty()) {
+      std::error_code rm_ec;
+      std::filesystem::remove_all(email_temp_dir, rm_ec);
+    }
+  });
+
   // Best-effort: if output_dir already exists (the common case after the
   // first scan; always true for EMAIL's just-created temp dir) this is a
   // no-op; if it can't be created, WriteConfiguredOutput below will fail to open the
@@ -430,6 +466,12 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
     }
   }
 
+  // The write and both containment checks passed: hand the temp directory
+  // off to PerformAction, whose success/failure decides its fate below.
+  // Dismiss the scope-exit guard so it no longer removes it out from under
+  // that decision.
+  temp_dir_cleanup.Dismiss();
+
   const Status action_status = PerformAction(event.func, written, cfg, runner);
 
   // EMAIL cleanup: on success, PerformEmailAction has removed the temp
@@ -437,11 +479,12 @@ Status HandleButtonEvent(const ButtonEvent& event, const Config& cfg,
   // leave saved_path empty -- there is no persisted file to point at (issue
   // #20). On failure, PerformEmailAction kept the file(s); leave the temp
   // directory in place and point saved_path at the first so the scan stays
-  // discoverable.
+  // discoverable. remove_all (not a plain remove) so a stray file the
+  // action failed to consume can't strand the directory.
   if (is_email) {
     if (action_status == Status::kOk) {
       std::error_code rm_ec;
-      std::filesystem::remove(email_temp_dir, rm_ec);
+      std::filesystem::remove_all(email_temp_dir, rm_ec);
     } else {
       *saved_path = written.front();
     }
