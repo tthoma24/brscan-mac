@@ -1053,23 +1053,43 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
       if (it == in_progress.end()) return Status::kProtocolError;
       PageState& page = it->second;
 
-      // The device can deliver fewer rows than the requested area's height
-      // (early end-of-page / auto-crop). Pad the tail so the page is exactly
-      // width x height -- DecodeGrayRaw and WrapBitonalImage require an exact
-      // byte count -- filling with white (0xFF gray samples; 0x00 packed
-      // bitonal, where a 1 bit is black), matching a blank paper edge. The
-      // reserve on this page's first row sized `pixels` for the full height, so
-      // this resize never reallocates and the bands emitted above stay valid.
-      if (page.rows_read < height) {
+      // ADF auto-crop: when the fed sheet is shorter than the requested Size,
+      // the device fires an early end-of-page after only the sheet's rows. The
+      // tail padding below is OURS (not device pixels) and we know the true row
+      // count, so for the ADF source emit the page at its actual received height
+      // rather than padding -- cropping the blank trailing band. This mirrors
+      // the color path's module-side TrailingPadRows crop (ica-module/adf_crop.h,
+      // applied for kRgb): both give ADF "crop to the sheet." The flatbed keeps
+      // the full requested height (the glass scans the whole area), so it never
+      // crops.
+      const int emit_height =
+          (exec_params.source == Source::kAdf && page.rows_read < height)
+              ? page.rows_read
+              : height;
+
+      // Pad a short delivery up to emit_height so the decode gets an exact byte
+      // count -- DecodeGrayRaw and WrapBitonalImage require one -- filling with
+      // white (0xFF gray samples; 0x00 packed bitonal, where a 1 bit is black),
+      // matching a blank paper edge. When cropping (emit_height ==
+      // page.rows_read) this is a no-op: `pixels` already holds exactly the
+      // received rows. The reserve on this page's first row sized `pixels` for
+      // the full height, so this resize never reallocates and the bands emitted
+      // above stay valid.
+      if (page.rows_read < emit_height) {
         const uint8_t fill = bitonal ? 0x00 : 0xFF;
-        page.pixels.resize(row_bytes * static_cast<size_t>(height), fill);
+        page.pixels.resize(row_bytes * static_cast<size_t>(emit_height), fill);
       }
 
-      // Flush every remaining row (the last partial band plus any padding) so
-      // this page's band stream covers all `height` rows contiguously, at its
-      // 0-based page index (pidx - 1), exactly as RunColorScan emits.
-      while (on_band && page.band_start < height) {
-        const int num_rows = std::min(kBandRows, height - page.band_start);
+      // Flush every remaining row (the last partial band, plus any padding on a
+      // flatbed short delivery) so this page's band stream covers all
+      // emit_height rows contiguously, at its 0-based page index (pidx - 1),
+      // exactly as RunColorScan emits. Bounding by emit_height keeps a cropped
+      // ADF page from reading past its (unpadded) `pixels`; the band's
+      // full_height stays the requested `height` (its documented meaning, and
+      // consistent with the mid-scan bands emitted above -- the file, not the
+      // live preview, is what the crop shortens, as on the color path).
+      while (on_band && page.band_start < emit_height) {
+        const int num_rows = std::min(kBandRows, emit_height - page.band_start);
         const Status es = EmitBand(
             on_band, pidx - 1, format, width, height, page.band_start, num_rows,
             page.pixels.data() +
@@ -1086,15 +1106,15 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
 
       Image image;
       const Status decode_status =
-          bitonal ? WrapBitonalImage(width, height, page.pixels, &image)
-                  : DecodeGrayRaw(width, height, page.pixels.data(),
+          bitonal ? WrapBitonalImage(width, emit_height, page.pixels, &image)
+                  : DecodeGrayRaw(width, emit_height, page.pixels.data(),
                                   page.pixels.size(), &image);
       if (decode_status != Status::kOk) return decode_status;
 
       ScanResult result;
       result.format = format;
       result.width = width;
-      result.height = height;
+      result.height = emit_height;
       result.data = std::move(page.pixels);
       // Collect by page index, not completion order (see `finished` above): the
       // flush at job end emits in ascending (document) order.

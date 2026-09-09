@@ -845,6 +845,164 @@ TEST(RunScan, TrueGrayFlatbedShortDeliveryPadsToRequestedHeight) {
   EXPECT_EQ(pages[0].data, want);
 }
 
+// --- ADF short-page auto-crop (RLENGTH gray/BW) ---------------------------
+//
+// The ADF analogue of the color path's trailing-gray crop (ica-module's
+// adf_crop.h TrailingPadRows, applied module-side for kRgb). On the RLENGTH
+// modes the DEVICE sends only the fed sheet's rows and then an early
+// end-of-page, so a Size larger than the sheet leaves rows_read < the
+// requested height. The tail padding is OURS (0xFF gray / 0x00 bitonal), and
+// we know the true row count, so the crop is count-based: for the ADF source
+// the page is emitted at its actual received height, not padded. The flatbed
+// keeps padding to the requested height (the glass scans the whole area).
+
+// ADF True Gray (GRAY256): 2 rows delivered against a requested height of 4 ->
+// the page is cropped to 2 rows, with no trailing white fill.
+TEST(RunScan, TrueGrayAdfShortDeliveryCropsToSheet) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  // Requested height_px=4, but only 2 rows arrive before end-of-page.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,4,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row0_payload = {0xA0, 0xA1, 0xA2, 0xA3};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row1_payload = {0xB0, 0xB1, 0xB2, 0xB3};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  // End-of-page after just 2 of the 4 requested rows, then job-final.
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = TrueGrayParams();
+  params.source = brscan::Source::kAdf;
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  // Cropped to the sheet: 2 rows, NOT padded up to the requested 4.
+  EXPECT_EQ(pages[0].height, 2);
+  const std::vector<uint8_t> want = {0xA0, 0xA1, 0xA2, 0xA3,
+                                     0xB0, 0xB1, 0xB2, 0xB3};
+  EXPECT_EQ(pages[0].data, want);
+}
+
+// ADF Black & White (TEXT/C=RLENGTH): 2 rows delivered against a requested
+// height of 4 -> cropped to 2 rows, no trailing 0x00 (black) fill.
+TEST(RunScan, BlackWhiteAdfShortDeliveryCropsToSheet) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  // width_px=9 (row_bytes = ceil(9/8) = 2), height_px=4; 2 rows arrive.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,4,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row0_payload = {0x01, 0xAA, 0xBB};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row1_payload = {0x01, 0xCC, 0xDD};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = BlackWhiteParams();
+  params.source = brscan::Source::kAdf;
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kBitonal);
+  EXPECT_EQ(pages[0].width, 9);
+  // Cropped to the sheet: 2 rows (4 bytes), NOT padded up to the requested 4.
+  EXPECT_EQ(pages[0].height, 2);
+  const std::vector<uint8_t> want = {0xAA, 0xBB, 0xCC, 0xDD};
+  EXPECT_EQ(pages[0].data, want);
+}
+
+// Flatbed companion (behavior preserved): the SAME short RLENGTH bitonal
+// stream on the FLATBED source is padded up to the requested height, not
+// cropped -- the glass scans the whole requested area. Mirrors
+// TrueGrayFlatbedShortDeliveryPadsToRequestedHeight for the bitonal mode.
+TEST(RunScan, BlackWhiteFlatbedShortDeliveryPadsToRequestedHeight) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=9 (row_bytes = 2), height_px=4; only 2 rows arrive.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,4,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row0_payload = {0x01, 0xAA, 0xBB};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row1_payload = {0x01, 0xCC, 0xDD};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kBitonal);
+  EXPECT_EQ(pages[0].width, 9);
+  EXPECT_EQ(pages[0].height, 4);
+  // Two real rows, then two 0x00 (blank) padded rows to the requested height.
+  const std::vector<uint8_t> want = {0xAA, 0xBB, 0xCC, 0xDD,
+                                     0x00, 0x00, 0x00, 0x00};
+  EXPECT_EQ(pages[0].data, want);
+}
+
+// A full-height ADF RLENGTH page (rows_read == the requested height) is
+// emitted unchanged -- the crop only fires on a SHORT delivery, so a
+// size-matched ADF gray scan is byte-for-byte intact.
+TEST(RunScan, TrueGrayAdfFullHeightNotCropped) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  // Requested height_px=2, and exactly 2 rows arrive (a size-matched sheet).
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,2,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row0_payload = {0xA0, 0xA1, 0xA2, 0xA3};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row1_payload = {0xB0, 0xB1, 0xB2, 0xB3};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = TrueGrayParams();
+  params.source = brscan::Source::kAdf;
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].height, 2);
+  const std::vector<uint8_t> want = {0xA0, 0xA1, 0xA2, 0xA3,
+                                     0xB0, 0xB1, 0xB2, 0xB3};
+  EXPECT_EQ(pages[0].data, want);
+}
+
 TEST(RunScan, BusyGreetingReportsBusy) {
   brscan::FakeTransport t;
   t.QueueRead(std::string("-NG 401\r\n"));
