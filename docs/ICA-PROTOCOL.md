@@ -272,9 +272,11 @@ The module posts, per scan, in order (via `ICDSendNotification` /
    with plain `ICDSendNotification`.
 4. `kICANotificationTypeScannerScanDone` — one per scan, ends the job. Keys:
    `kICANotificationICAObjectKey` (device object) + `kICANotificationTypeKey`.
-   Plain `ICDSendNotification`. A clean host cancel (`RunScan` returned
-   `kCancelled`) also ends with a clean `ScannerScanDone` (no file written, no
-   leaked scoped URL / transport).
+   Plain `ICDSendNotification`. A clean cancel (`RunScan` returned
+   `kCancelled` — a host Cancel via the band callback, or a device Stop-button
+   cancel decoded as `Status::kCancelled`, C15) also ends with a clean
+   `ScannerScanDone` (no file written, no leaked scoped URL / transport), but
+   first posts a **`kICANotificationTypeTransactionCanceled`** (see below).
 
 `kICANotificationICAObjectKey` must be the **device object's** `icaObject` on
 every notification so the host correlates them to the session; using the Start
@@ -418,6 +420,19 @@ stops reading promptly and returns `Status::kCancelled`; the module then writes
 no file and finishes with a clean `ScannerScanDone`. This supersedes the earlier
 page-boundary-only cancel (the old whole-page hand-back could only observe a
 cancel between pages).
+
+On a cancel the module first posts a **`kICANotificationTypeTransactionCanceled`**
+notification (device object, plain fire-and-forget `ICDSendNotification` via
+`PostTransactionCanceled`) **before** the final `ScannerScanDone(noErr)` — the
+distinct user-cancel signal Apple's own `VirtualScanner` sample sends, rather
+than only ending with a bare `ScannerScanDone`. It is **not** a
+`DeviceStatusError`, so it raises **no** alert; the clean `ScannerScanDone(noErr)`
+still follows so the scan terminates and cannot hang, and no `kICAErrorKey` is set.
+This is emitted for **both** cancel sources — a host Cancel (band callback
+returned `false`) and a device Stop-button cancel (C15: a lone `0x86` at `ESC X`
+decoded by libbrscan as `Status::kCancelled`) — so a cancel is always signaled
+the reference-correct way. `kICANotificationTypeTransactionCanceled` is an
+exported ICADevices constant (`ICAApplication.h` / `ICADevices.tbd`).
 
 ## Geometry (platen extent) — OPEN
 

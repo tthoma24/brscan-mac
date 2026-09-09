@@ -63,6 +63,16 @@ constexpr uint8_t kAdfAckEmpty = 0xc2;
 // ADF duplex scan); the byte carries no device identity (see PROVENANCE.md).
 constexpr uint8_t kAdfJam = 0xc3;
 
+// A Stop-button cancel: pressing Stop on the unit makes it return this lone
+// status byte to ESC X (start-scan) in place of image data. It is another
+// sibling of the ack family above (ready 0x80, empty 0xc2, jam 0xc3), but --
+// unlike 0xc2/0xc3 -- it carries the ready bit and NOT the 0x40 error bit: a
+// clean "stopped by the user", not a fault. Detected the same lone-byte way as
+// the jam and mapped to Status::kCancelled (a clean end, no error dialog).
+// Sourced from reference/c15-stop-cancel.pcap (a Stop-button cancel of an ADF
+// scan); the byte carries no device identity (see PROVENANCE.md).
+constexpr uint8_t kAdfCancel = 0x86;
+
 // The device caps every payload block at this many bytes. A block header's
 // trailing length field pins at this exact value (0xfff4) as a "more data
 // follows" SENTINEL, NOT as an exact byte count: a chunk may declare
@@ -1281,22 +1291,25 @@ void ApplyOfferAreaFallback(const Offer& offer, Params* exec_params) {
 // before returning.
 Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
                   const BandCallback& on_band, std::vector<ScanResult>* out) {
-  // Document-feeder paper jam (C16): a jammed feed returns a lone kAdfJam
-  // (0xc3) status byte to ESC X in place of image data (see PROVENANCE.md and
-  // docs/PROTOCOL.md). Detect it here, at the very start of the readout,
-  // before any mode dispatch. Scope it to the ADF: the flatbed does not jam,
-  // and its raw payload can legitimately begin with any byte.
+  // Document-feeder lone-status-byte signals at ESC X: a jammed feed returns a
+  // lone kAdfJam (0xc3, C16); a Stop-button cancel returns a lone kAdfCancel
+  // (0x86, C15). Either arrives to ESC X in place of image data (see
+  // PROVENANCE.md and docs/PROTOCOL.md). Detect them here, at the very start of
+  // the readout, before any mode dispatch. Scope to the ADF: the flatbed does
+  // not jam or stop this way, and its raw payload can legitimately begin with
+  // any byte.
   //
-  // False-positive care: raw-gray/bitonal pixel data can legitimately be 0xc3,
-  // so do NOT key on the value alone -- key on the *lone* status byte. A jam
-  // sends exactly one 0xc3 and then nothing; a real scan streams a full page
-  // immediately. Peek (non-destructively) the first byte; only if it is 0xc3
-  // do we look for a second byte within the readout timeout. Nothing more
-  // follows (a timeout: the lone byte) -> a jam; a data stream follows -> treat
-  // the 0xc3 as ordinary data and fall through to the normal readout unchanged.
-  // The color path never legitimately starts with 0xc3 (its block header leads
-  // with 0x64, or 0x00 on legacy firmware), so it is covered too. Both peeks
-  // are non-destructive, so a normal scan's byte stream is unaffected.
+  // False-positive care: raw-gray/bitonal pixel data can legitimately be 0xc3
+  // or 0x86, so do NOT key on the value alone -- key on the *lone* status byte.
+  // The device sends exactly one such byte and then nothing; a real scan streams
+  // a full page immediately. Peek (non-destructively) the first byte; only if it
+  // matches do we look for a second byte within the readout timeout. Nothing
+  // more follows (a timeout: the lone byte) -> the signal; a data stream follows
+  // -> treat the byte as ordinary data and fall through to the normal readout
+  // unchanged. The color path never legitimately starts with either value (its
+  // block header leads with 0x64, or 0x00 on legacy firmware), so it is covered
+  // too. Every peek is non-destructive, so a normal scan's byte stream is
+  // unaffected.
   if (exec_params.source == Source::kAdf) {
     std::vector<uint8_t> lead;
     Status s = framer->Peek(1, timeout_ms, &lead);
@@ -1307,6 +1320,14 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
       if (s == Status::kTimeout) return Status::kPaperJam;  // Lone 0xc3: a jam.
       if (s != Status::kOk) return s;
       // A second byte followed: real image data, not a jam. Fall through.
+    }
+    if (lead[0] == kAdfCancel) {
+      std::vector<uint8_t> lead2;
+      s = framer->Peek(2, timeout_ms, &lead2);
+      // Lone 0x86: a clean Stop-button cancel (no error dialog downstream).
+      if (s == Status::kTimeout) return Status::kCancelled;
+      if (s != Status::kOk) return s;
+      // A second byte followed: real image data, not a cancel. Fall through.
     }
   }
 

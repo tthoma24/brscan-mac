@@ -1083,6 +1083,77 @@ TEST(RunScan, AdfGrayLeadingC3WithFullPageIsNotPaperJam) {
   EXPECT_EQ(pages[0].data, raw);
 }
 
+// C15: a document-feeder scan cancelled from the unit's Stop button. Paper WAS
+// loaded (the ESC D ADF ack is 0x80), then the device returns a lone 0x86 status
+// byte to ESC X in place of image data (captured in
+// reference/c15-stop-cancel.pcap; see PROVENANCE.md and docs/PROTOCOL.md). 0x86
+// is a sibling of the ready 0x80, the empty feeder's 0xc2, and the jam's 0xc3,
+// but WITHOUT the 0x40 error bit -- a clean "stopped by the user", not a fault.
+// RunScan must surface it as Status::kCancelled (not kPaperJam, kNoPaper, or a
+// generic error) so the module ends the scan cleanly with no error dialog. The
+// 0x86 byte carries no device identity, so this synthetic test is committable.
+TEST(RunScan, AdfStopButtonCancelLoneStatusByteReportsCancelled) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+  // ESC X reply: a lone 0x86 and then nothing (Stop pressed). The queue goes dry
+  // after it, so the readout's second-byte peek times out -> a lone byte.
+  t.QueueRead(std::vector<uint8_t>{0x86});
+
+  auto params = GrayParams();
+  params.source = brscan::Source::kAdf;
+  params.duplex = true;  // The captured C15 scan was an ADF scan.
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  EXPECT_EQ(status, brscan::Status::kCancelled);
+  EXPECT_TRUE(pages.empty());
+  // The cancel surfaces only once the feed is attempted, so ESC X (0x1b 0x58)
+  // did go on the wire -- like the jam, unlike the empty feeder.
+  EXPECT_TRUE(Contains(t.written(), {0x1b, 0x58}))
+      << "the cancel is detected at the readout start, after ESC X execute";
+}
+
+// Negative companion (false-positive guard): a raw-gray ADF readout that BEGINS
+// with 0x86 but then streams a full page must NOT be read as a cancel. The cancel
+// signature is a *lone* 0x86 (nothing follows); a 0x86 that leads a real data
+// stream is ordinary pixel data. Here both the 12-byte block header's leading
+// byte and the first pixel byte are 0x86, yet a complete page follows, so the
+// readout's second-byte peek sees data and it proceeds to kOk with the page
+// intact -- the same lone-byte disambiguation the jam (0xc3) uses.
+TEST(RunScan, AdfGrayLeadingByte86WithFullPageIsNotCancelled) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  auto payload = EncodeBlockHeader12(4);  // width = 4; anchors at [1]/[5].
+  payload[0] = 0x86;                      // readout's first byte is 0x86.
+  // Raw gray pixels: 4 x 3 = 12 bytes, the FIRST of which is also 0x86.
+  const std::vector<uint8_t> raw = {0x86, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                    0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
+  payload.insert(payload.end(), raw.begin(), raw.end());
+  t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = GrayParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 4, 3};
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  EXPECT_EQ(pages[0].height, 3);
+  EXPECT_EQ(pages[0].data, raw);
+}
+
 TEST(RunScan, TruncatedColorPayloadIsErrorNotHang) {
   brscan::FakeTransport t;
   QueuePreamble(&t);

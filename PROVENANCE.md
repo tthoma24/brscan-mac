@@ -114,6 +114,15 @@ byte value carries no device identity.
 |---|---|---|
 | `ESC X` start-scan reply: a lone `0xc3` status byte (in place of image data) = document-feeder **paper jam / feed error** | The jam signature the driver maps to `kICAErrStrDFPaperErr` ("Document feeder has a paper jam or paper feed error."), distinct from the empty case (the `0xc2` `ESC D` ack above) and from a clean protocol error | Capture `c16-jam-imac.pcap` (jammed ADF duplex): `ESC D` ack returns `0x80` (paper was loaded), then `ESC X` (`A=456,0,3016,4152`) returns a lone `0xc3` with no image data, and a follow-up `ESC D` returns `0xc2`. The status low nibble tracks the ICA key -- `…c2` empty, `…c3` jam. A normal scan returns image blocks and an empty feeder is already caught at the `0xc2` ack, so a lone `0xc3` at the readout start is unambiguous |
 
+The cancel constant below is from `reference/c15-stop-cancel.pcap`, our own
+capture of a document-feeder scan cancelled from the unit's **Stop** button
+(C15). It stays git-ignored (LAN identity); the byte value carries no device
+identity.
+
+| Constant | Meaning | Source |
+|---|---|---|
+| `ESC X` start-scan reply: a lone `0x86` status byte (in place of image data) = **Stop-button cancel** | The clean-cancel signature the driver maps to `Status::kCancelled` -> `ScanOutcome::kCanceled` (no error dialog; the scan ends `ScannerScanDone(noErr)`), distinct from the jam (`0xc3`) and the empty feeder (`0xc2`). `0x86` carries the ready bit but NOT the `0x40` error bit that `0xc2`/`0xc3` share -- a clean "stopped by the user", not a fault | Capture `c15-stop-cancel.pcap` (Stop-button cancel of an ADF scan): `ESC D` ack returns `0x80` (paper was loaded), the `ESC I` offer follows, then `ESC X` returns a lone `0x86` with no image data. A normal scan returns image blocks immediately, so -- as with the jam -- a lone `0x86` at the readout start is unambiguous; raw-gray/bitonal pixels that merely happen to be `0x86` are disambiguated by the lone-byte test (a real page streams more bytes right after) |
+
 The constant below is from `reference/brscan-button.pcap`, our own capture of
 the Scan-button registration/notification traffic between a Mac running
 Brother's driver and the printer (issue #3), taken 2026-09-02. See
