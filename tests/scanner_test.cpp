@@ -497,12 +497,14 @@ TEST(RunScan, ColorFlatbedShortSentinelChunkTwelveByteZeroBeforeBoundary) {
 // never arrives must not accumulate without bound: RunColorScan caps a page's
 // bytes at a generous multiple of the granted area's worst-case encoded size
 // and returns a protocol error past it (L4). The offer here grants a small
-// 210x200 area (cap = 210*200*3*4 = 504000 bytes), and the stream feeds honest
-// 60000-byte chunks with no marker, so the cap is crossed after ~9 chunks.
+// 208x200 area (208 is a multiple of 16, so the full-area width-alignment
+// fallback leaves it unchanged; cap = 208*200*3*4 = 499200 bytes), and the
+// stream feeds honest 60000-byte chunks with no marker, so the cap is crossed
+// after ~9 chunks.
 TEST(RunScan, ColorPageWithoutEndOfPageMarkerIsCapped) {
   brscan::FakeTransport t;
   QueuePreamble(&t);
-  t.QueueRead(EncodeOfferFrame("300,300,2,292,210,427,200,"));
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,208,427,200,"));
 
   constexpr size_t kChunkBody = 60000;  // Honest length (< 0xfff4).
   std::vector<uint8_t> stream;
@@ -517,6 +519,32 @@ TEST(RunScan, ColorPageWithoutEndOfPageMarkerIsCapped) {
   const auto status = brscan::RunScan(t, ColorParams(), &pages);
   EXPECT_EQ(status, brscan::Status::kProtocolError);
   EXPECT_TRUE(pages.empty());
+}
+
+// The full-area fallback (an all-zero Params::area) fills the area from the ESC I
+// offer, rounding the offered width DOWN to a multiple of 16 -- the same JPEG-MCU
+// alignment TranslateScanParams applies (see scan_translate.cpp) -- so the ESC X
+// the driver puts on the wire requests an aligned width, never a partial final
+// MCU. Here the offer grants 210 px, which aligns down to 208 (210 = 13*16 + 2).
+// The scan payload is left empty: ESC X is written before the readout runs, so
+// the outbound area is observable regardless of how the (empty) readout ends.
+TEST(RunScan, FullAreaFallbackAlignsOfferedWidthTo16) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,210,427,200,"));  // width_px=210.
+
+  std::vector<brscan::ScanResult> pages;
+  brscan::RunScan(t, ColorParams(), &pages);  // Status/pages irrelevant here.
+
+  brscan::Params expected = ColorParams();
+  expected.area = brscan::Area{0, 0, 208, 200};  // 210 aligned down to 208.
+  EXPECT_TRUE(Contains(t.written(), brscan::EncodeExecute(expected)))
+      << "the full-area fallback must request a width that is a multiple of 16";
+
+  brscan::Params unaligned = ColorParams();
+  unaligned.area = brscan::Area{0, 0, 210, 200};  // The raw, un-aligned width.
+  EXPECT_FALSE(Contains(t.written(), brscan::EncodeExecute(unaligned)))
+      << "the raw 210-px width must never reach the wire";
 }
 
 TEST(RunScan, GrayFlatbedRoundTrips) {

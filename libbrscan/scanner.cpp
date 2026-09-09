@@ -1187,7 +1187,15 @@ Status ReadOfferReply(Framer* framer, int timeout_ms, Offer* offer) {
 void ApplyOfferAreaFallback(const Offer& offer, Params* exec_params) {
   const Area& a = exec_params->area;
   if (a.x0 == 0 && a.y0 == 0 && a.x1 == 0 && a.y1 == 0) {
-    exec_params->area = Area{0, 0, offer.width_px, offer.height_px};
+    // Round the offered full width DOWN to a multiple of 16, for the same reason
+    // the ICA path does (ica-module/scan_translate.cpp TranslateScanParams): the
+    // device's JPEG 4:2:0 chroma is sampled in 16-px MCUs, so a partial final MCU
+    // returns a garbage-chroma fringe on the right edge. Brother's widths are
+    // always multiples of 16. DOWN stays within the offered area; a width below
+    // 16 is left as-is so it can never underflow to a non-positive size.
+    int width = offer.width_px;
+    if (width >= 16) width -= width % 16;
+    exec_params->area = Area{0, 0, width, offer.height_px};
   }
 }
 

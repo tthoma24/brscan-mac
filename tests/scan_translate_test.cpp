@@ -215,8 +215,12 @@ TEST(TranslateScanParamsTest, BrightnessContrastInRangePassThrough) {
   EXPECT_EQ(p.contrast, 75);
 }
 
-// A positive explicit rectangle is passed through as the scan area.
-TEST(TranslateScanParamsTest, ExplicitAreaPassedThrough) {
+// A positive explicit rectangle is honoured as the scan area, with its width
+// aligned DOWN to a multiple of 16 (the JPEG-MCU right-edge fringe fix; see the
+// ScanWidthAlignTest block below). The offset (x0) and the vertical bounds pass
+// through untouched -- only the width is aligned: width 2540 -> 2528, so
+// x1 = 10 + 2528 = 2538.
+TEST(TranslateScanParamsTest, ExplicitAreaHonouredWidthAlignedTo16) {
   ScanRequest r;
   r.has_area = true;
   r.area_x0 = 10;
@@ -224,10 +228,11 @@ TEST(TranslateScanParamsTest, ExplicitAreaPassedThrough) {
   r.area_x1 = 2550;
   r.area_y1 = 3300;
   const Params p = TranslateScanParams(r, ScanLimits{});
-  EXPECT_EQ(p.area.x0, 10);
+  EXPECT_EQ(p.area.x0, 10);  // Offset untouched.
   EXPECT_EQ(p.area.y0, 20);
-  EXPECT_EQ(p.area.x1, 2550);
+  EXPECT_EQ(p.area.x1, 2538);  // 10 + (2540 aligned down to 2528).
   EXPECT_EQ(p.area.y1, 3300);
+  EXPECT_EQ((p.area.x1 - p.area.x0) % 16, 0);
 }
 
 // A degenerate / non-positive rectangle means "full area" ({0,0,0,0}).
@@ -245,24 +250,27 @@ TEST(TranslateScanParamsTest, DegenerateAreaMeansFull) {
   EXPECT_EQ(p.area.y1, 0);
 }
 
-// A flatbed request keeps the host's 0-based rectangle unchanged (the flatbed
-// corner-registers; only the ADF is re-centered). This guards the "flatbed
-// path unchanged" invariant against the ADF-centering added in this task.
-TEST(TranslateScanParamsTest, FlatbedAreaNotRecentered) {
+// A flatbed request keeps the host's 0-based x0 (the flatbed corner-registers;
+// only the ADF is re-centered), but its width is still aligned DOWN to a multiple
+// of 16. This is exactly the US-Letter @300 fringe case from the bug report:
+// 2550 px (159*16 + 6) -> 2544 (159*16). This guards both the "flatbed x0
+// unchanged" invariant and the width alignment.
+TEST(TranslateScanParamsTest, FlatbedAreaNotRecenteredWidthAlignedTo16) {
   ScanRequest r;
   r.has_functional_unit = true;
   r.functional_unit = 0;  // Flatbed.
   r.has_area = true;
   r.area_x0 = 0;
   r.area_y0 = 0;
-  r.area_x1 = 2550;  // Letter width @300, 0-based.
+  r.area_x1 = 2550;  // Letter width @300, 0-based (not a multiple of 16).
   r.area_y1 = 3300;
   const Params p = TranslateScanParams(r, ScanLimits{});
   EXPECT_EQ(p.source, Source::kFlatbed);
-  EXPECT_EQ(p.area.x0, 0);
-  EXPECT_EQ(p.area.x1, 2550);
+  EXPECT_EQ(p.area.x0, 0);     // Corner-registered, unchanged.
+  EXPECT_EQ(p.area.x1, 2544);  // 2550 aligned down to 2544 (the fringe fix).
   EXPECT_EQ(p.area.y0, 0);
   EXPECT_EQ(p.area.y1, 3300);
+  EXPECT_EQ((p.area.x1 - p.area.x0) % 16, 0);
 }
 
 // An ADF request re-centers the requested width horizontally in the sensor,
@@ -350,6 +358,112 @@ TEST(TranslateScanParamsTest, AdfCenteringUsesRequestDpiNotClampedDpi) {
   EXPECT_EQ(p.area.x1, 1472 + 4000);  // Width preserved.
   EXPECT_EQ(p.area.y0, 0);            // Vertical bounds untouched.
   EXPECT_EQ(p.area.y1, 5000);
+}
+
+// ---------------------------------------------------------------------------
+// Scan-width 16-px alignment (the JPEG-MCU right-edge fringe fix). The device
+// encodes color as JPEG 4:2:0, whose chroma is sampled in 16-px MCUs, and
+// Brother's native driver only ever requests widths that are exact multiples of
+// 16. A width with a partial final MCU returns garbage chroma in the last
+// columns (a magenta/rainbow fringe on the page's right edge), so
+// TranslateScanParams rounds the requested width DOWN to the nearest multiple of
+// 16 -- down, not up, so the window stays inside the paper.
+
+// The resulting flatbed area width for a raw pixel width. x0 = 0, so the flatbed
+// corner-registers and the returned width is directly comparable to the raw one.
+int FlatbedAreaWidthFor(int raw_width) {
+  ScanRequest r;
+  r.has_functional_unit = true;
+  r.functional_unit = 0;  // Flatbed: corner-registered, x0 stays 0.
+  r.has_area = true;
+  r.area_x0 = 0;
+  r.area_y0 = 0;
+  r.area_x1 = raw_width;
+  r.area_y1 = 3300;
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.area.x0, 0);
+  return p.area.x1 - p.area.x0;
+}
+
+// Representative paper widths (US-Letter and A4 at 100/300/600 dpi, in pixels)
+// align DOWN to a multiple of 16. The Letter @300 case (2550 -> 2544) is the
+// measured fringe case from the bug report.
+TEST(ScanWidthAlignTest, AlignsRepresentativeWidthsDownTo16) {
+  struct Case {
+    int raw;
+    int aligned;
+    const char* what;
+  };
+  const Case cases[] = {
+      {850, 848, "Letter 8.5in @100"},
+      {2550, 2544, "Letter @300 (the measured fringe case)"},
+      {5100, 5088, "Letter @600"},
+      {827, 816, "A4 210mm @100"},
+      {2480, 2480, "A4 @300 (already a multiple of 16 -> unchanged)"},
+      {4961, 4960, "A4 @600"},
+  };
+  for (const Case& c : cases) {
+    const int w = FlatbedAreaWidthFor(c.raw);
+    EXPECT_EQ(w, c.aligned) << c.what;
+    EXPECT_EQ(w % 16, 0) << c.what;      // Result is a whole number of MCUs.
+    EXPECT_LE(w, c.raw) << c.what;       // Aligned DOWN, never up.
+    EXPECT_LT(c.raw - w, 16) << c.what;  // Within 15 px of the request.
+  }
+}
+
+// A raw width that is already a multiple of 16 is passed through unchanged.
+TEST(ScanWidthAlignTest, AlreadyAlignedWidthUnchanged) {
+  EXPECT_EQ(FlatbedAreaWidthFor(2544), 2544);  // 159*16.
+  EXPECT_EQ(FlatbedAreaWidthFor(2512), 2512);  // 157*16 (Brother's Letter ADF).
+  EXPECT_EQ(FlatbedAreaWidthFor(16), 16);      // Exactly one MCU.
+}
+
+// A raw width below 16 cannot be aligned down without underflowing, so it is
+// left exactly as requested (degenerate, but never zeroed or made negative).
+TEST(ScanWidthAlignTest, WidthBelow16LeftAsIs) {
+  EXPECT_EQ(FlatbedAreaWidthFor(15), 15);
+  EXPECT_EQ(FlatbedAreaWidthFor(8), 8);
+  EXPECT_EQ(FlatbedAreaWidthFor(1), 1);
+}
+
+// Only the width is aligned; a non-16-aligned flatbed offset (x0) is untouched.
+TEST(ScanWidthAlignTest, FlatbedAlignsWidthNotOffset) {
+  ScanRequest r;  // No functional unit -> flatbed, corner-registered.
+  r.has_area = true;
+  r.area_x0 = 7;         // A non-16-aligned offset must survive untouched.
+  r.area_y0 = 0;
+  r.area_x1 = 7 + 2550;  // Raw width 2550.
+  r.area_y1 = 3300;
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  EXPECT_EQ(p.area.x0, 7);                  // Offset unchanged.
+  EXPECT_EQ(p.area.x1 - p.area.x0, 2544);   // Width aligned down 2550 -> 2544.
+  EXPECT_EQ((p.area.x1 - p.area.x0) % 16, 0);
+}
+
+// ADF/feeder path: the width is aligned first, THEN the centered x0 is computed
+// from the ALIGNED width, so both the width and x1 - x0 are multiples of 16.
+TEST(ScanWidthAlignTest, AdfCentersUsingAlignedWidth) {
+  ScanRequest r;
+  r.has_functional_unit = true;
+  r.functional_unit = 3;  // Document feeder.
+  r.has_resolution = true;
+  r.resolution = 300;
+  r.has_area = true;
+  r.area_x0 = 0;
+  r.area_y0 = 0;
+  r.area_x1 = 2550;  // Letter raw width @300 -> aligns to 2544.
+  r.area_y1 = 3300;
+  const Params p = TranslateScanParams(r, ScanLimits{});
+  const int width = p.area.x1 - p.area.x0;
+  EXPECT_EQ(width, 2544);  // Aligned down from 2550.
+  EXPECT_EQ(width % 16, 0);
+  // x0 centers the ALIGNED width in the 3472-px sensor: (3472 - 2544)/2 = 464.
+  // Centering the raw 2550 would give (3472 - 2550)/2 = 461, so x0 == 464 proves
+  // the aligned width (not the raw one) drove the centering.
+  EXPECT_EQ(p.area.x0, 464);
+  EXPECT_EQ(p.area.x0, CenteredAdfX0(AdfSensorWidthAtDpi(300), 2544));
+  EXPECT_EQ(p.area.y0, 0);  // Vertical bounds untouched.
+  EXPECT_EQ(p.area.y1, 3300);
 }
 
 // ---------------------------------------------------------------------------
@@ -669,8 +783,10 @@ TEST(PixelsFromMeasureTest, UnsupportedUnitAndBadDpiAreInvalid) {
   EXPECT_EQ(PixelsFromMeasure(8.5, kIcapUnitsInches, -300), kMeasureInvalid);
 }
 
-// The corner output feeds TranslateScanParams unchanged: a converted positive
-// rect flows through as the scan area.
+// The corner output feeds TranslateScanParams: a converted positive rect flows
+// through as the scan area, with the width aligned DOWN to a multiple of 16
+// (200 -> 192, so x1 = 5 + 192 = 197). The offset and vertical bounds pass
+// through untouched.
 TEST(CornersFromUserScanAreaTest, FeedsTranslateScanParams) {
   Area a{};
   ASSERT_TRUE(CornersFromUserScanArea(5, 6, 200, 300, &a));
@@ -683,8 +799,9 @@ TEST(CornersFromUserScanAreaTest, FeedsTranslateScanParams) {
   const Params p = TranslateScanParams(r, ScanLimits{});
   EXPECT_EQ(p.area.x0, 5);
   EXPECT_EQ(p.area.y0, 6);
-  EXPECT_EQ(p.area.x1, 205);
+  EXPECT_EQ(p.area.x1, 197);  // 5 + (200 aligned down to 192).
   EXPECT_EQ(p.area.y1, 306);
+  EXPECT_EQ((p.area.x1 - p.area.x0) % 16, 0);
 }
 
 // ---------------------------------------------------------------------------
