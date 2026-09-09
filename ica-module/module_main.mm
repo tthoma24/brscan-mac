@@ -1100,19 +1100,22 @@ ICAError Status(const ScannerObjectInfo* deviceObjectInfo,
 // waited-for notification: the host sets it when the user cancels the scan.
 constexpr UInt32 kUserCanceledReplyCode = static_cast<UInt32>(-128);
 
-// ADF feeder-empty outcome, reported in the ScannerScanDone kICAErrorKey when an
-// ADF scan produced no page (see RunScanSynchronous). Neither the module-side
-// ICAError enum (ICADevices/ICAApplication.h: kICACommunicationErr = -9900 …
-// kICASecureSessionRequired = -9923) nor the client-facing ICReturn enum
+// "Scan did not complete" outcome, reported in the ScannerScanDone kICAErrorKey
+// for the two ADF conditions where the job ends before any page is delivered:
+// an empty feeder (kAdfFeederEmpty) and a paper jam (kPaperJam). Neither the
+// module-side ICAError enum (ICADevices/ICAApplication.h: kICACommunicationErr =
+// -9900 … kICASecureSessionRequired = -9923) nor the client-facing ICReturn enum
 // (ImageCaptureCore/ImageCaptureConstants.h) defines a "no documents in the
-// feeder" / paper-empty code. The closest is ICReturnScannerFailedToCompleteScan
+// feeder" / paper-jam code. The closest is ICReturnScannerFailedToCompleteScan
 // (ImageCaptureConstants.h, -9931) -- the scan-did-not-complete code Image
 // Capture surfaces on the scanner path -- which is strictly more specific than
 // the generic kICADeviceInternalErr (-9912) the module reported for every non-OK
 // status. The kICAErrorKey value flows through to the client by number (the
 // -9912 baseline confirms this), so it is used as a value only, not imported
-// (matching kUserCanceledReplyCode above; ICADevices does not declare it).
-constexpr ICAError kAdfFeederEmptyError = -9931;  // ICReturnScannerFailedToCompleteScan
+// (matching kUserCanceledReplyCode above; ICADevices does not declare it). The
+// readable dialog is driven separately, by the DeviceStatusError post below --
+// each outcome posts its own string key -- not by this numeric code.
+constexpr ICAError kScanDidNotCompleteError = -9931;  // ICReturnScannerFailedToCompleteScan
 
 // Outcome of handing one page/band back:
 //   kOk         delivered.
@@ -1728,9 +1731,27 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
       PostScannerErrorKey(deviceObject,
                           brscan::ica::ErrorStringKeyForOutcome(outcome,
                                                                 scanStatus));
-      finalErr = kAdfFeederEmptyError;
+      finalErr = kScanDidNotCompleteError;
       os_log(Log(),
              "SyncScan: ADF empty (status=%d, pages=0) -> feeder-empty err=%d "
+             "(ICReturnScannerFailedToCompleteScan)",
+             (int)scanStatus, finalErr);
+    } else if (outcome == brscan::ica::ScanOutcome::kPaperJam) {
+      // ADF paper jam (C16): the feed jammed mid-page, so the device returned a
+      // lone 0xc3 at ESC X in place of image data (libbrscan -> kPaperJam; see
+      // scanner.cpp and PROVENANCE.md). Post the jam-specific dialog key
+      // (kICAErrStrDFPaperErr -> "Document feeder has a paper jam or paper feed
+      // error.") so Image Capture raises the readable jam alert rather than its
+      // bland generic failure or the empty-feeder message. End the scan with the
+      // same scan-did-not-complete code the feeder-empty path uses -- the job
+      // did not finish -- rather than the generic kICADeviceInternalErr. The
+      // mapping to the dialog key is the pure ErrorStringKeyForOutcome.
+      PostScannerErrorKey(deviceObject,
+                          brscan::ica::ErrorStringKeyForOutcome(outcome,
+                                                                scanStatus));
+      finalErr = kScanDidNotCompleteError;
+      os_log(Log(),
+             "SyncScan: ADF paper jam (status=%d, pages=0) -> jam err=%d "
              "(ICReturnScannerFailedToCompleteScan)",
              (int)scanStatus, finalErr);
     } else if (outcome == brscan::ica::ScanOutcome::kFailed) {
@@ -1738,9 +1759,9 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
       // (protocol desync -> "An error occurred during scanning."; I/O or
       // timeout -> "...communicating with the scanner."; busy -> "The scanner
       // is busy.") instead of leaving the host on its bland generic failure.
-      // Paper-jam (kICAErrStrDFPaperErr) is intentionally not mapped: the
-      // device's jam signature is uncaptured and a desync must not be labeled a
-      // jam -- a follow-up pending a captured jam signature.
+      // A paper jam does NOT reach here: it has its own captured signature and
+      // its own kPaperJam branch above (kICAErrStrDFPaperErr); a plain protocol
+      // desync must not be labeled a jam.
       PostScannerErrorKey(deviceObject,
                           brscan::ica::ErrorStringKeyForOutcome(outcome,
                                                                 scanStatus));

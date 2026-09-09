@@ -987,6 +987,102 @@ TEST(RunScan, AdfLoadedAckProceedsToScan) {
       << "loaded feeder must reach ESC X execute";
 }
 
+// C16: a document-feeder scan whose feed jams mid-page. Paper WAS loaded (the
+// ESC D ADF ack is 0x80), then the device returns a lone 0xc3 status byte to
+// ESC X in place of image data (captured in reference/c16-jam-imac.pcap; see
+// PROVENANCE.md and docs/PROTOCOL.md). RunScan must surface it as
+// Status::kPaperJam -- distinct from an empty feeder (the 0xc2 ESC D ack, caught
+// before ESC X) and from a generic protocol error -- so the ICA module can raise
+// the jam-specific dialog. The 0xc3 byte carries no device identity, so this
+// synthetic test is committable. Here as a gray (GRAY64) job.
+TEST(RunScan, AdfGrayPaperJamLoneStatusByteReportsPaperJam) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+  // ESC X reply: a lone 0xc3 and then nothing (the feed jammed). The queue goes
+  // dry after it, so the readout's second-byte peek times out -> a lone byte.
+  t.QueueRead(std::vector<uint8_t>{0xc3});
+
+  auto params = GrayParams();
+  params.source = brscan::Source::kAdf;
+  params.duplex = true;  // The captured C16 scan was an ADF duplex job.
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  EXPECT_EQ(status, brscan::Status::kPaperJam);
+  EXPECT_TRUE(pages.empty());
+  // The jam surfaces only once the feed is attempted, so ESC X (0x1b 0x58) did
+  // go on the wire -- unlike the empty feeder, abandoned at the ESC D ack.
+  EXPECT_TRUE(Contains(t.written(), {0x1b, 0x58}))
+      << "the jam is detected at the readout start, after ESC X execute";
+}
+
+// The color path is covered too: a color ADF readout never legitimately starts
+// with 0xc3 (a color block header leads with 0x64, or 0x00 0x64 on legacy
+// firmware), so a lone 0xc3 at ESC X is an unambiguous jam here as well.
+TEST(RunScan, AdfColorPaperJamLoneStatusByteReportsPaperJam) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+  t.QueueRead(std::vector<uint8_t>{0xc3});  // ESC X reply: lone jam byte.
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.duplex = true;
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  EXPECT_EQ(status, brscan::Status::kPaperJam);
+  EXPECT_TRUE(pages.empty());
+}
+
+// Negative companion (false-positive guard): a raw-gray ADF readout that BEGINS
+// with 0xc3 but then streams a full page must NOT be read as a jam. The jam
+// signature is a *lone* 0xc3 (nothing follows); a 0xc3 that leads a real data
+// stream is ordinary data. Here both the 12-byte block header's leading byte and
+// the first pixel byte are 0xc3, yet a complete page follows, so the readout's
+// second-byte peek sees data and it proceeds to kOk with the page intact. The
+// raw-gray readout does not validate the header's type byte (only
+// ParseBlockHeader's 0x07/0x84 anchors), so a 0xc3-led header is legitimate and
+// makes the readout's first byte 0xc3. Keying the jam on the byte VALUE alone,
+// instead of on the lone-byte disambiguation, would return kPaperJam and fail
+// this test.
+TEST(RunScan, AdfGrayLeadingC3WithFullPageIsNotPaperJam) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  auto payload = EncodeBlockHeader12(4);  // width = 4; anchors at [1]/[5].
+  payload[0] = 0xc3;                      // readout's first byte is 0xc3.
+  // Raw gray pixels: 4 x 3 = 12 bytes, the FIRST of which is also 0xc3.
+  const std::vector<uint8_t> raw = {0xc3, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                    0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
+  payload.insert(payload.end(), raw.begin(), raw.end());
+  t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = GrayParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 4, 3};
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  EXPECT_EQ(pages[0].height, 3);
+  EXPECT_EQ(pages[0].data, raw);
+}
+
 TEST(RunScan, TruncatedColorPayloadIsErrorNotHang) {
   brscan::FakeTransport t;
   QueuePreamble(&t);
