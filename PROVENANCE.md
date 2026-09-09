@@ -94,6 +94,15 @@ are committed here and in the synthetic tests.
 |---|---|---|
 | ESC D ADF source-select ack: `0x80` = a document is loaded (proceed), `0xc2` = the ADF is empty | Feeder paper-presence signal in the single ack byte the device returns to `ESC D ADF`; on `0xc2` the driver returns `kNoPaper` before `ESC I`/`ESC X` rather than letting the device fall back to the glass (simplex) or hang (duplex) | Capture diff: `adf-loaded.pcap` returns `0x80` at this ack, `adf-empty.pcap` returns `0xc2`. Corroborated by the following `ESC I` offer -- loaded `300,300,1,292,3460,0,0,` (ymax 0 = ADF unknown-length) vs empty `300,300,2,292,3460,427,5052,` (a concrete ymax, i.e. the device about to fall back to the glass). The `ESC Q` capability block is identical in both, so it is not the signal |
 
+The jam constant below is from `reference/c16-jam-imac.pcap`, a capture of
+Brother's driver running a document-feeder duplex scan deliberately jammed
+mid-feed (C16), taken 2026-09-09. It too stays git-ignored (LAN identity); the
+byte value carries no device identity.
+
+| Constant | Meaning | Source |
+|---|---|---|
+| `ESC X` start-scan reply: a lone `0xc3` status byte (in place of image data) = document-feeder **paper jam / feed error** | The jam signature the driver maps to `kICAErrStrDFPaperErr` ("Document feeder has a paper jam or paper feed error."), distinct from the empty case (the `0xc2` `ESC D` ack above) and from a clean protocol error | Capture `c16-jam-imac.pcap` (jammed ADF duplex): `ESC D` ack returns `0x80` (paper was loaded), then `ESC X` (`A=456,0,3016,4152`) returns a lone `0xc3` with no image data, and a follow-up `ESC D` returns `0xc2`. The status low nibble tracks the ICA key -- `…c2` empty, `…c3` jam. A normal scan returns image blocks and an empty feeder is already caught at the `0xc2` ack, so a lone `0xc3` at the readout start is unambiguous |
+
 The constant below is from `reference/brscan-button.pcap`, our own capture of
 the Scan-button registration/notification traffic between a Mac running
 Brother's driver and the printer (issue #3), taken 2026-09-02. See

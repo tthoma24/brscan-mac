@@ -158,7 +158,14 @@ A typical scan is: `ESC Q` (once per connection), then per scan
    job, silently falls back to scanning the flatbed glass, or on a duplex job
    sends nothing and times out (~24 s). This distinction comes from diffing a
    loaded-feeder capture against an empty-feeder one (see PROVENANCE.md); the
-   two byte values carry no device identity.
+   two byte values carry no device identity. A sibling value in the same
+   status-byte family, `0xc3`, is returned **in place of image data at the
+   `ESC X` (start-scan) reply** on a document-feeder **paper jam / feed
+   error** mid-feed. The empty case (`0xc2`) is caught at this `ESC D` ack
+   before `ESC I`/`ESC X`; the jam (`0xc3`) surfaces only once the feed is
+   attempted, so the driver treats a lone `0xc3` at the start of the readout
+   as a jam error (mapped to `kICAErrStrDFPaperErr`) rather than a generic
+   failure -- see the C16 row in the runbook and PROVENANCE.md.
 4. `ESC I` reply: `[1-byte status][2-byte little-endian length][ASCII CSV
    text][NUL]`. The status byte was `0x00` in every sample seen and its
    meaning is unconfirmed. The CSV is a comma-terminated offer of the granted
