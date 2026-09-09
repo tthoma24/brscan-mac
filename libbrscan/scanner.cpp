@@ -661,7 +661,12 @@ Status ReadOneChunkBody(Framer* framer, const BlockHeader& header,
 
 // Runs the color (CGRAY/C=JPEG) readout for an ADF or flatbed job,
 // de-interleaving the pages the device multiplexes on the wire, and
-// appends one ScanResult per page to *out in page (end-of-page) order.
+// appends one ScanResult per page to *out in 1-based page-index (document)
+// order. The device's captured color duplex happens to complete pages in
+// document order (1,2,3,4), but this keys the file order on the page index
+// rather than completion order regardless -- so a device that ever completed
+// color pages out of order (as RLENGTH duplex does; see RunRlengthScan and
+// C9) still yields a correctly ordered file.
 //
 // A duplex ADF feed does NOT stream each page contiguously: it interleaves
 // the two sides' chunks, tagging every block header with its 1-based page
@@ -716,6 +721,14 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
   // interleaves two pages' chunks, so each page index keeps its own decoder
   // state (matching the per-page JPEG accumulators above).
   std::map<int, std::unique_ptr<IncrementalJpegDecoder>> decoders;
+  // Finished pages, keyed by 1-based page index, flushed to *out in ascending
+  // (document) order at job end rather than in completion order (see this
+  // function's doc comment and RunRlengthScan's `finished` for the C9 rationale).
+  std::map<int, ScanResult> finished;
+  const auto flush_finished = [&]() {
+    for (auto& kv : finished) out->push_back(std::move(kv.second));
+    finished.clear();
+  };
   for (;;) {
     std::vector<uint8_t> lead;
     Status s = framer->Peek(2, timeout_ms, &lead);
@@ -753,7 +766,15 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
         auto dit = decoders.find(pidx);
         if (dit == decoders.end()) return Status::kProtocolError;
         const Status fs = dit->second->Finish();
-        if (fs != Status::kOk) return fs;  // kCancelled / kProtocolError.
+        if (fs != Status::kOk) {
+          // kCancelled keeps the pages that fully completed before the cancel
+          // (scanner.h's streaming contract); since finished pages now buffer in
+          // `finished` until job end, flush them to *out here so a cancel still
+          // hands them back. Harmless on kProtocolError -- the caller clears
+          // *out on any non-kCancelled error anyway.
+          flush_finished();
+          return fs;
+        }
         if (dit->second->fatal()) return Status::kProtocolError;
         page_width = dit->second->width();
         page_height = dit->second->height();
@@ -772,7 +793,9 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
       page.width = page_width;
       page.height = page_height;
       page.data = std::move(jpeg);
-      out->push_back(std::move(page));
+      // Collect by page index, not completion order (see `finished` above): the
+      // flush at job end emits in ascending (document) order.
+      finished[pidx] = std::move(page);
       in_progress.erase(it);
 
       // Peek the byte after the marker. A job-final terminator leads with
@@ -791,6 +814,7 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
         // Job done. Any page still accumulating never got its marker: a
         // truncated/desynced stream, not a clean finish.
         if (!in_progress.empty()) return Status::kProtocolError;
+        flush_finished();
         return Status::kOk;
       }
       continue;  // `tail` is the next chunk's block header -- do not consume.
@@ -829,7 +853,12 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
             });
       }
       s = decoder->Feed(jpeg.data() + before, jpeg.size() - before);
-      if (s != Status::kOk) return s;  // kCancelled / kProtocolError.
+      if (s != Status::kOk) {
+        // Flush completed pages so a mid-page cancel keeps them (see the
+        // identical note at the Finish() call above).
+        flush_finished();
+        return s;  // kCancelled / kProtocolError.
+      }
     }
   }
 }
@@ -893,7 +922,14 @@ constexpr int kMaxRlengthSlopBytes = 0xfff4;
 // Runs the gray/RLENGTH (TEXT/ERRDIF/GRAY256 with C=RLENGTH -- i.e.
 // Black & White, Error Diffusion, True Gray) readout for an ADF or flatbed
 // job, DE-INTERLEAVING the pages the device multiplexes on the wire, and
-// appends one ScanResult per page to *out in page (end-of-page) order.
+// appends one ScanResult per page to *out in 1-based page-index (document)
+// order -- NOT the order the pages complete in. A real TEXT/BW duplex ADF
+// capture (reference/c9-text-duplex.pcap, C9; see PROVENANCE.md) completes
+// its 4 pages in the order 2,1,3,4 (each side of sheet 1's second page fires
+// its end-of-page marker before the first), while every row/EOP block still
+// carries the correct page index at byte[3]. Emitting in completion order put
+// document page 2 first in the file; emitting by page index restores document
+// order.
 //
 // This mirrors RunColorScan's structure exactly, one row at a time instead of
 // one JPEG chunk at a time. A duplex ADF feed does NOT stream each page
@@ -959,6 +995,19 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
     int band_start = 0;
   };
   std::map<int, PageState> in_progress;
+  // Finished pages, keyed by 1-based page index. The device can COMPLETE
+  // (fire end-of-page for) duplex pages out of document order (C9: a real TEXT
+  // duplex ADF scan completes 2,1,3,4), so collect them keyed by page index and
+  // flush to *out in ascending (document) order at job end, rather than in the
+  // completion order a plain push-back would give. std::map keeps its keys
+  // sorted, so the flush is a single in-order walk. The live bands (EmitBand at
+  // page_index pidx-1) are unaffected -- they already carry the correct index
+  // and are the live preview, separate from this file `out` order.
+  std::map<int, ScanResult> finished;
+  const auto flush_finished = [&]() {
+    for (auto& kv : finished) out->push_back(std::move(kv.second));
+    finished.clear();
+  };
   int slop_skipped = 0;  // Reset on each header/marker (per-boundary ceiling).
 
   for (;;) {
@@ -973,6 +1022,7 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
     // way, no more rows are coming.
     if (!peek.empty() && peek[0] == 0x80) {
       if (!in_progress.empty()) return Status::kProtocolError;
+      flush_finished();
       return Status::kOk;
     }
 
@@ -1015,7 +1065,12 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
             page.pixels.data() +
                 static_cast<size_t>(page.band_start) * row_bytes,
             static_cast<size_t>(num_rows) * row_bytes);
-        if (es != Status::kOk) return es;
+        if (es != Status::kOk) {
+          // Keep the pages completed before a cancel (scanner.h contract); see
+          // RunColorScan's identical flush-on-cancel note. Harmless on error.
+          flush_finished();
+          return es;
+        }
         page.band_start += num_rows;
       }
 
@@ -1031,7 +1086,9 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
       result.width = width;
       result.height = height;
       result.data = std::move(page.pixels);
-      out->push_back(std::move(result));
+      // Collect by page index, not completion order (see `finished` above): the
+      // flush at job end emits in ascending (document) order.
+      finished[pidx] = std::move(result);
       in_progress.erase(it);
 
       // Peek the byte after the marker: 0x80 ends the job (see RunColorScan's
@@ -1043,6 +1100,7 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
       if (s != Status::kOk) return s;
       if (tail[0] == 0x80) {
         if (!in_progress.empty()) return Status::kProtocolError;
+        flush_finished();
         return Status::kOk;
       }
       continue;
@@ -1097,7 +1155,12 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
             page.pixels.data() +
                 static_cast<size_t>(page.band_start) * row_bytes,
             static_cast<size_t>(kBandRows) * row_bytes);
-        if (es != Status::kOk) return es;
+        if (es != Status::kOk) {
+          // Keep the pages completed before a cancel (see the flush-on-cancel
+          // note above); harmless on a non-kCancelled error.
+          flush_finished();
+          return es;
+        }
         page.band_start = page.rows_read;
       }
       continue;
