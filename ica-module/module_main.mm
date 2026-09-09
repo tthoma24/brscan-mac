@@ -56,6 +56,7 @@
 #include "brscan/scanner.h"
 #include "brscan/transport_tcp.h"
 #include "brscan/types.h"
+#include "adf_crop.h"
 #include "buffer_descriptor.h"
 #include "decode_jpeg.h"  // libbrscan private header (on the libbrscan inc dir).
 #include "file_transfer.h"
@@ -1853,6 +1854,33 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         }
 
         if (ready) {
+          // ADF color auto-crop (bottom band): on an ADF color/JPEG scan the
+          // device pads the decoded page up to the requested height with uniform
+          // full-width mid-gray (~128) once the sheet ends, so an over-sized Size
+          // leaves a solid gray strip along the bottom. Trim the contiguous
+          // trailing pad rows so the page ends at the real sheet. Scoped to ADF +
+          // kRgb (the decoded color page): the flatbed does not pad this way, and
+          // the RLENGTH gray/BW path pads differently (our own white/black fill)
+          // and is left untouched here -- it could later be cropped from
+          // rows_read. RGB rows are contiguous top-to-bottom (bytesPerRow =
+          // width*3, no inter-row padding), so the first (outHeight - pad) rows
+          // ARE the cropped image: pass the reduced height and let PostFilePage
+          // read that prefix of `bytes` (its CGImage reads only bytesPerRow*height,
+          // and byteCount stays a valid superset). The guard keeps at least one
+          // row, so an all-pad page is never cropped to nothing. The live band
+          // emission above (preview) is deliberately unaffected.
+          if (params.source == brscan::Source::kAdf &&
+              outFormat == brscan::PixelFormat::kRgb) {
+            const int pad = brscan::ica::TrailingPadRows(bytes, outWidth,
+                                                         outHeight, outWidth * 3);
+            if (pad > 0 && outHeight - pad > 0) {
+              os_log(Log(),
+                     "SyncScan: file page %d ADF trailing-pad crop %d -> %d rows "
+                     "(trimmed %d uniform gray-128 rows)",
+                     idx, outHeight, outHeight - pad, pad);
+              outHeight -= pad;
+            }
+          }
           const PageResult r = PostFilePage(
               securityScopedURL, documentFolderPath, transferPlan, deviceObject,
               outFormat, bytes, byteCount, outWidth, outHeight, idx,

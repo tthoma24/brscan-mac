@@ -328,6 +328,18 @@ been independently verified on the wire.
   selectable list at 1200.
 - The scan area is coordinate-based, so any paper size maps to an `A=` rectangle
   within the device maximum reported in the offer.
+- **ADF color trailing pad (bottom band).** On a **document-feeder color/JPEG**
+  scan, when the requested Size is taller than the fed sheet the device pads the
+  decoded image up to the requested height with uniform full-width mid-gray
+  (`128`) past where the sheet ended: the tail is a solid gray band of
+  `requested_height − sheet_length` rows (measured across our captures: ~20, ~8,
+  ~1840, ~3792 rows on different sheets). The real content above ends at the true
+  sheet length; the flatbed does not pad this way. The ICA module auto-crops this
+  tail on the FILE (final-encode) path -- see `ica-module/adf_crop.h`
+  (`TrailingPadRows`) and docs/ICA-PROTOCOL.md. The **gray/BW RLENGTH** path pads
+  differently (its own white/black fill to the requested height, not this device
+  `128`), so it is out of scope for that crop; it could later be trimmed using
+  `rows_read` instead.
 
 ## Cancellation
 

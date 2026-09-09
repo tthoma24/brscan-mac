@@ -270,6 +270,22 @@ The module posts, per scan, in order (via `ICDSendNotification` /
    trigger), `kICANotificationTypeKey`, and
    `kICANotificationScannerDocumentNameKey` = the exact destination path. Sent
    with plain `ICDSendNotification`.
+
+   **ADF color trailing-pad auto-crop.** Before this encode, on an **ADF color**
+   page (`params.source == kAdf` and the decoded `outFormat == kRgb`) the module
+   trims the device's trailing gray padding: when Size is taller than the fed
+   sheet the scanner pads the JPEG up to the requested height with uniform
+   full-width mid-gray (`128`), leaving a solid gray band at the bottom (see
+   docs/PROTOCOL.md "Resolution and size"). `brscan::ica::TrailingPadRows`
+   (`ica-module/adf_crop.h`, pure + unit-tested in `tests/adf_crop_test.cpp`)
+   counts the contiguous trailing rows that are uniform near-`128` **and** flat
+   (real content, even gray, is noisy and is not trimmed); the module then
+   shortens the encoded height by that count (guarding `height - pad > 0` so a
+   page is never cropped to nothing). RGB rows are contiguous top-to-bottom, so
+   the first `height - pad` rows are the cropped image. This is FILE-path only —
+   the live overview/preview bands are untouched — and RGB-only: the gray/BW
+   RLENGTH path pads differently and is out of scope (it could later be trimmed
+   from `rows_read`).
 4. `kICANotificationTypeScannerScanDone` — one per scan, ends the job. Keys:
    `kICANotificationICAObjectKey` (device object) + `kICANotificationTypeKey`.
    Plain `ICDSendNotification`. A clean cancel (`RunScan` returned
