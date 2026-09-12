@@ -237,19 +237,28 @@ Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
   // Scan area: an explicit positive rectangle in pixels, else full area.
   if (req.has_area && req.area_x1 > req.area_x0 && req.area_y1 > req.area_y0) {
     int x0 = req.area_x0;
-    int x1 = req.area_x1;
-    // The ADF center-registers pages within its sensor width, but the host
-    // sends a 0-based rectangle. Re-center the requested width horizontally so
-    // the page is framed correctly (no blank left margin / right-edge cutoff).
-    // The flatbed corner-registers, so its rectangle is left exactly as sent.
+    // Align the requested width DOWN to a multiple of 16 before framing it. The
+    // device encodes color as JPEG 4:2:0, whose chroma is sampled in 16-px MCUs;
+    // a width that leaves a partial final MCU comes back with garbage chroma in
+    // those last columns -- a magenta/rainbow fringe on the page's right edge.
+    // Brother's own driver only ever requests widths that are exact multiples of
+    // 16, so we match it. DOWN, not up: rounding up would push the window past
+    // the paper edge onto the platen. 16 (not 8) also byte-aligns a bitonal row.
+    // A width already a multiple of 16 is unchanged, and a width below 16 is left
+    // as-is so the window can never underflow to a non-positive size.
+    int width = req.area_x1 - x0;
+    if (width >= 16) width -= width % 16;
+    // The ADF center-registers pages within its sensor width, but the host sends
+    // a 0-based rectangle. Re-center the (aligned) width horizontally so the page
+    // is framed correctly (no blank left margin / right-edge cutoff). The flatbed
+    // corner-registers, so its x0 is left exactly as sent. Either source frames
+    // the aligned width, so x1 = x0 + width.
     if (feeder) {
-      const int width = x1 - x0;
       // Center using request_dpi (the scale req.area_* was computed at), so the
       // requested width and the sensor width always share one dpi scale.
       x0 = CenteredAdfX0(AdfSensorWidthAtDpi(request_dpi), width);
-      x1 = x0 + width;
     }
-    p.area = Area{x0, req.area_y0, x1, req.area_y1};
+    p.area = Area{x0, req.area_y0, x0 + width, req.area_y1};
   } else {
     p.area = Area{0, 0, 0, 0};  // Full offered area (RunScan honours this).
   }
