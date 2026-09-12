@@ -183,6 +183,20 @@ Legend for the `ICScannerDocumentType` values referenced below is in
 | **C8. Empty ADF — 2-sided** | Scan Mode = Document Feeder; **no paper**; Duplex on | Press **Scan** | Same native "Document feeder is empty." alert, promptly (#84, #85) | ☐ | Must fire for duplex as well as simplex |
 | **C9. Cancel mid-ADF-scan** | Scan Mode = Document Feeder; several sheets loaded; a scan running | Press **Cancel** while pages are still feeding | The scan aborts cleanly; the device **feeds the remaining sheets out until the feeder is empty**, then stops; Image Capture returns to ready **without hanging**, and a new scan starts normally | ☐ | Guards mid-feed abort + recovery; no wedged session |
 
+### CE. Readable scan-error dialogs
+
+Device-in-the-loop re-tests for the readable failure dialogs (PR C). The module
+posts a `kICANotificationTypeDeviceStatusError` whose subtype is an
+`Error.loctable` key, so Image Capture renders a specific message instead of its
+bland generic failure. Confirm each string against the running host, as the
+feeder-empty note (C7) requires.
+
+| Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |
+|---|---|---|---|---|---|
+| **CE1. Duplex B&W ADF scan failure is readable** | Scan Mode = Document Feeder; sheets loaded; **Kind = Black & White** (grayscale/RLENGTH); Duplex on | Scan | This path currently fails; Image Capture shows **"An error occurred during scanning."** (`kICAErrStrScanErr`), **not** the generic failure dialog | ☐ | The RLENGTH duplex de-interleaving fix is a separate PR; this row only verifies the failure is now surfaced readably |
+| **CE2. Empty ADF still reads "Document feeder is empty."** | Scan Mode = Document Feeder; **no paper** | Press **Scan** | Still the native **"Document feeder is empty."** alert (`kICAErrStrDFEmptyErr`) | ☐ | Regression check that generalizing the notifier (`PostScannerError`) preserved C7/C8 |
+| **CE3. Paper jam — discovery** | Scan Mode = Document Feeder; feed a sheet, then **physically jam the ADF mid-feed** | Scan and induce a jam | **Record what Image Capture shows** (message text and timing) | ☐ | DISCOVERY only. The device's jam signature is uncaptured, so a jam is not yet mapped to `kICAErrStrDFPaperErr` ("Document feeder has a paper jam or paper feed error."). Note the observed behavior; mapping the jam key is a follow-up pending a captured jam signature |
+
 ### D. Packaging and signing
 
 | Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |

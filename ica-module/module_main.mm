@@ -1139,40 +1139,58 @@ ICAError SendScannerNotification(CFMutableDictionaryRef dict,
   return err;
 }
 
-// Reports the document feeder as empty to the host: posts a
+// Posts a readable scanner-error dialog to the host: a
 // kICANotificationTypeDeviceStatusError carrying kICANotificationSubTypeKey =
-// CFSTR("kICAErrStrDFEmptyErr"), referenced to the DEVICE object like every
-// scanner notification (Task 15). The *Error* type is what makes Image Capture
-// raise its built-in alert ("Scanner reported an error / Document feeder is
-// empty."); the informational DeviceStatusInfo type we posted before raises no
-// dialog. The subtype value is a raw localized-string KEY, not an SDK constant:
-// Image Capture resolves "kICAErrStrDFEmptyErr" to "Document feeder is empty."
-// via ICADevices.framework/.../Resources/Error.loctable. The type constant
+// `subtypeKey`, referenced to the DEVICE object like every scanner notification
+// (Task 15). The *Error* type is what makes Image Capture raise its built-in
+// alert ("Scanner reported an error / <resolved string>"); the informational
+// DeviceStatusInfo type raises no dialog. The subtype value is a raw
+// localized-string KEY, not an SDK constant: Image Capture resolves it via
+// ICADevices.framework/.../Resources/Error.loctable -- e.g.
+// "kICAErrStrDFEmptyErr" -> "Document feeder is empty.",
+// "kICAErrStrScanErr" -> "An error occurred during scanning.",
+// "kICAErrStrScannerComErr" -> "An error occurred while communicating with the
+// scanner.", "kICAErrStrScannerBusyErr" -> "The scanner is busy." (keys
+// verified on this machine). The type constant
 // kICANotificationTypeDeviceStatusError resolves from ICADevices (exported
 // alongside kICANotificationTypeDeviceStatusInfo in ICADevices.tbd); the
 // subtype-key mechanism mirrors the documented WarmUp* status notifications
-// (kICANotificationSubTypeWarmUpStarted/Done ride the same key).
+// (kICANotificationSubTypeWarmUpStarted/Done ride the same key). The
+// outcome->key mapping is the pure ErrorStringKeyForOutcome (scan_outcome.h);
+// callers pass its result wrapped in a CFString, or a fixed CFSTR key for the
+// out-of-band connect/zero-page faults that the classifier does not see.
 //
 // CLEAN-ROOM: the notification type constant, the kICANotificationSubTypeKey
-// usage, and the public loctable string key kICAErrStrDFEmptyErr are interface
-// facts only; no source was copied. That the host surfaces this exact alert
-// must still be confirmed device-in-the-loop -- see the re-test in
-// docs/ICA-PROTOCOL.md.
-void NotifyDocumentFeederEmpty(ICAObject deviceObject) {
+// usage, and the public loctable string keys are interface facts only; no
+// source was copied. That the host surfaces each alert must still be confirmed
+// device-in-the-loop -- see the re-tests in docs/RUNBOOK-plan-2-ica.md.
+void PostScannerError(ICAObject deviceObject, CFStringRef subtypeKey) {
+  if (subtypeKey == nullptr) return;
   CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
       nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
   if (dict == nullptr) return;
-  CFDictionarySetValue(dict, kICANotificationSubTypeKey,
-                       CFSTR("kICAErrStrDFEmptyErr"));
+  CFDictionarySetValue(dict, kICANotificationSubTypeKey, subtypeKey);
   const ICAError err = SendScannerNotification(
       dict, deviceObject, kICANotificationTypeDeviceStatusError,
       /*waitForReply=*/false);
   CFRelease(dict);
   os_log(Log(),
-         "SyncScan: posted DeviceStatusError/DFEmpty alert (feeder empty) "
-         "err=%d",
-         err);
+         "SyncScan: posted DeviceStatusError alert (subtype=%{public}@) err=%d",
+         subtypeKey, err);
+}
+
+// Wraps a plain Error.loctable KEY from ErrorStringKeyForOutcome (a const char*,
+// or nullptr for "no dialog") and posts it via PostScannerError. Keeping the key
+// as a C string lets the mapping live in the framework-free, unit-tested
+// scan_outcome.h; this is the only place it becomes a CFString.
+void PostScannerErrorKey(ICAObject deviceObject, const char* subtypeKey) {
+  if (subtypeKey == nullptr) return;
+  CFStringRef cfKey =
+      CFStringCreateWithCString(nullptr, subtypeKey, kCFStringEncodingASCII);
+  if (cfKey == nullptr) return;
+  PostScannerError(deviceObject, cfKey);
+  CFRelease(cfKey);
 }
 
 // Hands ONE live band back as an IMAGE-info chunk in a ScanProgressStatus
@@ -1545,6 +1563,12 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
   }
 
   if (connectStatus != brscan::Status::kOk) {
+    // The 3-attempt connect loop never won the race. The Brother device allows
+    // a single scan connection, so a lingering socket from a prior session that
+    // keeps losing the race reads to the user as "the scanner is busy" -- post
+    // that readable dialog rather than the bland generic failure. This is an
+    // out-of-band fault the outcome classifier never sees (no scan ran).
+    PostScannerError(deviceObject, CFSTR("kICAErrStrScannerBusyErr"));
     finalErr = kICADeviceInternalErr;
   } else {
     std::vector<brscan::ScanResult> pages;
@@ -1596,7 +1620,9 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
     if (sendFailed) {
       // A hard band send failure stopped RunScan early, which otherwise reads as
       // a clean cancel (kCanceled) and would end the scan noErr. Override that:
-      // report a device error and skip the file post-processing.
+      // report a device error and skip the file post-processing. The host link
+      // broke mid-delivery, so surface the generic scan-error dialog.
+      PostScannerError(deviceObject, CFSTR("kICAErrStrScanErr"));
       finalErr = kICADeviceInternalErr;
       os_log_error(Log(),
                    "SyncScan: aborting on band send failure (bands=%ld) -> "
@@ -1615,14 +1641,27 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
       // outcome instead of the generic kICADeviceInternalErr: tell the host the
       // feeder has no document loaded (so the client's readonly documentLoaded
       // reflects it) and end the scan with the feeder-empty error. Flatbed, and
-      // any scan that produced pages, are unaffected.
-      NotifyDocumentFeederEmpty(deviceObject);
+      // any scan that produced pages, are unaffected. The mapping to the
+      // "Document feeder is empty." dialog key is ErrorStringKeyForOutcome.
+      PostScannerErrorKey(deviceObject,
+                          brscan::ica::ErrorStringKeyForOutcome(outcome,
+                                                                scanStatus));
       finalErr = kAdfFeederEmptyError;
       os_log(Log(),
              "SyncScan: ADF empty (status=%d, pages=0) -> feeder-empty err=%d "
              "(ICReturnScannerFailedToCompleteScan)",
              (int)scanStatus, finalErr);
     } else if (outcome == brscan::ica::ScanOutcome::kFailed) {
+      // A hard scan failure. Map the underlying status to a readable dialog
+      // (protocol desync -> "An error occurred during scanning."; I/O or
+      // timeout -> "...communicating with the scanner."; busy -> "The scanner
+      // is busy.") instead of leaving the host on its bland generic failure.
+      // Paper-jam (kICAErrStrDFPaperErr) is intentionally not mapped: the
+      // device's jam signature is uncaptured and a desync must not be labeled a
+      // jam -- a follow-up pending a captured jam signature.
+      PostScannerErrorKey(deviceObject,
+                          brscan::ica::ErrorStringKeyForOutcome(outcome,
+                                                                scanStatus));
       finalErr = kICADeviceInternalErr;
     } else if (fileTransfer) {
       // FILE path only: the bands drove the progress bar; now encode each whole
@@ -1673,7 +1712,9 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
             // A hard write/delivery fault (kSendFailed "must not be silently
             // ignored"). Mirror the band path: report a device error and stop
             // -- writing later pages after a hard fault would still end the job
-            // noErr and could scatter more partial files, so break here.
+            // noErr and could scatter more partial files, so break here. Surface
+            // the generic scan-error dialog for the user.
+            PostScannerError(deviceObject, CFSTR("kICAErrStrScanErr"));
             finalErr = kICADeviceInternalErr;
             os_log_error(Log(),
                          "SyncScan: file page %d hard write failure -> device "
@@ -1696,6 +1737,10 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
     // finalErr, so this only catches the otherwise-silent kOk-with-zero-pages
     // gap; a successful scan has at least one page and is unaffected.
     if (finalErr == noErr && !canceled && pages.empty()) {
+      // The scan classified as kOk yet produced nothing -- an out-of-band gap
+      // the outcome classifier does not flag. Give the user a readable generic
+      // scan error rather than a silent generic-failure dialog.
+      PostScannerError(deviceObject, CFSTR("kICAErrStrScanErr"));
       finalErr = kICADeviceInternalErr;
       os_log_error(Log(),
                    "SyncScan: scan reported success but produced no page -> "
