@@ -940,7 +940,9 @@ ICAError SetParameters(const ScannerObjectInfo* deviceObjectInfo,
       // pass it in; -1 means "no context" so the fallback is skipped.
       const int trackedUnit = ctx ? ctx->selectedFunctionalUnit : -1;
       brscan::ica::ScanRequest req = ReadScanRequest(pb->theDict, trackedUnit);
-      brscan::ica::ScanLimits limits;  // default max_dpi = highest offer (600).
+      // Default per-source caps: flatbed 2400 dpi, ADF 1200 dpi (Brother
+      // optical maxima). TranslateScanParams clamps by the request's source.
+      brscan::ica::ScanLimits limits;
       brscan::Params params = brscan::ica::TranslateScanParams(req, limits);
       if (ctx) ctx->params = params;
 
@@ -1425,12 +1427,24 @@ CGImageRef CopyImageAsRGB(CGImageRef src) {
 // finalized write. On a finalize failure the destination file that
 // CGImageDestinationCreateWithURL already created/truncated is removed, so a
 // failed page never leaves a partial (e.g. 0-byte) artifact behind.
-bool WriteImageToURL(CGImageRef image, NSURL* fileURL, CFStringRef uti) {
+bool WriteImageToURL(CGImageRef image, NSURL* fileURL, CFStringRef uti,
+                     int dpiX, int dpiY) {
   if (image == nullptr || fileURL == nil || uti == nullptr) return false;
   CGImageDestinationRef dst = CGImageDestinationCreateWithURL(
       (__bridge CFURLRef)fileURL, uti, 1, nullptr);
   if (dst == nullptr) return false;
-  CGImageDestinationAddImage(dst, image, nullptr);
+  // Embed the scan resolution so Preview and other apps report the real DPI
+  // instead of ImageIO's 72 ppi default -- a 1200 dpi page tagged 72 ppi reads
+  // as ~17x its true physical size. ImageIO maps kCGImagePropertyDPI{Width,
+  // Height} to each container's native resolution field (JFIF, TIFF, PNG pHYs).
+  // A non-positive dpi (never expected) writes no tag rather than a bogus one.
+  NSDictionary* props = (dpiX > 0 && dpiY > 0)
+                            ? @{
+                                (__bridge id)kCGImagePropertyDPIWidth : @(dpiX),
+                                (__bridge id)kCGImagePropertyDPIHeight : @(dpiY),
+                              }
+                            : nil;
+  CGImageDestinationAddImage(dst, image, (__bridge CFDictionaryRef)props);
   const bool ok = CGImageDestinationFinalize(dst);
   CFRelease(dst);
   if (!ok) {
@@ -1454,7 +1468,7 @@ PageResult PostFilePage(CFURLRef securityScopedURL,
                         const brscan::ica::TransferPlan& transferPlan,
                         ICAObject icaObject, brscan::PixelFormat format,
                         const uint8_t* bytes, size_t byteCount, int width,
-                        int height, int pageIndex) {
+                        int height, int pageIndex, int dpiX, int dpiY) {
   bool wrote = false;
   std::string writtenPath;
   @autoreleasepool {
@@ -1515,7 +1529,8 @@ PageResult PostFilePage(CFURLRef securityScopedURL,
       os_log(Log(),
              "file transfer: writing %{private}@ format=%{public}s %dx%d",
              fileURL.path, transferPlan.uti.c_str(), width, height);
-      wrote = WriteImageToURL(image, fileURL, (__bridge CFStringRef)utiStr);
+      wrote = WriteImageToURL(image, fileURL, (__bridge CFStringRef)utiStr,
+                              dpiX, dpiY);
       CGImageRelease(image);
     } else {
       os_log_error(Log(), "PostFilePage[%d]: CGImage build failed %dx%d",
@@ -1776,7 +1791,8 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         if (ready) {
           const PageResult r = PostFilePage(
               securityScopedURL, documentFolderPath, transferPlan, deviceObject,
-              outFormat, bytes, byteCount, outWidth, outHeight, idx);
+              outFormat, bytes, byteCount, outWidth, outHeight, idx,
+              params.x_dpi, params.y_dpi);
           if (r == PageResult::kSendFailed) {
             // A hard write/delivery fault (kSendFailed "must not be silently
             // ignored"). Mirror the band path: report a device error and stop

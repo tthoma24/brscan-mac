@@ -172,18 +172,28 @@ int CenteredAdfX0(int sensor_width_at_dpi, int requested_width) {
 Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
   Params p;  // brscan defaults: kColor, kFlatbed, 300 dpi, 50/50, full area.
 
+  // Functional unit -> source. Resolved first because the resolution clamp below
+  // is per source (the flatbed and ADF sensors have different optical maxima).
+  // Duplex is only meaningful for the feeder.
+  const bool feeder =
+      req.has_functional_unit && req.functional_unit == kFeederFunctionalUnit;
+
   // Resolution. `request_dpi` is the resolution ScanRequestFromIcap already used
   // to convert the scan area (req.area_*) to pixels; `dpi` is that value clamped
-  // to the offered maximum for the actual scan (never below 1). The two are equal
-  // for every real request -- the host is constrained to <= the advertised max --
-  // but the ADF centering below re-derives the window from the requested width,
-  // which is in request_dpi pixels, so it MUST use request_dpi (not the clamped
-  // dpi) for the sensor width. Otherwise, if a request ever exceeded the max, the
-  // requested width and the sensor width would be on two different dpi scales.
+  // to the SELECTED source's optical maximum for the actual scan (never below 1).
+  // The two are equal for every real request -- the host is constrained to <= the
+  // advertised max -- but the ADF centering below re-derives the window from the
+  // requested width, which is in request_dpi pixels, so it MUST use request_dpi
+  // (not the clamped dpi) for the sensor width. Otherwise, if a request ever
+  // exceeded the max, the requested width and the sensor width would be on two
+  // different dpi scales. The clamp is source-dependent: the flatbed reaches
+  // kMaxFlatbedDpi (2400), the ADF only kMaxFeederDpi (1200) (Brother spec).
   const int request_dpi = (req.has_resolution && req.resolution > 0)
                               ? req.resolution
                               : kDefaultDpi;
-  const int max_dpi = limits.max_dpi > 0 ? limits.max_dpi : kDefaultDpi;
+  const int source_max_dpi = feeder ? limits.max_dpi_feeder
+                                     : limits.max_dpi_flatbed;
+  const int max_dpi = source_max_dpi > 0 ? source_max_dpi : kDefaultDpi;
   const int dpi = Clamp(request_dpi, 1, max_dpi);
   p.x_dpi = dpi;
   p.y_dpi = dpi;
@@ -213,9 +223,7 @@ Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
     p.mode = ScanMode::kColor;
   }
 
-  // Functional unit -> source. Duplex is only meaningful for the feeder.
-  const bool feeder =
-      req.has_functional_unit && req.functional_unit == kFeederFunctionalUnit;
+  // Source (resolved above) -> params. Duplex is only meaningful for the feeder.
   p.source = feeder ? Source::kAdf : Source::kFlatbed;
   p.duplex = feeder && req.duplex;
 

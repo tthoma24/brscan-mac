@@ -263,12 +263,24 @@ struct IcapScanSelection {
 // Missing selections stay absent so TranslateScanParams applies the defaults.
 ScanRequest ScanRequestFromIcap(const IcapScanSelection& sel);
 
+// The two sources' optical-resolution maxima (Brother MFC-J6920DW public spec,
+// cited in reference/sdd-ledger.md): the flatbed scans up to 2400 x 2400 dpi;
+// the ADF up to 2400 x 1200 dpi, so for a single square dpi the feeder tops out
+// at 1200. These are BOTH the highest value scan_parameters.mm advertises per
+// unit (ICAP_XRESOLUTION / ICAP_YRESOLUTION) AND the runtime clamp ceilings
+// below, so the advertised list and the clamp share one source of truth.
+inline constexpr int kMaxFlatbedDpi = 2400;
+inline constexpr int kMaxFeederDpi = 1200;
+
 // Bounds the module advertises to the host, used to clamp the request so a
-// translated Params can never ask the device for an impossible value. `max_dpi`
-// is the largest resolution the offer table advertises (PLAN-2-DESIGN.md: clamp
-// resolution to the ESC I offer maximum).
+// translated Params can never ask the device for an impossible value. The cap
+// is per source because the flatbed and ADF sensors differ: TranslateScanParams
+// clamps a feeder request to `max_dpi_feeder` and any other (flatbed) request to
+// `max_dpi_flatbed` (PLAN-2-DESIGN.md: clamp resolution to the source's offer
+// maximum).
 struct ScanLimits {
-  int max_dpi = 600;
+  int max_dpi_flatbed = kMaxFlatbedDpi;
+  int max_dpi_feeder = kMaxFeederDpi;
 };
 
 // Default resolution when the host supplies none or an invalid one.
