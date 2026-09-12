@@ -163,7 +163,7 @@ Legend for the `ICScannerDocumentType` values referenced below is in
 | **B2. Low-resolution scan** | Scan Mode = Flatbed; **Kind = Color** | Set **Resolution = 100 or 150**; Scan | Image completes at the selected DPI | ☐ | The resolution sweep (B2–B5) runs in Color; the per-mode correctness rows are B6–B8 at 300 dpi |
 | **B3. Mid-resolution scan** | Scan Mode = Flatbed; **Kind = Color** | Set **Resolution = 600**; Scan | Completes; pixel dimensions scale with DPI | ☐ | Clamped to the device `ESC I` offer max |
 | **B4. 1200 dpi scan** | Scan Mode = Flatbed; **Kind = Color** | Set **Resolution = 1200**; Scan | Completes at 1200 dpi; pixel dimensions are 2x the 600 dpi (B3) scan; **opened in Preview the file reports 1200 ppi, not 72** | ☐ | The flatbed now advertises 1200 and 2400 (the manufacturer driver exposes 1200; 2400 is the flatbed optical max) — confirm the menu offers both. Two caps used to hide these: the advertised `ICAP_XRESOLUTION` list stopped at 600 and `TranslateScanParams` clamped every request to 600; PR D lifts both, source-dependent |
-| **B5. 2400 dpi scan (small crop)** | Scan Mode = Flatbed; **Kind = Color** | Set **Resolution = 2400**; **crop to a SMALL area** (e.g. a ~1x1 in region); Scan | Completes at 2400 dpi over the cropped region; **Preview reports 2400 ppi, not 72** | ☐ | **Use a small crop, not full A3.** A full-glass A3 page at 2400 dpi is ~28k x 40k px (~3 GB decoded RGB) — expect heavy memory and time. The whole-page buffer math is 64-bit (`buffer_descriptor` accumulates stride/size in `int64_t`; the delivery path carries page byte counts as `size_t`), so nothing wraps |
+| **B5. 2400 dpi scan (small crop)** | Scan Mode = Flatbed; **Kind = Color** | Set **Resolution = 2400**; **crop to a SMALL area** (e.g. a ~1x1 in region); Scan | Completes at 2400 dpi over the cropped region; **Preview reports 2400 ppi, not 72** | ☐ | **Use a small crop or a full Letter/A4 page, not Legal/A3/Ledger.** A full A3/Ledger page at 2400 dpi is ~28k×40k px (~1.1 Gpx) and is **rejected by the decode ceiling** (`kMaxScanPixels = 600 Mpx`, `kMaxScanDimension = 30000 px/side`; `libbrscan/decode_jpeg.cpp`) — it errors rather than saving; see **KL2**. A full **Letter/A4 @2400** (~0.54 Gpx) fits under both caps. The whole-page buffer math is 64-bit (`buffer_descriptor` accumulates stride/size in `int64_t`; the delivery path carries page byte counts as `size_t`), so nothing wraps |
 | **B6. Color** | Scan Mode = Flatbed; **Resolution = 300** | **Kind = Color**; Scan | Correct 24-bit color image | ☐ | Kind **Color** = pixel type RGB → `kColor`; kRgb decoded via DecodeJpeg |
 | **B7. Grayscale** | Scan Mode = Flatbed; **Resolution = 300** | **Kind = Black & White**; Scan | Correct 8-bit grayscale image | ☐ | In Image Capture, **grayscale is the "Black & White" Kind** (pixel type Gray → `kTrueGray`/GRAY256, the path #150 routes ICA gray to and fixes) — **not** "Text", and there is no Kind literally named "Gray" |
 | **B8. 1-bit black & white** | Scan Mode = Flatbed; **Resolution = 300** | **Kind = Text**; Scan | Correct 1-bit bitonal image; `1 = black` renders as ink | ☐ | Image Capture's **"Text" Kind is the 1-bit path** (pixel type BW → `kBlackWhite`). Confirmed by the Format gating (A5): Text → no JPEG (1-bit); Black & White → adds JPEG (grayscale) |
@@ -251,6 +251,35 @@ staging.
   `tiffutil -cat page*.tiff -out multi.tiff`.
 
 Filed to Apple Feedback Assistant: `FB24717493`
+
+**KL2. 2400 dpi is bounded to a small crop or a full Letter/A4 page — a full-page Legal/A3/Ledger scan at 2400 dpi is rejected, not saved (by design).**
+
+**Symptom.** Selecting **2400 dpi** (flatbed) over a **full Legal, A3, or Ledger**
+area produces a scan error instead of a file: the page exceeds the JPEG decode
+bounds (`kMaxScanPixels = 600 Mpx`, `kMaxScanDimension = 30000 px/side`;
+`libbrscan/decode_jpeg.cpp`). A full A3 @2400 is ~28k×40k px (~1.1 Gpx); any sheet
+taller than ~12.5 in at 2400 (Legal ~33.6k px, A3/Ledger ~40k px tall) also trips
+the per-side cap. A **small crop** or a full **Letter/A4** page (~0.54 Gpx,
+≤~28k px/side) stays under both caps and scans normally (B5).
+
+**Root cause.** A deliberate product bound, not a device or protocol limit. 2400
+dpi is advertised for the flatbed (#155) mainly for high-detail crops; the
+decode-size ceiling in `libbrscan/decode_jpeg.cpp` (which rejects malformed/absurd
+wire dimensions) was left at 600 Mpx / 30000 px because a full-page A3/Ledger @2400
+(~3 GB decoded RGB) is outside the intended use and not worth the memory/time cost
+to support.
+
+**Fix path (deferred).** Raising the ceiling in `decode_jpeg.cpp` (and its L5 unit
+test) would allow full-page 2400; this was the remaining scope of #149 and was
+deprioritized when that issue was closed as shipped. Revisit if a full-page 2400
+workflow is needed.
+
+**Workarounds.**
+
+- Crop to the region you actually need at 2400 dpi.
+- Scan the full page at **1200 dpi** (full A3/Ledger @1200 ≈ 294 Mpx, well within
+  bounds).
+- A full **Letter/A4** original at 2400 works as-is.
 
 ### D. Packaging and signing
 
