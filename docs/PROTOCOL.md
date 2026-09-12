@@ -165,7 +165,15 @@ A typical scan is: `ESC Q` (once per connection), then per scan
    before `ESC I`/`ESC X`; the jam (`0xc3`) surfaces only once the feed is
    attempted, so the driver treats a lone `0xc3` at the start of the readout
    as a jam error (mapped to `kICAErrStrDFPaperErr`) rather than a generic
-   failure -- see the C16 row in the runbook and PROVENANCE.md.
+   failure -- see the C16 row in the runbook and PROVENANCE.md. A third member
+   of this ESC X reply family, `0x86`, is returned **in place of image data at
+   the `ESC X` reply** when the user presses **Stop on the unit** (C15). Unlike
+   `0xc2`/`0xc3` it does not carry the `0x40` error bit -- it is a clean
+   "stopped by the user", not a fault -- so the driver treats a lone `0x86` at
+   the start of the readout as `Status::kCancelled`, ending the scan cleanly
+   with no error dialog (see the C15 row and PROVENANCE.md). Like the jam, this
+   is disambiguated from a pixel byte that merely happens to be `0x86` by the
+   *lone*-byte test (nothing follows).
 4. `ESC I` reply: `[1-byte status][2-byte little-endian length][ASCII CSV
    text][NUL]`. The status byte was `0x00` in every sample seen and its
    meaning is unconfirmed. The CSV is a comma-terminated offer of the granted
@@ -214,9 +222,12 @@ A typical scan is: `ESC Q` (once per connection), then per scan
      color appear to be an artifact of how the device's JPEG encoder flushes
      bounded output bursts, not a general network-layer framing.
 
-   The end-of-page, end-of-job, and cancel status bytes beyond the block
-   header are not decoded by this codebase; see "Cancellation" below for how
-   a cancelled scan is detected instead (a read timeout, not a status byte).
+   The end-of-page and end-of-job status bytes beyond the block header are not
+   decoded by this codebase. A cancel is handled two ways depending on when it
+   lands (see "Cancellation" below): a Stop pressed at the `ESC X` start-scan
+   boundary surfaces as a lone `0x86` status byte in place of image data (now
+   decoded, item 3 above); a Stop pressed mid-stream just stalls the stream and
+   is detected by a read timeout.
 
 ## Multi-page (ADF)
 
@@ -317,13 +328,33 @@ been independently verified on the wire.
   selectable list at 1200.
 - The scan area is coordinate-based, so any paper size maps to an `A=` rectangle
   within the device maximum reported in the offer.
+- **ADF color trailing pad (bottom band).** On a **document-feeder color/JPEG**
+  scan, when the requested Size is taller than the fed sheet the device pads the
+  decoded image up to the requested height with uniform full-width mid-gray
+  (`128`) past where the sheet ended: the tail is a solid gray band of
+  `requested_height − sheet_length` rows (measured across our captures: ~20, ~8,
+  ~1840, ~3792 rows on different sheets). The real content above ends at the true
+  sheet length; the flatbed does not pad this way. The ICA module auto-crops this
+  tail on the FILE (final-encode) path -- see `ica-module/adf_crop.h`
+  (`TrailingPadRows`) and docs/ICA-PROTOCOL.md. The **gray/BW RLENGTH** path pads
+  differently (its own white/black fill to the requested height, not this device
+  `128`), so it is out of scope for that crop; it could later be trimmed using
+  `rows_read` instead.
 
 ## Cancellation
 
 - Host-initiated cancel (from the client) is a clean client-side action.
-- Device-initiated cancel (pressing Stop on the printer) emits no in-band
-  status: the device simply stops sending. A client must use a read timeout to
-  detect the stalled stream rather than blocking indefinitely.
+- Device-initiated cancel (pressing **Stop** on the unit) surfaces one of two
+  ways, depending on when it lands:
+  - **At the `ESC X` start-scan reply** (C15): the device returns a lone `0x86`
+    status byte in place of image data, then sends nothing more. This is
+    decoded as a clean cancel (`Status::kCancelled`) -- the sibling of the jam's
+    `0xc3` (item 3 in "Responses"), but without the error bit -- and the scan
+    ends cleanly with no error dialog. Captured in
+    `reference/c15-stop-cancel.pcap` (see PROVENANCE.md).
+  - **Mid-stream** (after image data has begun): no in-band status byte was
+    observed; the device simply stops sending, so a client must use a read
+    timeout to detect the stalled stream rather than blocking indefinitely.
 
 ## Mode coverage
 

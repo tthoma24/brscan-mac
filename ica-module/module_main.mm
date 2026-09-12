@@ -56,6 +56,7 @@
 #include "brscan/scanner.h"
 #include "brscan/transport_tcp.h"
 #include "brscan/types.h"
+#include "adf_crop.h"
 #include "buffer_descriptor.h"
 #include "decode_jpeg.h"  // libbrscan private header (on the libbrscan inc dir).
 #include "file_transfer.h"
@@ -1332,6 +1333,34 @@ void PostInMemoryPageDone(ICAObject deviceObject, int pageIndex) {
          pageIndex, err);
 }
 
+// Posts the canonical user-cancel signal: a kICANotificationTypeTransactionCanceled
+// referenced to the DEVICE object (like every scanner notification, Task 15) and
+// sent fire-and-forget, mirroring how PostInMemoryPageDone builds its dict. This
+// is the notification Apple's own VirtualScanner sample posts (via
+// ICDSendNotification) to signal that the user aborted the transaction -- a
+// distinct, non-error signal, NOT a DeviceStatusError (so no alert is raised) and
+// NOT the plain ScannerScanDone that also closes the scan. RunScanSynchronous
+// posts this on BOTH cancel sources (a host Cancel via the band callback and a
+// device Stop-button cancel decoded as Status::kCancelled in libbrscan) BEFORE
+// the final ScannerScanDone(noErr), so a cancel is always signaled the
+// reference-correct way while the scan still terminates cleanly and cannot hang.
+// Clean-room: kICANotificationTypeTransactionCanceled is an exported ICADevices
+// interface fact (ICAApplication.h / ICADevices.tbd); no source was copied. That
+// the host consumes it as a clean cancel is confirmed device-in-the-loop (see the
+// C15 row in docs/RUNBOOK-plan-2-ica.md).
+void PostTransactionCanceled(ICAObject deviceObject) {
+  CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+      nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  if (dict == nullptr) return;
+  const ICAError err = SendScannerNotification(
+      dict, deviceObject, kICANotificationTypeTransactionCanceled,
+      /*waitForReply=*/false);
+  CFRelease(dict);
+  os_log(Log(), "SyncScan: posted TransactionCanceled (user cancel) err=%d",
+         err);
+}
+
 // ---------------------------------------------------------------------------
 // File-based transfer (Task 12).
 //
@@ -1714,9 +1743,24 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
                    "device error err=%d",
                    bandCount, finalErr);
     } else if (outcome == brscan::ica::ScanOutcome::kCanceled) {
-      // Clean host cancel: the bands already delivered stay on the host; write
-      // no file and end with a clean ScannerScanDone (Start releases the scoped
-      // URL, and transport is disconnected below -- nothing leaks).
+      // Clean cancel -- either a host cancel (on_band returned false, `canceled`
+      // already set in the callback) or a device Stop-button cancel (C15: a lone
+      // 0x86 at ESC X -> RunScan returns kCancelled straight from RunReadout with
+      // no band callback, so `canceled` is still false here). Both end the same
+      // way: any bands already delivered stay on the host; write no file, post NO
+      // error dialog, and end with a clean ScannerScanDone(noErr) (Start releases
+      // the scoped URL, and transport is disconnected below -- nothing leaks).
+      //
+      // Signal the cancel the reference-correct way first: post a
+      // kICANotificationTypeTransactionCanceled (the distinct user-cancel signal
+      // Apple's VirtualScanner sample sends), referenced to the device object,
+      // BEFORE the final ScannerScanDone. It is not a DeviceStatusError, so it
+      // raises no alert; the clean ScannerScanDone(noErr) still follows so the
+      // scan terminates and cannot hang. Both cancel sources reach here, so a
+      // cancel is always signaled the same reference-correct way.
+      PostTransactionCanceled(deviceObject);
+      // Set `canceled` so the device-cancel path reaches the clean-cancel end and
+      // the anti-hang guard below does not fire on its zero pages.
       canceled = true;
     } else if (outcome == brscan::ica::ScanOutcome::kAdfFeederEmpty) {
       // ADF with an empty feeder: no page ever came off the feeder (kNoPaper),
@@ -1810,6 +1854,40 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         }
 
         if (ready) {
+          // ADF color trailing-overscan cleanup (bottom band): on an ADF color/
+          // JPEG scan the device returns a JPEG already padded to the requested
+          // height. Past a short sheet the ADF scans its near-white backing/roller
+          // and then the device appends a mid-gray (~128) pad, leaving a near-white
+          // band + gray strip at the trailing edge. TrailingOverscanRows measures
+          // that band (the gray pad plus, gated on the pad being present, the
+          // near-white backing above it); FillTrailingRowsWhite paints those rows
+          // white IN PLACE, keeping the full height.
+          //
+          // Why paint, not crop: macOS 26's Image Capture builds each PDF page at
+          // the selected paper size and CENTERS the delivered image, so shortening
+          // the image pads it back with a white margin split top+bottom -- the band
+          // just reappears as page background. Keeping full height lets the image
+          // fill the page exactly (like an uncropped page), and the whitened tail
+          // reads as ordinary trailing margin: no gray/backing band, no centering
+          // margin. Scoped to ADF + kRgb (the decoded color page); the flatbed does
+          // not pad this way and the RLENGTH gray/BW path crops from rows_read. The
+          // mutable `img` backs `bytes`, so the fill is what PostFilePage writes;
+          // byteCount/outHeight stay the full image. The guard leaves an all-blank
+          // page (no real content above the band) untouched. The live band emission
+          // above (preview) is unaffected.
+          if (params.source == brscan::Source::kAdf &&
+              outFormat == brscan::PixelFormat::kRgb) {
+            const int overscan = brscan::ica::TrailingOverscanRows(
+                bytes, outWidth, outHeight, outWidth * 3);
+            if (overscan > 0 && outHeight - overscan > 0) {
+              os_log(Log(),
+                     "SyncScan: file page %d ADF bottom-band: painted %d trailing "
+                     "overscan rows white (gray-pad + backing), kept full %d rows",
+                     idx, overscan, outHeight);
+              brscan::ica::FillTrailingRowsWhite(img.pixels.data(), outWidth,
+                                                 outHeight, outWidth * 3, overscan);
+            }
+          }
           const PageResult r = PostFilePage(
               securityScopedURL, documentFolderPath, transferPlan, deviceObject,
               outFormat, bytes, byteCount, outWidth, outHeight, idx,

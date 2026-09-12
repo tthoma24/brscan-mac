@@ -35,6 +35,19 @@ constexpr int kAckTimeoutMs = 5000;
 // device-panel cancel emits no status, the stream just stops).
 constexpr int kScanTimeoutMs = 20000;
 
+// How long the lone-status-byte check (jam 0xc3 / cancel 0x86 at ESC X) waits for
+// a SECOND byte before concluding the first was alone. This must be short, NOT the
+// full kScanTimeoutMs: on a real jam/cancel the device sends the one status byte
+// and then goes silent -- it stays connected but answers nothing until re-queried
+// (reference/c16-jam-imac.pcap shows ~32s of quiet after the lone 0xc3). Bounding
+// this peek by kScanTimeoutMs would block the full 20s before returning
+// kPaperJam/kCancelled -- long enough that icdd abandons the synchronous scan and
+// no dialog fires (the C16 "jam didn't fire" report). A real scan's first data
+// chunk is never a single byte (a block header is 12 bytes; a JPEG opens with
+// SOI+data), so its second byte always arrives in the same burst as the first --
+// well inside this window -- while a lone status byte reliably times out of it.
+constexpr int kLoneStatusConfirmMs = 2000;
+
 // How long DrainQuiet waits, after the first chunk of a reply, for a
 // *further* chunk before deciding the reply is finished. 800 ms is chosen
 // relative to kAckTimeoutMs (5000 ms, the bound on the whole ack/reply):
@@ -62,6 +75,16 @@ constexpr uint8_t kAdfAckEmpty = 0xc2;
 // the feed is attempted). Sourced from reference/c16-jam-imac.pcap (a jammed
 // ADF duplex scan); the byte carries no device identity (see PROVENANCE.md).
 constexpr uint8_t kAdfJam = 0xc3;
+
+// A Stop-button cancel: pressing Stop on the unit makes it return this lone
+// status byte to ESC X (start-scan) in place of image data. It is another
+// sibling of the ack family above (ready 0x80, empty 0xc2, jam 0xc3), but --
+// unlike 0xc2/0xc3 -- it carries the ready bit and NOT the 0x40 error bit: a
+// clean "stopped by the user", not a fault. Detected the same lone-byte way as
+// the jam and mapped to Status::kCancelled (a clean end, no error dialog).
+// Sourced from reference/c15-stop-cancel.pcap (a Stop-button cancel of an ADF
+// scan); the byte carries no device identity (see PROVENANCE.md).
+constexpr uint8_t kAdfCancel = 0x86;
 
 // The device caps every payload block at this many bytes. A block header's
 // trailing length field pins at this exact value (0xfff4) as a "more data
@@ -661,7 +684,12 @@ Status ReadOneChunkBody(Framer* framer, const BlockHeader& header,
 
 // Runs the color (CGRAY/C=JPEG) readout for an ADF or flatbed job,
 // de-interleaving the pages the device multiplexes on the wire, and
-// appends one ScanResult per page to *out in page (end-of-page) order.
+// appends one ScanResult per page to *out in 1-based page-index (document)
+// order. The device's captured color duplex happens to complete pages in
+// document order (1,2,3,4), but this keys the file order on the page index
+// rather than completion order regardless -- so a device that ever completed
+// color pages out of order (as RLENGTH duplex does; see RunRlengthScan and
+// C9) still yields a correctly ordered file.
 //
 // A duplex ADF feed does NOT stream each page contiguously: it interleaves
 // the two sides' chunks, tagging every block header with its 1-based page
@@ -716,6 +744,14 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
   // interleaves two pages' chunks, so each page index keeps its own decoder
   // state (matching the per-page JPEG accumulators above).
   std::map<int, std::unique_ptr<IncrementalJpegDecoder>> decoders;
+  // Finished pages, keyed by 1-based page index, flushed to *out in ascending
+  // (document) order at job end rather than in completion order (see this
+  // function's doc comment and RunRlengthScan's `finished` for the C9 rationale).
+  std::map<int, ScanResult> finished;
+  const auto flush_finished = [&]() {
+    for (auto& kv : finished) out->push_back(std::move(kv.second));
+    finished.clear();
+  };
   for (;;) {
     std::vector<uint8_t> lead;
     Status s = framer->Peek(2, timeout_ms, &lead);
@@ -753,7 +789,15 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
         auto dit = decoders.find(pidx);
         if (dit == decoders.end()) return Status::kProtocolError;
         const Status fs = dit->second->Finish();
-        if (fs != Status::kOk) return fs;  // kCancelled / kProtocolError.
+        if (fs != Status::kOk) {
+          // kCancelled keeps the pages that fully completed before the cancel
+          // (scanner.h's streaming contract); since finished pages now buffer in
+          // `finished` until job end, flush them to *out here so a cancel still
+          // hands them back. Harmless on kProtocolError -- the caller clears
+          // *out on any non-kCancelled error anyway.
+          flush_finished();
+          return fs;
+        }
         if (dit->second->fatal()) return Status::kProtocolError;
         page_width = dit->second->width();
         page_height = dit->second->height();
@@ -772,7 +816,9 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
       page.width = page_width;
       page.height = page_height;
       page.data = std::move(jpeg);
-      out->push_back(std::move(page));
+      // Collect by page index, not completion order (see `finished` above): the
+      // flush at job end emits in ascending (document) order.
+      finished[pidx] = std::move(page);
       in_progress.erase(it);
 
       // Peek the byte after the marker. A job-final terminator leads with
@@ -791,6 +837,7 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
         // Job done. Any page still accumulating never got its marker: a
         // truncated/desynced stream, not a clean finish.
         if (!in_progress.empty()) return Status::kProtocolError;
+        flush_finished();
         return Status::kOk;
       }
       continue;  // `tail` is the next chunk's block header -- do not consume.
@@ -829,7 +876,12 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
             });
       }
       s = decoder->Feed(jpeg.data() + before, jpeg.size() - before);
-      if (s != Status::kOk) return s;  // kCancelled / kProtocolError.
+      if (s != Status::kOk) {
+        // Flush completed pages so a mid-page cancel keeps them (see the
+        // identical note at the Finish() call above).
+        flush_finished();
+        return s;  // kCancelled / kProtocolError.
+      }
     }
   }
 }
@@ -893,7 +945,14 @@ constexpr int kMaxRlengthSlopBytes = 0xfff4;
 // Runs the gray/RLENGTH (TEXT/ERRDIF/GRAY256 with C=RLENGTH -- i.e.
 // Black & White, Error Diffusion, True Gray) readout for an ADF or flatbed
 // job, DE-INTERLEAVING the pages the device multiplexes on the wire, and
-// appends one ScanResult per page to *out in page (end-of-page) order.
+// appends one ScanResult per page to *out in 1-based page-index (document)
+// order -- NOT the order the pages complete in. A real TEXT/BW duplex ADF
+// capture (reference/c9-text-duplex.pcap, C9; see PROVENANCE.md) completes
+// its 4 pages in the order 2,1,3,4 (each side of sheet 1's second page fires
+// its end-of-page marker before the first), while every row/EOP block still
+// carries the correct page index at byte[3]. Emitting in completion order put
+// document page 2 first in the file; emitting by page index restores document
+// order.
 //
 // This mirrors RunColorScan's structure exactly, one row at a time instead of
 // one JPEG chunk at a time. A duplex ADF feed does NOT stream each page
@@ -959,6 +1018,19 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
     int band_start = 0;
   };
   std::map<int, PageState> in_progress;
+  // Finished pages, keyed by 1-based page index. The device can COMPLETE
+  // (fire end-of-page for) duplex pages out of document order (C9: a real TEXT
+  // duplex ADF scan completes 2,1,3,4), so collect them keyed by page index and
+  // flush to *out in ascending (document) order at job end, rather than in the
+  // completion order a plain push-back would give. std::map keeps its keys
+  // sorted, so the flush is a single in-order walk. The live bands (EmitBand at
+  // page_index pidx-1) are unaffected -- they already carry the correct index
+  // and are the live preview, separate from this file `out` order.
+  std::map<int, ScanResult> finished;
+  const auto flush_finished = [&]() {
+    for (auto& kv : finished) out->push_back(std::move(kv.second));
+    finished.clear();
+  };
   int slop_skipped = 0;  // Reset on each header/marker (per-boundary ceiling).
 
   for (;;) {
@@ -973,6 +1045,7 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
     // way, no more rows are coming.
     if (!peek.empty() && peek[0] == 0x80) {
       if (!in_progress.empty()) return Status::kProtocolError;
+      flush_finished();
       return Status::kOk;
     }
 
@@ -993,45 +1066,72 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
       if (it == in_progress.end()) return Status::kProtocolError;
       PageState& page = it->second;
 
-      // The device can deliver fewer rows than the requested area's height
-      // (early end-of-page / auto-crop). Pad the tail so the page is exactly
-      // width x height -- DecodeGrayRaw and WrapBitonalImage require an exact
-      // byte count -- filling with white (0xFF gray samples; 0x00 packed
-      // bitonal, where a 1 bit is black), matching a blank paper edge. The
-      // reserve on this page's first row sized `pixels` for the full height, so
-      // this resize never reallocates and the bands emitted above stay valid.
-      if (page.rows_read < height) {
+      // ADF auto-crop: when the fed sheet is shorter than the requested Size,
+      // the device fires an early end-of-page after only the sheet's rows. The
+      // tail padding below is OURS (not device pixels) and we know the true row
+      // count, so for the ADF source emit the page at its actual received height
+      // rather than padding -- cropping the blank trailing band. This mirrors
+      // the color path's module-side TrailingPadRows crop (ica-module/adf_crop.h,
+      // applied for kRgb): both give ADF "crop to the sheet." The flatbed keeps
+      // the full requested height (the glass scans the whole area), so it never
+      // crops.
+      const int emit_height =
+          (exec_params.source == Source::kAdf && page.rows_read < height)
+              ? page.rows_read
+              : height;
+
+      // Pad a short delivery up to emit_height so the decode gets an exact byte
+      // count -- DecodeGrayRaw and WrapBitonalImage require one -- filling with
+      // white (0xFF gray samples; 0x00 packed bitonal, where a 1 bit is black),
+      // matching a blank paper edge. When cropping (emit_height ==
+      // page.rows_read) this is a no-op: `pixels` already holds exactly the
+      // received rows. The reserve on this page's first row sized `pixels` for
+      // the full height, so this resize never reallocates and the bands emitted
+      // above stay valid.
+      if (page.rows_read < emit_height) {
         const uint8_t fill = bitonal ? 0x00 : 0xFF;
-        page.pixels.resize(row_bytes * static_cast<size_t>(height), fill);
+        page.pixels.resize(row_bytes * static_cast<size_t>(emit_height), fill);
       }
 
-      // Flush every remaining row (the last partial band plus any padding) so
-      // this page's band stream covers all `height` rows contiguously, at its
-      // 0-based page index (pidx - 1), exactly as RunColorScan emits.
-      while (on_band && page.band_start < height) {
-        const int num_rows = std::min(kBandRows, height - page.band_start);
+      // Flush every remaining row (the last partial band, plus any padding on a
+      // flatbed short delivery) so this page's band stream covers all
+      // emit_height rows contiguously, at its 0-based page index (pidx - 1),
+      // exactly as RunColorScan emits. Bounding by emit_height keeps a cropped
+      // ADF page from reading past its (unpadded) `pixels`; the band's
+      // full_height stays the requested `height` (its documented meaning, and
+      // consistent with the mid-scan bands emitted above -- the file, not the
+      // live preview, is what the crop shortens, as on the color path).
+      while (on_band && page.band_start < emit_height) {
+        const int num_rows = std::min(kBandRows, emit_height - page.band_start);
         const Status es = EmitBand(
             on_band, pidx - 1, format, width, height, page.band_start, num_rows,
             page.pixels.data() +
                 static_cast<size_t>(page.band_start) * row_bytes,
             static_cast<size_t>(num_rows) * row_bytes);
-        if (es != Status::kOk) return es;
+        if (es != Status::kOk) {
+          // Keep the pages completed before a cancel (scanner.h contract); see
+          // RunColorScan's identical flush-on-cancel note. Harmless on error.
+          flush_finished();
+          return es;
+        }
         page.band_start += num_rows;
       }
 
       Image image;
       const Status decode_status =
-          bitonal ? WrapBitonalImage(width, height, page.pixels, &image)
-                  : DecodeGrayRaw(width, height, page.pixels.data(),
+          bitonal ? WrapBitonalImage(width, emit_height, page.pixels, &image)
+                  : DecodeGrayRaw(width, emit_height, page.pixels.data(),
                                   page.pixels.size(), &image);
       if (decode_status != Status::kOk) return decode_status;
 
       ScanResult result;
       result.format = format;
       result.width = width;
-      result.height = height;
+      result.height = emit_height;
       result.data = std::move(page.pixels);
-      out->push_back(std::move(result));
+      // Collect by page index, not completion order (see `finished` above): the
+      // flush at job end emits in ascending (document) order.
+      finished[pidx] = std::move(result);
       in_progress.erase(it);
 
       // Peek the byte after the marker: 0x80 ends the job (see RunColorScan's
@@ -1043,6 +1143,7 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
       if (s != Status::kOk) return s;
       if (tail[0] == 0x80) {
         if (!in_progress.empty()) return Status::kProtocolError;
+        flush_finished();
         return Status::kOk;
       }
       continue;
@@ -1097,7 +1198,12 @@ Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
             page.pixels.data() +
                 static_cast<size_t>(page.band_start) * row_bytes,
             static_cast<size_t>(kBandRows) * row_bytes);
-        if (es != Status::kOk) return es;
+        if (es != Status::kOk) {
+          // Keep the pages completed before a cancel (see the flush-on-cancel
+          // note above); harmless on a non-kCancelled error.
+          flush_finished();
+          return es;
+        }
         page.band_start = page.rows_read;
       }
       continue;
@@ -1218,32 +1324,43 @@ void ApplyOfferAreaFallback(const Offer& offer, Params* exec_params) {
 // before returning.
 Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
                   const BandCallback& on_band, std::vector<ScanResult>* out) {
-  // Document-feeder paper jam (C16): a jammed feed returns a lone kAdfJam
-  // (0xc3) status byte to ESC X in place of image data (see PROVENANCE.md and
-  // docs/PROTOCOL.md). Detect it here, at the very start of the readout,
-  // before any mode dispatch. Scope it to the ADF: the flatbed does not jam,
-  // and its raw payload can legitimately begin with any byte.
+  // Document-feeder lone-status-byte signals at ESC X: a jammed feed returns a
+  // lone kAdfJam (0xc3, C16); a Stop-button cancel returns a lone kAdfCancel
+  // (0x86, C15). Either arrives to ESC X in place of image data (see
+  // PROVENANCE.md and docs/PROTOCOL.md). Detect them here, at the very start of
+  // the readout, before any mode dispatch. Scope to the ADF: the flatbed does
+  // not jam or stop this way, and its raw payload can legitimately begin with
+  // any byte.
   //
-  // False-positive care: raw-gray/bitonal pixel data can legitimately be 0xc3,
-  // so do NOT key on the value alone -- key on the *lone* status byte. A jam
-  // sends exactly one 0xc3 and then nothing; a real scan streams a full page
-  // immediately. Peek (non-destructively) the first byte; only if it is 0xc3
-  // do we look for a second byte within the readout timeout. Nothing more
-  // follows (a timeout: the lone byte) -> a jam; a data stream follows -> treat
-  // the 0xc3 as ordinary data and fall through to the normal readout unchanged.
-  // The color path never legitimately starts with 0xc3 (its block header leads
-  // with 0x64, or 0x00 on legacy firmware), so it is covered too. Both peeks
-  // are non-destructive, so a normal scan's byte stream is unaffected.
+  // False-positive care: raw-gray/bitonal pixel data can legitimately be 0xc3
+  // or 0x86, so do NOT key on the value alone -- key on the *lone* status byte.
+  // The device sends exactly one such byte and then nothing; a real scan streams
+  // a full page immediately. Peek (non-destructively) the first byte; only if it
+  // matches do we look for a second byte within the readout timeout. Nothing
+  // more follows (a timeout: the lone byte) -> the signal; a data stream follows
+  // -> treat the byte as ordinary data and fall through to the normal readout
+  // unchanged. The color path never legitimately starts with either value (its
+  // block header leads with 0x64, or 0x00 on legacy firmware), so it is covered
+  // too. Every peek is non-destructive, so a normal scan's byte stream is
+  // unaffected.
   if (exec_params.source == Source::kAdf) {
     std::vector<uint8_t> lead;
     Status s = framer->Peek(1, timeout_ms, &lead);
     if (s != Status::kOk) return s;
     if (lead[0] == kAdfJam) {
       std::vector<uint8_t> lead2;
-      s = framer->Peek(2, timeout_ms, &lead2);
+      s = framer->Peek(2, kLoneStatusConfirmMs, &lead2);
       if (s == Status::kTimeout) return Status::kPaperJam;  // Lone 0xc3: a jam.
       if (s != Status::kOk) return s;
       // A second byte followed: real image data, not a jam. Fall through.
+    }
+    if (lead[0] == kAdfCancel) {
+      std::vector<uint8_t> lead2;
+      s = framer->Peek(2, kLoneStatusConfirmMs, &lead2);
+      // Lone 0x86: a clean Stop-button cancel (no error dialog downstream).
+      if (s == Status::kTimeout) return Status::kCancelled;
+      if (s != Status::kOk) return s;
+      // A second byte followed: real image data, not a cancel. Fall through.
     }
   }
 

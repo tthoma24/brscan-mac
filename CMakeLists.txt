@@ -177,6 +177,7 @@ if(APPLE AND BRSCAN_BUILD_ICA_MODULE)
     ica-module/scan_translate.cpp
     ica-module/buffer_descriptor.cpp
     ica-module/file_transfer.cpp
+    ica-module/adf_crop.cpp
     daemon/paper_size.cpp)
   set_target_properties(brscan-ica PROPERTIES
     OUTPUT_NAME ${MODULE_NAME}
@@ -353,6 +354,8 @@ if(BUILD_TESTING)
     tests/scan_translate_test.cpp
     ica-module/file_transfer.cpp
     tests/file_transfer_test.cpp
+    ica-module/adf_crop.cpp
+    tests/adf_crop_test.cpp
     tests/scan_outcome_test.cpp
     tests/page_delivery_test.cpp
   )

@@ -845,6 +845,164 @@ TEST(RunScan, TrueGrayFlatbedShortDeliveryPadsToRequestedHeight) {
   EXPECT_EQ(pages[0].data, want);
 }
 
+// --- ADF short-page auto-crop (RLENGTH gray/BW) ---------------------------
+//
+// The ADF analogue of the color path's trailing-gray crop (ica-module's
+// adf_crop.h TrailingPadRows, applied module-side for kRgb). On the RLENGTH
+// modes the DEVICE sends only the fed sheet's rows and then an early
+// end-of-page, so a Size larger than the sheet leaves rows_read < the
+// requested height. The tail padding is OURS (0xFF gray / 0x00 bitonal), and
+// we know the true row count, so the crop is count-based: for the ADF source
+// the page is emitted at its actual received height, not padded. The flatbed
+// keeps padding to the requested height (the glass scans the whole area).
+
+// ADF True Gray (GRAY256): 2 rows delivered against a requested height of 4 ->
+// the page is cropped to 2 rows, with no trailing white fill.
+TEST(RunScan, TrueGrayAdfShortDeliveryCropsToSheet) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  // Requested height_px=4, but only 2 rows arrive before end-of-page.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,4,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row0_payload = {0xA0, 0xA1, 0xA2, 0xA3};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row1_payload = {0xB0, 0xB1, 0xB2, 0xB3};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  // End-of-page after just 2 of the 4 requested rows, then job-final.
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = TrueGrayParams();
+  params.source = brscan::Source::kAdf;
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  // Cropped to the sheet: 2 rows, NOT padded up to the requested 4.
+  EXPECT_EQ(pages[0].height, 2);
+  const std::vector<uint8_t> want = {0xA0, 0xA1, 0xA2, 0xA3,
+                                     0xB0, 0xB1, 0xB2, 0xB3};
+  EXPECT_EQ(pages[0].data, want);
+}
+
+// ADF Black & White (TEXT/C=RLENGTH): 2 rows delivered against a requested
+// height of 4 -> cropped to 2 rows, no trailing 0x00 (black) fill.
+TEST(RunScan, BlackWhiteAdfShortDeliveryCropsToSheet) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  // width_px=9 (row_bytes = ceil(9/8) = 2), height_px=4; 2 rows arrive.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,4,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row0_payload = {0x01, 0xAA, 0xBB};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row1_payload = {0x01, 0xCC, 0xDD};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = BlackWhiteParams();
+  params.source = brscan::Source::kAdf;
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kBitonal);
+  EXPECT_EQ(pages[0].width, 9);
+  // Cropped to the sheet: 2 rows (4 bytes), NOT padded up to the requested 4.
+  EXPECT_EQ(pages[0].height, 2);
+  const std::vector<uint8_t> want = {0xAA, 0xBB, 0xCC, 0xDD};
+  EXPECT_EQ(pages[0].data, want);
+}
+
+// Flatbed companion (behavior preserved): the SAME short RLENGTH bitonal
+// stream on the FLATBED source is padded up to the requested height, not
+// cropped -- the glass scans the whole requested area. Mirrors
+// TrueGrayFlatbedShortDeliveryPadsToRequestedHeight for the bitonal mode.
+TEST(RunScan, BlackWhiteFlatbedShortDeliveryPadsToRequestedHeight) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=9 (row_bytes = 2), height_px=4; only 2 rows arrive.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,9,427,4,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row0_payload = {0x01, 0xAA, 0xBB};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x42, 3);
+  const std::vector<uint8_t> row1_payload = {0x01, 0xCC, 0xDD};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kBitonal);
+  EXPECT_EQ(pages[0].width, 9);
+  EXPECT_EQ(pages[0].height, 4);
+  // Two real rows, then two 0x00 (blank) padded rows to the requested height.
+  const std::vector<uint8_t> want = {0xAA, 0xBB, 0xCC, 0xDD,
+                                     0x00, 0x00, 0x00, 0x00};
+  EXPECT_EQ(pages[0].data, want);
+}
+
+// A full-height ADF RLENGTH page (rows_read == the requested height) is
+// emitted unchanged -- the crop only fires on a SHORT delivery, so a
+// size-matched ADF gray scan is byte-for-byte intact.
+TEST(RunScan, TrueGrayAdfFullHeightNotCropped) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  // Requested height_px=2, and exactly 2 rows arrive (a size-matched sheet).
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,2,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row0_payload = {0xA0, 0xA1, 0xA2, 0xA3};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row1_payload = {0xB0, 0xB1, 0xB2, 0xB3};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = TrueGrayParams();
+  params.source = brscan::Source::kAdf;
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].height, 2);
+  const std::vector<uint8_t> want = {0xA0, 0xA1, 0xA2, 0xA3,
+                                     0xB0, 0xB1, 0xB2, 0xB3};
+  EXPECT_EQ(pages[0].data, want);
+}
+
 TEST(RunScan, BusyGreetingReportsBusy) {
   brscan::FakeTransport t;
   t.QueueRead(std::string("-NG 401\r\n"));
@@ -1042,6 +1200,35 @@ TEST(RunScan, AdfColorPaperJamLoneStatusByteReportsPaperJam) {
   EXPECT_TRUE(pages.empty());
 }
 
+// Regression (C16 jam didn't fire on hardware): the lone-0xc3 confirmation peek
+// must use a SHORT window, not the 20s scan timeout. On a real jam the device
+// sends 0xc3 then goes silent -- it stays connected but answers nothing until the
+// host re-queries (reference/c16-jam-imac.pcap shows ~32s of silence after the
+// lone c3). A confirmation peek bounded by the 20s scan timeout therefore blocks
+// the full 20s before returning kPaperJam -- long enough that icdd abandons the
+// synchronous scan and no jam dialog fires. The confirmation must resolve in a
+// couple of seconds instead.
+TEST(RunScan, AdfPaperJamConfirmationUsesShortWindowNotScanTimeout) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+  t.QueueRead(std::vector<uint8_t>{0xc3});  // lone jam byte, then silence.
+
+  auto params = GrayParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  std::vector<brscan::ScanResult> pages;
+  ASSERT_EQ(brscan::RunScan(t, params, &pages), brscan::Status::kPaperJam);
+  // The final Read is the second-byte confirmation that timed out into the jam.
+  ASSERT_FALSE(t.read_timeouts().empty());
+  EXPECT_LE(t.read_timeouts().back(), 3000)
+      << "lone-status confirmation must be a short window, not the 20s scan "
+         "timeout (was " << t.read_timeouts().back() << " ms)";
+}
+
 // Negative companion (false-positive guard): a raw-gray ADF readout that BEGINS
 // with 0xc3 but then streams a full page must NOT be read as a jam. The jam
 // signature is a *lone* 0xc3 (nothing follows); a 0xc3 that leads a real data
@@ -1064,6 +1251,83 @@ TEST(RunScan, AdfGrayLeadingC3WithFullPageIsNotPaperJam) {
   payload[0] = 0xc3;                      // readout's first byte is 0xc3.
   // Raw gray pixels: 4 x 3 = 12 bytes, the FIRST of which is also 0xc3.
   const std::vector<uint8_t> raw = {0xc3, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                    0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
+  payload.insert(payload.end(), raw.begin(), raw.end());
+  t.QueueRead(payload);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  auto params = GrayParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 4, 3};
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  EXPECT_EQ(pages[0].height, 3);
+  EXPECT_EQ(pages[0].data, raw);
+}
+
+// C15: a document-feeder scan cancelled from the unit's Stop button. Paper WAS
+// loaded (the ESC D ADF ack is 0x80), then the device returns a lone 0x86 status
+// byte to ESC X in place of image data (captured in
+// reference/c15-stop-cancel.pcap; see PROVENANCE.md and docs/PROTOCOL.md). 0x86
+// is a sibling of the ready 0x80, the empty feeder's 0xc2, and the jam's 0xc3,
+// but WITHOUT the 0x40 error bit -- a clean "stopped by the user", not a fault.
+// RunScan must surface it as Status::kCancelled (not kPaperJam, kNoPaper, or a
+// generic error) so the module ends the scan cleanly with no error dialog. The
+// 0x86 byte carries no device identity, so this synthetic test is committable.
+TEST(RunScan, AdfStopButtonCancelLoneStatusByteReportsCancelled) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+  // ESC X reply: a lone 0x86 and then nothing (Stop pressed). The queue goes dry
+  // after it, so the readout's second-byte peek times out -> a lone byte.
+  t.QueueRead(std::vector<uint8_t>{0x86});
+
+  auto params = GrayParams();
+  params.source = brscan::Source::kAdf;
+  params.duplex = true;  // The captured C15 scan was an ADF scan.
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  EXPECT_EQ(status, brscan::Status::kCancelled);
+  EXPECT_TRUE(pages.empty());
+  // Same short-window contract as the jam (the 0x86 confirmation shares the
+  // code): a lone Stop-button cancel must not block for the 20s scan timeout.
+  ASSERT_FALSE(t.read_timeouts().empty());
+  EXPECT_LE(t.read_timeouts().back(), 3000)
+      << "lone-status confirmation must be a short window (was "
+      << t.read_timeouts().back() << " ms)";
+  // The cancel surfaces only once the feed is attempted, so ESC X (0x1b 0x58)
+  // did go on the wire -- like the jam, unlike the empty feeder.
+  EXPECT_TRUE(Contains(t.written(), {0x1b, 0x58}))
+      << "the cancel is detected at the readout start, after ESC X execute";
+}
+
+// Negative companion (false-positive guard): a raw-gray ADF readout that BEGINS
+// with 0x86 but then streams a full page must NOT be read as a cancel. The cancel
+// signature is a *lone* 0x86 (nothing follows); a 0x86 that leads a real data
+// stream is ordinary pixel data. Here both the 12-byte block header's leading
+// byte and the first pixel byte are 0x86, yet a complete page follows, so the
+// readout's second-byte peek sees data and it proceeds to kOk with the page
+// intact -- the same lone-byte disambiguation the jam (0xc3) uses.
+TEST(RunScan, AdfGrayLeadingByte86WithFullPageIsNotCancelled) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,3,"));
+
+  auto payload = EncodeBlockHeader12(4);  // width = 4; anchors at [1]/[5].
+  payload[0] = 0x86;                      // readout's first byte is 0x86.
+  // Raw gray pixels: 4 x 3 = 12 bytes, the FIRST of which is also 0x86.
+  const std::vector<uint8_t> raw = {0x86, 0x11, 0x22, 0x33, 0x44, 0x55,
                                     0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
   payload.insert(payload.end(), raw.begin(), raw.end());
   t.QueueRead(payload);
@@ -1301,6 +1565,64 @@ TEST(RunScan, ColorAdfDuplexInterleavedPagesDeinterleave) {
   EXPECT_EQ(pages[1].width, 24);
   EXPECT_EQ(pages[1].height, 12);
   EXPECT_EQ(pages[1].data, jpeg2);
+}
+
+// Color analogue of the C9 ordering fix (defensive): a duplex color ADF job
+// whose pages COMPLETE out of document order (page 2's end-of-page marker
+// before page 1's, then 3, 4) must still emit pages to `out` ordered by the
+// 1-based page index (1,2,3,4), not in completion order. RunColorScan is not
+// known to misorder on real hardware (its captured duplex happens to complete
+// 1,2,3,4), but keying the file order on page index rather than completion
+// order makes it robust if the device ever completes color pages out of order,
+// exactly as RunRlengthScan now does. Distinct dimensions catch a mis-routed
+// chunk; distinct completion order catches a mis-ordered emit.
+TEST(RunScan, ColorDuplexCompletionOrderEmitsByPageIndex) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80, 0x00});  // ESC D ADF ack
+  t.QueueTimeout();                               // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+
+  auto params = ColorParams();
+  params.source = brscan::Source::kAdf;
+  params.duplex = true;
+
+  // Four distinct-dimension JPEGs so a chunk routed to the wrong page fails the
+  // per-page dimension/byte-exact assertions.
+  const auto jpeg1 = MakeSyntheticJpeg(16, 8);
+  const auto jpeg2 = MakeSyntheticJpeg(24, 12);
+  const auto jpeg3 = MakeSyntheticJpeg(16, 16);
+  const auto jpeg4 = MakeSyntheticJpeg(24, 8);
+
+  const auto chunk = [](const std::vector<uint8_t>& jpeg, uint8_t pidx) {
+    auto block = EncodeBlockHeader(static_cast<uint16_t>(jpeg.size()), pidx);
+    block.insert(block.end(), jpeg.begin(), jpeg.end());
+    return block;
+  };
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  append(chunk(jpeg1, 1));               // page 1 (accumulating).
+  append(chunk(jpeg2, 2));               // page 2 (accumulating).
+  append(EncodeEndOfPageMarker(2));      // page 2 COMPLETES first.
+  append(EncodeEndOfPageMarker(1));      // page 1 completes second.
+  append(chunk(jpeg3, 3));               // page 3.
+  append(EncodeEndOfPageMarker(3));      // page 3 completes.
+  append(chunk(jpeg4, 4));               // page 4.
+  append(EncodeJobFinalTerminator(4));   // page 4 completes, `80 80`.
+  t.QueueRead(stream);
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, params, &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 4u);
+  // Document (page-index) order 1,2,3,4 -- NOT completion order 2,1,3,4.
+  EXPECT_EQ(pages[0].data, jpeg1);
+  EXPECT_EQ(pages[1].data, jpeg2);
+  EXPECT_EQ(pages[2].data, jpeg3);
+  EXPECT_EQ(pages[3].data, jpeg4);
 }
 
 // A 2-page synthetic ADF gray (GRAY64/C=NONE) scan: each page is a raw,
@@ -1547,6 +1869,105 @@ TEST(RunScan, BlackWhiteAdfDuplexInterleavedPagesDeinterleave) {
   const std::vector<uint8_t> want2 = {0x11, 0x22, 0x33, 0x44};
   EXPECT_EQ(pages[0].data, want1);
   EXPECT_EQ(pages[1].data, want2);
+}
+
+// C9: an RLENGTH (True Gray) duplex ADF scan whose pages COMPLETE (fire their
+// end-of-page marker) OUT of document order. A real TEXT/BW duplex ADF capture
+// (reference/c9-text-duplex.pcap, 2 sheets -> 4 pages) completes pages in the
+// order 2, 1, 3, 4 -- every row/EOP block still carries the correct 1-based
+// page index at byte[3], but the second side of sheet 1 finishes before the
+// first. RunRlengthScan must emit pages to `out` ordered by that page index
+// (document order 1,2,3,4), NOT in completion order (which would put page 2
+// first). The readout is source-agnostic (shared RunReadout dispatch), so a
+// flatbed preamble reaches the same code path the ADF duplex job exercises.
+TEST(RunScan, TrueGrayDuplexCompletionOrderEmitsByPageIndex) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=4 (row_bytes=4 for 8-bit gray), height_px=1 (one row per page).
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,4,427,1,"));
+
+  // Distinct pixel bytes per page so a mis-ordered (or mis-routed) page is
+  // caught. One raw row (type 0x40) per page, each closed by its own marker.
+  const std::vector<uint8_t> p1_px = {0x11, 0x12, 0x13, 0x14};
+  const std::vector<uint8_t> p2_px = {0x21, 0x22, 0x23, 0x24};
+  const std::vector<uint8_t> p3_px = {0x31, 0x32, 0x33, 0x34};
+  const std::vector<uint8_t> p4_px = {0x41, 0x42, 0x43, 0x44};
+
+  const auto raw_row = [](const std::vector<uint8_t>& px, uint8_t pidx) {
+    auto block = EncodeRlengthBlockHeader(0x40, static_cast<uint16_t>(px.size()),
+                                          pidx);
+    block.insert(block.end(), px.begin(), px.end());
+    return block;
+  };
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  // Interleave sheet 1's two sides, then complete them back-to-front: page 2's
+  // marker before page 1's. Pages 3 and 4 (sheet 2) complete in order after.
+  append(raw_row(p1_px, 1));            // page 1 row (accumulating).
+  append(raw_row(p2_px, 2));            // page 2 row (accumulating).
+  append(EncodeEndOfPageMarker(2));     // page 2 COMPLETES first.
+  append(EncodeEndOfPageMarker(1));     // page 1 completes second.
+  append(raw_row(p3_px, 3));            // page 3 row.
+  append(EncodeEndOfPageMarker(3));     // page 3 completes.
+  append(raw_row(p4_px, 4));            // page 4 row.
+  append(EncodeJobFinalTerminator(4));  // page 4 completes, `80 80`.
+  t.QueueRead(stream);
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 4u);
+  // Emitted in document (page-index) order 1,2,3,4 -- NOT completion order
+  // 2,1,3,4 (which would make pages[0] the second document page).
+  EXPECT_EQ(pages[0].data, p1_px);
+  EXPECT_EQ(pages[1].data, p2_px);
+  EXPECT_EQ(pages[2].data, p3_px);
+  EXPECT_EQ(pages[3].data, p4_px);
+}
+
+// The bitonal companion: a Black & White (TEXT/C=RLENGTH) duplex scan that
+// COMPLETES pages out of document order (2,1,3,4) must still emit them by page
+// index (1,2,3,4). Same C9 evidence as the True Gray case above.
+TEST(RunScan, BlackWhiteDuplexCompletionOrderEmitsByPageIndex) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=9 (row_bytes = ceil(9/8) = 2), height_px=1.
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,9,427,1,"));
+
+  // Each row is a 2-byte literal run {0x01, hi, lo} -> {hi, lo}; distinct per
+  // page so a mis-ordered page is caught.
+  const auto rl_row = [](uint8_t b0, uint8_t b1, uint8_t pidx) {
+    auto block = EncodeRlengthBlockHeader(0x42, 3, pidx);
+    const std::vector<uint8_t> payload = {0x01, b0, b1};
+    block.insert(block.end(), payload.begin(), payload.end());
+    return block;
+  };
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  append(rl_row(0xA1, 0xA2, 1));         // page 1 row (accumulating).
+  append(rl_row(0xB1, 0xB2, 2));         // page 2 row (accumulating).
+  append(EncodeEndOfPageMarker(2));      // page 2 COMPLETES first.
+  append(EncodeEndOfPageMarker(1));      // page 1 completes second.
+  append(rl_row(0xC1, 0xC2, 3));         // page 3 row.
+  append(EncodeEndOfPageMarker(3));      // page 3 completes.
+  append(rl_row(0xD1, 0xD2, 4));         // page 4 row.
+  append(EncodeJobFinalTerminator(4));   // page 4 completes, `80 80`.
+  t.QueueRead(stream);
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 4u);
+  EXPECT_EQ(pages[0].data, (std::vector<uint8_t>{0xA1, 0xA2}));
+  EXPECT_EQ(pages[1].data, (std::vector<uint8_t>{0xB1, 0xB2}));
+  EXPECT_EQ(pages[2].data, (std::vector<uint8_t>{0xC1, 0xC2}));
+  EXPECT_EQ(pages[3].data, (std::vector<uint8_t>{0xD1, 0xD2}));
 }
 
 // --- Streaming RunScan (per-band callback) --------------------------------
@@ -1948,6 +2369,49 @@ TEST(RunScan, StreamingCancellationStopsPromptlyAndKeepsCompletedPages) {
   // Page 1 completed before the cancel and is kept; page 2 is dropped.
   ASSERT_EQ(pages.size(), 1u);
   EXPECT_EQ(pages[0].data, jpeg1);
+}
+
+// RLENGTH companion to the streaming-cancel contract above: since the C9 fix
+// buffers finished pages in a per-page-index map until job end, a mid-scan
+// cancel must still flush the pages that completed before it to `out`. Page 1
+// (True Gray) completes; the cancel fires on page 2's first band, and page 1
+// must remain in `out`.
+TEST(RunScan, StreamingRlengthCancellationKeepsCompletedPages) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=4 (row_bytes=4 for 8-bit gray), height_px=1 (one row per page).
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,4,427,1,"));
+
+  const std::vector<uint8_t> p1_px = {0x11, 0x12, 0x13, 0x14};
+  const std::vector<uint8_t> p2_px = {0x21, 0x22, 0x23, 0x24};
+  const auto raw_row = [](const std::vector<uint8_t>& px, uint8_t pidx) {
+    auto block = EncodeRlengthBlockHeader(0x40, static_cast<uint16_t>(px.size()),
+                                          pidx);
+    block.insert(block.end(), px.begin(), px.end());
+    return block;
+  };
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  append(raw_row(p1_px, 1));             // page 1 row.
+  append(EncodeEndOfPageMarker(1));      // page 1 COMPLETES.
+  append(raw_row(p2_px, 2));             // page 2 row (its band triggers cancel).
+  append(EncodeJobFinalTerminator(2));
+  t.QueueRead(stream);
+
+  // Cancel on the first band of page 2 (page_index 1).
+  const brscan::BandCallback cb = [&](const brscan::ScanBand& b) {
+    return b.page_index == 0;  // keep page 0, cancel when page 1 starts.
+  };
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &pages, cb);
+  EXPECT_EQ(status, brscan::Status::kCancelled);
+  // Page 1 completed before the cancel and is kept; page 2 is dropped.
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].data, p1_px);
 }
 
 // A malformed end-of-page marker (byte[0] isn't the 0x82 anchor) must

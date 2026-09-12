@@ -93,6 +93,28 @@ TEST(ClassifyScanOutcomeTest, CancelledIsCanceled) {
             ScanOutcome::kCanceled);
 }
 
+// C15: a device Stop-button cancel surfaces from libbrscan as Status::kCancelled
+// (a lone 0x86 at ESC X, feeder selected, no page delivered; see scanner.cpp and
+// PROVENANCE.md). It must classify as the SAME clean canceled outcome a host
+// cancel produces AND yield no error-string key (nullptr) -- so no jam, empty, or
+// generic dialog appears for a Stop-button cancel; the scan ends cleanly.
+//
+// The module (RunScanSynchronous) additionally posts a canonical
+// kICANotificationTypeTransactionCanceled -- the distinct user-cancel signal
+// Apple's VirtualScanner sample sends -- before the final ScannerScanDone(noErr),
+// for both this device cancel and a host Cancel. That notification is NOT a
+// DeviceStatusError, so it does not change the "no error-string key" fact asserted
+// here. It is posted from module_main.mm, which is not compiled into this unit
+// suite (SendScannerNotification wraps the real ICDSendNotification), so the post
+// itself is confirmed device-in-the-loop (docs/RUNBOOK-plan-2-ica.md row C15), not
+// here; this test still pins the clean-outcome/no-dialog classification it rests on.
+TEST(ClassifyScanOutcomeTest, AdfDeviceStopCancelIsCleanCanceledNoDialog) {
+  const ScanOutcome outcome = ClassifyScanOutcome(
+      Source::kAdf, /*produced_pages=*/false, Status::kCancelled);
+  EXPECT_EQ(outcome, ScanOutcome::kCanceled);
+  EXPECT_EQ(ErrorStringKeyForOutcome(outcome, Status::kCancelled), nullptr);
+}
+
 // ---------------------------------------------------------------------
 // Other transport/protocol errors are generic failures on either source.
 // ---------------------------------------------------------------------
