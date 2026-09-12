@@ -34,7 +34,9 @@ class FakeTransport : public Transport {
     return Status::kOk;
   }
 
-  Status Read(uint8_t* buf, size_t cap, size_t* out_len, int) override {
+  Status Read(uint8_t* buf, size_t cap, size_t* out_len,
+              int timeout_ms) override {
+    read_timeouts_.push_back(timeout_ms);
     if (reads_.empty()) return Status::kTimeout;
     if (!reads_.front().has_value()) {
       reads_.pop_front();
@@ -59,9 +61,16 @@ class FakeTransport : public Transport {
 
   const std::vector<uint8_t>& written() const { return written_; }
 
+  // The timeout_ms passed to each Read() call, in order. Lets a test assert HOW
+  // LONG the code was willing to block on a given read -- e.g. that the lone
+  // jam/cancel status-byte confirmation uses a short window, not the full scan
+  // timeout.
+  const std::vector<int>& read_timeouts() const { return read_timeouts_; }
+
  private:
   std::deque<std::optional<std::vector<uint8_t>>> reads_;
   std::vector<uint8_t> written_;
+  std::vector<int> read_timeouts_;
 };
 
 }  // namespace brscan

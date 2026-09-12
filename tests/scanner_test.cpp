@@ -1200,6 +1200,35 @@ TEST(RunScan, AdfColorPaperJamLoneStatusByteReportsPaperJam) {
   EXPECT_TRUE(pages.empty());
 }
 
+// Regression (C16 jam didn't fire on hardware): the lone-0xc3 confirmation peek
+// must use a SHORT window, not the 20s scan timeout. On a real jam the device
+// sends 0xc3 then goes silent -- it stays connected but answers nothing until the
+// host re-queries (reference/c16-jam-imac.pcap shows ~32s of silence after the
+// lone c3). A confirmation peek bounded by the 20s scan timeout therefore blocks
+// the full 20s before returning kPaperJam -- long enough that icdd abandons the
+// synchronous scan and no jam dialog fires. The confirmation must resolve in a
+// couple of seconds instead.
+TEST(RunScan, AdfPaperJamConfirmationUsesShortWindowNotScanTimeout) {
+  brscan::FakeTransport t;
+  QueueConnectPreamble(&t);
+  t.QueueRead(std::vector<uint8_t>{0x80});  // ESC D ADF ack: document loaded.
+  t.QueueTimeout();                         // drain done
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,3460,0,0,"));
+  t.QueueRead(std::vector<uint8_t>{0xc3});  // lone jam byte, then silence.
+
+  auto params = GrayParams();
+  params.source = brscan::Source::kAdf;
+  params.area = brscan::Area{0, 0, 16, 8};
+
+  std::vector<brscan::ScanResult> pages;
+  ASSERT_EQ(brscan::RunScan(t, params, &pages), brscan::Status::kPaperJam);
+  // The final Read is the second-byte confirmation that timed out into the jam.
+  ASSERT_FALSE(t.read_timeouts().empty());
+  EXPECT_LE(t.read_timeouts().back(), 3000)
+      << "lone-status confirmation must be a short window, not the 20s scan "
+         "timeout (was " << t.read_timeouts().back() << " ms)";
+}
+
 // Negative companion (false-positive guard): a raw-gray ADF readout that BEGINS
 // with 0xc3 but then streams a full page must NOT be read as a jam. The jam
 // signature is a *lone* 0xc3 (nothing follows); a 0xc3 that leads a real data
@@ -1269,6 +1298,12 @@ TEST(RunScan, AdfStopButtonCancelLoneStatusByteReportsCancelled) {
   const auto status = brscan::RunScan(t, params, &pages);
   EXPECT_EQ(status, brscan::Status::kCancelled);
   EXPECT_TRUE(pages.empty());
+  // Same short-window contract as the jam (the 0x86 confirmation shares the
+  // code): a lone Stop-button cancel must not block for the 20s scan timeout.
+  ASSERT_FALSE(t.read_timeouts().empty());
+  EXPECT_LE(t.read_timeouts().back(), 3000)
+      << "lone-status confirmation must be a short window (was "
+      << t.read_timeouts().back() << " ms)";
   // The cancel surfaces only once the feed is attempted, so ESC X (0x1b 0x58)
   // did go on the wire -- like the jam, unlike the empty feeder.
   EXPECT_TRUE(Contains(t.written(), {0x1b, 0x58}))

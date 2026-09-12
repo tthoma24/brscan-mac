@@ -35,6 +35,19 @@ constexpr int kAckTimeoutMs = 5000;
 // device-panel cancel emits no status, the stream just stops).
 constexpr int kScanTimeoutMs = 20000;
 
+// How long the lone-status-byte check (jam 0xc3 / cancel 0x86 at ESC X) waits for
+// a SECOND byte before concluding the first was alone. This must be short, NOT the
+// full kScanTimeoutMs: on a real jam/cancel the device sends the one status byte
+// and then goes silent -- it stays connected but answers nothing until re-queried
+// (reference/c16-jam-imac.pcap shows ~32s of quiet after the lone 0xc3). Bounding
+// this peek by kScanTimeoutMs would block the full 20s before returning
+// kPaperJam/kCancelled -- long enough that icdd abandons the synchronous scan and
+// no dialog fires (the C16 "jam didn't fire" report). A real scan's first data
+// chunk is never a single byte (a block header is 12 bytes; a JPEG opens with
+// SOI+data), so its second byte always arrives in the same burst as the first --
+// well inside this window -- while a lone status byte reliably times out of it.
+constexpr int kLoneStatusConfirmMs = 2000;
+
 // How long DrainQuiet waits, after the first chunk of a reply, for a
 // *further* chunk before deciding the reply is finished. 800 ms is chosen
 // relative to kAckTimeoutMs (5000 ms, the bound on the whole ack/reply):
@@ -1336,14 +1349,14 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
     if (s != Status::kOk) return s;
     if (lead[0] == kAdfJam) {
       std::vector<uint8_t> lead2;
-      s = framer->Peek(2, timeout_ms, &lead2);
+      s = framer->Peek(2, kLoneStatusConfirmMs, &lead2);
       if (s == Status::kTimeout) return Status::kPaperJam;  // Lone 0xc3: a jam.
       if (s != Status::kOk) return s;
       // A second byte followed: real image data, not a jam. Fall through.
     }
     if (lead[0] == kAdfCancel) {
       std::vector<uint8_t> lead2;
-      s = framer->Peek(2, timeout_ms, &lead2);
+      s = framer->Peek(2, kLoneStatusConfirmMs, &lead2);
       // Lone 0x86: a clean Stop-button cancel (no error dialog downstream).
       if (s == Status::kTimeout) return Status::kCancelled;
       if (s != Status::kOk) return s;
