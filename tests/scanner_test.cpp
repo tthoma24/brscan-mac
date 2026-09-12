@@ -654,7 +654,7 @@ TEST(RunScan, TrueGrayFlatbedCompressedRowsRoundTrip) {
   // and via the 1-bit (TEXT/ERRDIF) RunScan tests above. This test drives
   // that same path end to end for GRAY256 with synthetic PackBits rows
   // (literal, repeat, and a mixed literal+repeat row) so the assembly
-  // logic in ReadRlengthRows -- re-reading a block header per row -- is
+  // logic in RunRlengthScan -- re-reading a block header per row -- is
   // exercised for a compressed True Gray scan too, not just raw.
   brscan::FakeTransport t;
   QueuePreamble(&t);
@@ -1313,6 +1313,116 @@ TEST(RunScan, BlackWhiteAdfMultiPageSingleByteJobFinalReturnsAllPages) {
   const std::vector<uint8_t> want4 = {0x11, 0x22, 0x33, 0x44};
   EXPECT_EQ(pages[0].data, want3);
   EXPECT_EQ(pages[1].data, want4);
+}
+
+// A 2-page synthetic DUPLEX True Gray (GRAY256/C=RLENGTH) ADF scan whose two
+// pages' row blocks are INTERLEAVED on the wire by 1-based page index --
+// p1r0, p2r0, p1r1, EOP(1), p2r1, EOP(2)+`80 80`. Page 1 completes and its
+// end-of-page marker arrives while page 2 is still mid-stream (page 2's row 0
+// already received), so this proves the RLENGTH readout keeps a separate
+// per-page accumulator keyed by page index and de-interleaves rather than
+// reading one whole page at a time (which desyncs a duplex feed -- the
+// status=2/pages=0 hang this fixes). Mirrors the color duplex test
+// (ColorAdfDuplexInterleavedPagesDeinterleave).
+//
+// INFERRED framing: no real duplex gray/RLENGTH capture exists. The
+// page-index-in-byte[3] scheme, the 10-byte end-of-page marker, and the 0x80
+// job-final are inferred from the color duplex framing (same device); this is
+// a synthetic stream built to that inferred shape, awaiting the
+// device-in-the-loop confirmation row in docs/RUNBOOK-plan-2-ica.md.
+TEST(RunScan, TrueGrayAdfDuplexInterleavedPagesDeinterleave) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=4 (row_bytes=4 for 8-bit gray), height_px=2.
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,4,427,2,"));
+
+  // Distinct pixel bytes per page/row so a mis-routed row is caught.
+  const std::vector<uint8_t> p1r0_px = {0x11, 0x12, 0x13, 0x14};
+  const std::vector<uint8_t> p1r1_px = {0x15, 0x16, 0x17, 0x18};
+  const std::vector<uint8_t> p2r0_px = {0x21, 0x22, 0x23, 0x24};
+  const std::vector<uint8_t> p2r1_px = {0x25, 0x26, 0x27, 0x28};
+
+  const auto raw_row = [](const std::vector<uint8_t>& px, uint8_t pidx) {
+    auto block = EncodeRlengthBlockHeader(0x40, static_cast<uint16_t>(px.size()),
+                                          pidx);
+    block.insert(block.end(), px.begin(), px.end());
+    return block;
+  };
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  append(raw_row(p1r0_px, 1));           // page 1, row 0.
+  append(raw_row(p2r0_px, 2));           // page 2, row 0 (page 1 still open).
+  append(raw_row(p1r1_px, 1));           // page 1, row 1 (done).
+  append(EncodeEndOfPageMarker(1));      // finalize page 1.
+  append(raw_row(p2r1_px, 2));           // page 2, row 1 (done).
+  append(EncodeJobFinalTerminator(2));   // finalize page 2, `80 80`.
+  t.QueueRead(stream);
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  for (const auto& page : pages) {
+    EXPECT_EQ(page.format, brscan::PixelFormat::kGray);
+    EXPECT_EQ(page.width, 4);
+    EXPECT_EQ(page.height, 2);
+  }
+  const std::vector<uint8_t> want1 = {0x11, 0x12, 0x13, 0x14,
+                                      0x15, 0x16, 0x17, 0x18};
+  const std::vector<uint8_t> want2 = {0x21, 0x22, 0x23, 0x24,
+                                      0x25, 0x26, 0x27, 0x28};
+  EXPECT_EQ(pages[0].data, want1);
+  EXPECT_EQ(pages[1].data, want2);
+}
+
+// The bitonal companion to TrueGrayAdfDuplexInterleavedPagesDeinterleave: a
+// 2-page DUPLEX Black & White (TEXT/C=RLENGTH) ADF scan with the same
+// interleaved-by-page-index row order (p1r0, p2r0, p1r1, EOP(1), p2r1,
+// EOP(2)+`80 80`). Rows are PackBits-compressed (type 0x42) and decode back to
+// the packed bitonal bytes, de-interleaved into per-page order. Same inferred
+// framing caveat as the True Gray case.
+TEST(RunScan, BlackWhiteAdfDuplexInterleavedPagesDeinterleave) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=9 (row_bytes = ceil(9/8) = 2), height_px=2.
+  t.QueueRead(EncodeOfferFrame("300,300,1,292,9,427,2,"));
+
+  // Each row is a 2-byte literal run: {0x01, hi, lo} -> {hi, lo}.
+  const auto rl_row = [](uint8_t b0, uint8_t b1, uint8_t pidx) {
+    auto block = EncodeRlengthBlockHeader(0x42, 3, pidx);
+    const std::vector<uint8_t> payload = {0x01, b0, b1};
+    block.insert(block.end(), payload.begin(), payload.end());
+    return block;
+  };
+
+  std::vector<uint8_t> stream;
+  const auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  append(rl_row(0xAA, 0xBB, 1));         // page 1, row 0.
+  append(rl_row(0x11, 0x22, 2));         // page 2, row 0 (page 1 still open).
+  append(rl_row(0xCC, 0xDD, 1));         // page 1, row 1 (done).
+  append(EncodeEndOfPageMarker(1));      // finalize page 1.
+  append(rl_row(0x33, 0x44, 2));         // page 2, row 1 (done).
+  append(EncodeJobFinalTerminator(2));   // finalize page 2, `80 80`.
+  t.QueueRead(stream);
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, BlackWhiteParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 2u);
+  for (const auto& page : pages) {
+    EXPECT_EQ(page.format, brscan::PixelFormat::kBitonal);
+    EXPECT_EQ(page.width, 9);
+    EXPECT_EQ(page.height, 2);
+  }
+  const std::vector<uint8_t> want1 = {0xAA, 0xBB, 0xCC, 0xDD};
+  const std::vector<uint8_t> want2 = {0x11, 0x22, 0x33, 0x44};
+  EXPECT_EQ(pages[0].data, want1);
+  EXPECT_EQ(pages[1].data, want2);
 }
 
 // --- Streaming RunScan (per-band callback) --------------------------------

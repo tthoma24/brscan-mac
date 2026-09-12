@@ -882,150 +882,237 @@ RlengthBoundary ClassifyRlengthBoundary(const std::vector<uint8_t>& peek) {
 // that still stops a genuinely garbled stream from being scanned forever.
 constexpr int kMaxRlengthSlopBytes = 0xfff4;
 
-// Reads `height` per-row blocks for a C=RLENGTH scan (TEXT/ERRDIF/
-// GRAY256) and returns their decoded pixel bytes concatenated row-major,
-// `row_bytes` bytes per row.
+// Runs the gray/RLENGTH (TEXT/ERRDIF/GRAY256 with C=RLENGTH -- i.e.
+// Black & White, Error Diffusion, True Gray) readout for an ADF or flatbed
+// job, DE-INTERLEAVING the pages the device multiplexes on the wire, and
+// appends one ScanResult per page to *out in page (end-of-page) order.
 //
-// Each row's block header (already read once, as `first_header`, by the
-// caller before it knew this was an RLENGTH scan -- mirroring how the
-// color/gray branches below reuse their own first header read) declares
-// that row's on-the-wire payload length in BlockHeader::width, and its
-// on-the-wire shape in BlockHeader::type: kBlockTypeRlength (0x42) is a
-// PackBits-compressed row, decoded here with DecodeRlengthRow;
-// kBlockTypeRaw (0x40) is an uncompressed row of exactly `row_bytes`
-// bytes -- observed for the large majority of rows in this project's own
-// GRAY256 capture (see decode_rlength.h and the issue #4 report), so a
-// real device response must not be rejected just for arriving raw. A
-// header of any other type (e.g. the 0x82 end-of-page/status marker
-// documented in reference/protocol-notes-modes.md) before `height` rows
-// have been read is a protocol error rather than the well-formed image
-// this function expects to reconstruct.
+// This mirrors RunColorScan's structure exactly, one row at a time instead of
+// one JPEG chunk at a time. A duplex ADF feed does NOT stream each page
+// contiguously: it interleaves the two sides' row blocks, tagging every block
+// header with its 1-based page index (BlockHeader::page_index, at wire byte[3])
+// and closing each page with its own 10-byte end-of-page marker carrying that
+// same index. The old readout read one whole page at a time and DESYNCED on a
+// duplex feed -- it mixed both sides' interleaved rows into one page, then
+// found no clean end-of-page where it expected one and failed with
+// kProtocolError (the live status=2/pages=0 hang on a duplex Black & White
+// ADF scan). So this keeps a per-page-index accumulator and, at each decision
+// point, peeks the leading bytes and classifies (ClassifyRlengthBoundary):
+//   - a row block header (0x40/0x42, 12- or 13-byte shape): decode that ONE
+//     row and append to page <pidx>'s buffer, emitting a full band for that
+//     page (at 0-based index pidx - 1) when it reaches kBandRows;
+//   - an end-of-page marker (`82 07 00 <pidx> 00 84 00 00 00 00`): finalize
+//     page <pidx> -- pad a short delivery to the requested height, validate
+//     via WrapBitonalImage (bitonal) or DecodeGrayRaw (gray), push a
+//     ScanResult, flush its remaining bands -- then peek the next byte:
+//     0x80 ends the job, anything else is the next row's header (loop, do NOT
+//     consume);
+//   - neither (an un-headered pixel-slop byte, a firmware buffer flush): skip
+//     it, up to a bounded ceiling that resets on each header/marker.
+// Simplex, flatbed, and single-page ADF are the degenerate case where only one
+// page index is ever active; the same loop handles them unchanged, preserving
+// the #150 slop-skip, early-end-of-page, and short-delivery padding behavior
+// per page.
 //
-// Residual risk: this trusts each row's declared length even though this
-// project's own captures show it can occasionally be wrong on real
-// hardware (a single row, out of several thousand, with a declared
-// length longer than the bytes actually sent for it before the next
-// row's header began -- see the issue #4 report). Reading that many
-// bytes then swallows the start of the next row's header, desynchronizing
-// the rest of the image; there is no self-describing way to detect this
-// from the header alone, so -- like ReadChunkedJpeg's analogous residual
-// risk above -- it surfaces as a decode failure (a row that doesn't
-// decompress to exactly `row_bytes`) or a timeout waiting for a header
-// that isn't at the expected offset, not silent corruption.
-Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
-                        int height, size_t row_bytes, int timeout_ms,
-                        const BandCallback& on_band, int page_index,
-                        PixelFormat format, int width_px,
-                        std::vector<uint8_t>* pixels) {
-  pixels->clear();
-  // Reserve the whole page up front so appending a row never reallocates: the
-  // streaming bands below point directly into `pixels`, so their data must
-  // stay put until the callback returns.
-  pixels->reserve(row_bytes * static_cast<size_t>(height));
+// IMPORTANT -- INFERRED FRAMING: unlike color, this project has NO real duplex
+// gray/RLENGTH capture (every gray/RLENGTH sample is simplex/single-page; see
+// PROVENANCE.md). The de-interleaving framing here -- the page index in
+// header byte[3], the 10-byte end-of-page marker, and the 0x80 job-final -- is
+// INFERRED from the color duplex framing (same device, same markers, same
+// job-final), NOT independently captured. It is verified by a synthetic
+// interleaved test (RunScan.{TrueGray,BlackWhite}AdfDuplexInterleaved...) and
+// still needs a device-in-the-loop confirmation against a real duplex
+// Black & White ADF scan (see docs/RUNBOOK-plan-2-ica.md, row C9).
+//
+// Residual risk (unchanged from the old per-page reader): this trusts each
+// row's declared length, which this project's own captures show can rarely be
+// wrong on real hardware (a single row with a declared length longer than the
+// bytes actually sent before the next header). There is no self-describing way
+// to detect that from the header alone, so it surfaces as a decode failure or
+// a timeout, not silent corruption.
+Status RunRlengthScan(Framer* framer, const Params& exec_params, int timeout_ms,
+                      const BandCallback& on_band,
+                      std::vector<ScanResult>* out) {
+  const bool bitonal = exec_params.mode != ScanMode::kTrueGray;
+  const int width = exec_params.area.x1 - exec_params.area.x0;
+  const int height = exec_params.area.y1 - exec_params.area.y0;
+  if (width <= 0 || height <= 0) return Status::kProtocolError;
+  const size_t row_bytes = RlengthRowBytes(width, bitonal);
+  const PixelFormat format =
+      bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
 
-  BlockHeader header = first_header;
-  int band_start = 0;  // First row of the band currently accumulating.
-  int rows_read = 0;   // Rows actually decoded off the wire (<= height).
-  for (int row = 0; row < height; ++row) {
-    if (row > 0) {
-      // Locate the next row's block header. The device does not always place
-      // one exactly `row_bytes` after the previous row: it can splice in a
-      // run of un-headered pixel slop, or end the page early with the
-      // end-of-page marker (see ClassifyRlengthBoundary). Skip slop up to a
-      // bounded ceiling, stop cleanly on the marker (leaving it on the wire
-      // for RunReadout), and only then read the header.
-      bool end_of_page = false;
-      int skipped = 0;
-      for (;;) {
-        std::vector<uint8_t> peek;
-        const Status ps = framer->PeekUpTo(11, timeout_ms, &peek);
-        if (ps != Status::kOk) return ps;
-        const RlengthBoundary kind = ClassifyRlengthBoundary(peek);
-        if (kind == RlengthBoundary::kEndOfPage) {
-          end_of_page = true;
-          break;
-        }
-        if (kind == RlengthBoundary::kHeader) break;
-        // Neither: the stream has ended (nothing left to peek) or this is a
-        // slop byte to discard before the real header.
-        if (peek.empty()) {
-          end_of_page = true;
-          break;
-        }
-        if (++skipped > kMaxRlengthSlopBytes) return Status::kProtocolError;
-        std::vector<uint8_t> slop;
-        const Status ss = framer->ReadExact(1, timeout_ms, &slop);
-        if (ss != Status::kOk) return ss;
-      }
-      if (end_of_page) break;
-      const Status s = ReadBlockHeader(framer, timeout_ms, &header);
-      if (s != Status::kOk) return s;
-    }
-    if (header.type != kBlockTypeRaw && header.type != kBlockTypeRlength) {
-      return Status::kProtocolError;
-    }
-    // No header.width < 0 guard here: it's built from two uint8_t bytes
-    // (see ParseBlockHeader in response.cpp), so it's always in [0, 65535].
+  // Per-page-index state: accumulated pixel rows, the rows decoded off the wire
+  // so far, and the band-emission cursor (first row of the band currently
+  // accumulating). A duplex feed interleaves two pages' rows, so each page
+  // index keeps its own (matching RunColorScan's per-page JPEG accumulators).
+  struct PageState {
+    std::vector<uint8_t> pixels;
+    int rows_read = 0;
+    int band_start = 0;
+  };
+  std::map<int, PageState> in_progress;
+  int slop_skipped = 0;  // Reset on each header/marker (per-boundary ceiling).
 
-    std::vector<uint8_t> payload;
-    const Status s =
-        framer->ReadExact(static_cast<size_t>(header.width), timeout_ms, &payload);
+  for (;;) {
+    std::vector<uint8_t> peek;
+    Status s = framer->PeekUpTo(11, timeout_ms, &peek);
     if (s != Status::kOk) return s;
 
-    if (header.type == kBlockTypeRaw) {
-      if (payload.size() != row_bytes) return Status::kProtocolError;
-      pixels->insert(pixels->end(), payload.begin(), payload.end());
-    } else {
-      std::vector<uint8_t> row_out(row_bytes);
-      const Status ds = DecodeRlengthRow(payload.data(), payload.size(),
-                                          row_out.data(), row_out.size());
-      if (ds != Status::kOk) return ds;
-      pixels->insert(pixels->end(), row_out.begin(), row_out.end());
+    // A job-final terminator leads with 0x80. It only ever follows a page's
+    // end-of-page marker, which the kEndOfPage branch consumes and then checks
+    // its own tail for -- so a 0x80 reaching this decision point means the
+    // stream ended without finalizing an open page (or a corrupt lead). Either
+    // way, no more rows are coming.
+    if (!peek.empty() && peek[0] == 0x80) {
+      if (!in_progress.empty()) return Status::kProtocolError;
+      return Status::kOk;
     }
-    ++rows_read;
 
-    // Flush a full band every kBandRows decoded rows; the tail (a partial
-    // band, plus any padded rows below) is flushed after the loop.
-    if (on_band && rows_read - band_start == kBandRows) {
-      const Status es = EmitBand(
-          on_band, page_index, format, width_px, height, band_start, kBandRows,
-          pixels->data() + static_cast<size_t>(band_start) * row_bytes,
-          static_cast<size_t>(kBandRows) * row_bytes);
-      if (es != Status::kOk) return es;
-      band_start = rows_read;
+    const RlengthBoundary kind = ClassifyRlengthBoundary(peek);
+
+    if (kind == RlengthBoundary::kEndOfPage) {
+      // End-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00 (10 bytes). Read
+      // it as a fixed count (never through ReadBlockHeader, whose header parser
+      // would consume the 2 bytes after it and desync the stream).
+      slop_skipped = 0;
+      std::vector<uint8_t> marker;
+      s = framer->ReadExact(10, timeout_ms, &marker);
+      if (s != Status::kOk) return s;
+      if (marker[1] != 0x07 || marker[5] != 0x84) return Status::kProtocolError;
+      const int pidx = marker[3];
+
+      auto it = in_progress.find(pidx);
+      if (it == in_progress.end()) return Status::kProtocolError;
+      PageState& page = it->second;
+
+      // The device can deliver fewer rows than the requested area's height
+      // (early end-of-page / auto-crop). Pad the tail so the page is exactly
+      // width x height -- DecodeGrayRaw and WrapBitonalImage require an exact
+      // byte count -- filling with white (0xFF gray samples; 0x00 packed
+      // bitonal, where a 1 bit is black), matching a blank paper edge. The
+      // reserve on this page's first row sized `pixels` for the full height, so
+      // this resize never reallocates and the bands emitted above stay valid.
+      if (page.rows_read < height) {
+        const uint8_t fill = bitonal ? 0x00 : 0xFF;
+        page.pixels.resize(row_bytes * static_cast<size_t>(height), fill);
+      }
+
+      // Flush every remaining row (the last partial band plus any padding) so
+      // this page's band stream covers all `height` rows contiguously, at its
+      // 0-based page index (pidx - 1), exactly as RunColorScan emits.
+      while (on_band && page.band_start < height) {
+        const int num_rows = std::min(kBandRows, height - page.band_start);
+        const Status es = EmitBand(
+            on_band, pidx - 1, format, width, height, page.band_start, num_rows,
+            page.pixels.data() +
+                static_cast<size_t>(page.band_start) * row_bytes,
+            static_cast<size_t>(num_rows) * row_bytes);
+        if (es != Status::kOk) return es;
+        page.band_start += num_rows;
+      }
+
+      Image image;
+      const Status decode_status =
+          bitonal ? WrapBitonalImage(width, height, page.pixels, &image)
+                  : DecodeGrayRaw(width, height, page.pixels.data(),
+                                  page.pixels.size(), &image);
+      if (decode_status != Status::kOk) return decode_status;
+
+      ScanResult result;
+      result.format = format;
+      result.width = width;
+      result.height = height;
+      result.data = std::move(page.pixels);
+      out->push_back(std::move(result));
+      in_progress.erase(it);
+
+      // Peek the byte after the marker: 0x80 ends the job (see RunColorScan's
+      // identical note on why a single 0x80 suffices -- the button flow sends
+      // one 0x80 then closes, the driver flow 0x80 0x80), anything else is the
+      // next row's block header (loop, do NOT consume).
+      std::vector<uint8_t> tail;
+      s = framer->Peek(1, timeout_ms, &tail);
+      if (s != Status::kOk) return s;
+      if (tail[0] == 0x80) {
+        if (!in_progress.empty()) return Status::kProtocolError;
+        return Status::kOk;
+      }
+      continue;
     }
-  }
 
-  // The device can deliver fewer rows than the requested area's height (early
-  // end-of-page / auto-crop). Pad the tail so the page is exactly
-  // width x height -- DecodeGrayRaw and WrapBitonalImage require an exact byte
-  // count -- filling with white (0xFF gray samples; 0x00 packed bitonal, where
-  // a 1 bit is black), matching a blank paper edge. The reserve above sized
-  // `pixels` for the full height, so this resize never reallocates and the
-  // bands emitted above stay valid.
-  if (rows_read < height) {
-    const uint8_t fill = format == PixelFormat::kBitonal ? 0x00 : 0xFF;
-    pixels->resize(row_bytes * static_cast<size_t>(height), fill);
-  }
+    if (kind == RlengthBoundary::kHeader) {
+      // A row block header: read it and route its one row by page index.
+      slop_skipped = 0;
+      BlockHeader header;
+      s = ReadBlockHeader(framer, timeout_ms, &header);
+      if (s != Status::kOk) return s;
+      if (header.type != kBlockTypeRaw && header.type != kBlockTypeRlength) {
+        return Status::kProtocolError;
+      }
+      const int pidx = header.page_index;
+      PageState& page = in_progress[pidx];
+      if (page.rows_read == 0) {
+        // Reserve the whole page up front so appending a row never reallocates:
+        // the streaming bands point directly into `pixels`, so their data must
+        // stay put until the callback returns.
+        page.pixels.reserve(row_bytes * static_cast<size_t>(height));
+      }
+      // A page must not deliver more rows than the requested height: the
+      // padding/reserve invariants (and the emitted bands' validity) assume
+      // `pixels` never grows past `height` rows.
+      if (page.rows_read >= height) return Status::kProtocolError;
 
-  // Flush every remaining row (the last partial band plus any padding) so the
-  // band stream covers all `height` rows contiguously.
-  while (on_band && band_start < height) {
-    const int num_rows = std::min(kBandRows, height - band_start);
-    const Status es = EmitBand(
-        on_band, page_index, format, width_px, height, band_start, num_rows,
-        pixels->data() + static_cast<size_t>(band_start) * row_bytes,
-        static_cast<size_t>(num_rows) * row_bytes);
-    if (es != Status::kOk) return es;
-    band_start += num_rows;
+      // No header.width < 0 guard: it's built from two uint8_t bytes (see
+      // ParseBlockHeader), so it's always in [0, 65535].
+      std::vector<uint8_t> payload;
+      s = framer->ReadExact(static_cast<size_t>(header.width), timeout_ms,
+                            &payload);
+      if (s != Status::kOk) return s;
+
+      if (header.type == kBlockTypeRaw) {
+        if (payload.size() != row_bytes) return Status::kProtocolError;
+        page.pixels.insert(page.pixels.end(), payload.begin(), payload.end());
+      } else {
+        std::vector<uint8_t> row_out(row_bytes);
+        const Status ds = DecodeRlengthRow(payload.data(), payload.size(),
+                                            row_out.data(), row_out.size());
+        if (ds != Status::kOk) return ds;
+        page.pixels.insert(page.pixels.end(), row_out.begin(), row_out.end());
+      }
+      ++page.rows_read;
+
+      // Flush a full band every kBandRows decoded rows; the tail (a partial
+      // band, plus any padded rows) is flushed when the page's marker arrives.
+      if (on_band && page.rows_read - page.band_start == kBandRows) {
+        const Status es = EmitBand(
+            on_band, pidx - 1, format, width, height, page.band_start, kBandRows,
+            page.pixels.data() +
+                static_cast<size_t>(page.band_start) * row_bytes,
+            static_cast<size_t>(kBandRows) * row_bytes);
+        if (es != Status::kOk) return es;
+        page.band_start = page.rows_read;
+      }
+      continue;
+    }
+
+    // kNeither: either the stream ended (nothing left to peek) with a page
+    // still open -- a truncated/desynced stream -- or an un-headered pixel-slop
+    // byte spliced between two row blocks (a firmware buffer flush; see
+    // ClassifyRlengthBoundary). Skip slop up to a bounded ceiling that resets
+    // on each header/marker, so a genuinely garbled stream can't be scanned
+    // forever.
+    if (peek.empty()) return Status::kProtocolError;
+    if (++slop_skipped > kMaxRlengthSlopBytes) return Status::kProtocolError;
+    std::vector<uint8_t> slop;
+    s = framer->ReadExact(1, timeout_ms, &slop);
+    if (s != Status::kOk) return s;
   }
-  return Status::kOk;
 }
 
 // Reads a raw gray (GRAY64/C=NONE) payload (width * height bytes, no embedded
 // headers) in row-group increments, appending to *raw and emitting a band per
 // group when streaming. Reserving the whole page keeps a band's bytes valid
-// for the callback (see ReadRlengthRows). Reading in groups is byte-for-byte
+// for the callback (see RunRlengthScan). Reading in groups is byte-for-byte
 // identical to a single ReadExact of the whole payload -- ReadExact loops
 // internally either way.
 //
@@ -1124,55 +1211,38 @@ Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
                         ColorPageByteCap(exec_params.area), out);
   }
 
-  // TODO(duplex gray/RLENGTH): the gray (GRAY64/C=NONE) and RLENGTH
-  // (Black & White/Error Diffusion/True Gray) paths below read one whole
-  // page at a time in EOP order. That is correct for simplex ADF and
-  // flatbed, and matches every gray/RLENGTH sample captured (all
-  // simplex/single-page -- see PROVENANCE.md), but duplex interleaving has
-  // only ever been observed and captured for color. If the device also
-  // interleaves duplex gray/RLENGTH chunks by page index, this loop would
-  // desync; that case is uncaptured and out of scope here. Generalizing
-  // these modes to the same page-index de-interleaving RunColorScan does
-  // would require a real duplex gray/RLENGTH capture to confirm the framing.
+  // RLENGTH (Black & White/TEXT, Error Diffusion, True Gray/GRAY256) has its
+  // own de-interleaving readout, mirroring the color one: a duplex feed
+  // multiplexes the two sides' row blocks by page index, so it cannot use the
+  // one-whole-page-at-a-time sequential loop below. RunRlengthScan handles
+  // simplex, duplex, and single-page flatbed alike (see its doc comment for
+  // the INFERRED-from-color duplex framing this rests on).
+  if (exec_params.mode == ScanMode::kBlackWhite ||
+      exec_params.mode == ScanMode::kErrorDiffusion ||
+      exec_params.mode == ScanMode::kTrueGray) {
+    return RunRlengthScan(framer, exec_params, timeout_ms, on_band, out);
+  }
+
+  // Raw gray (GRAY64/C=NONE) is left on the sequential, one-whole-page-at-a-
+  // time loop below. Unlike the RLENGTH modes just handled, it is NOT
+  // generalized to page-index de-interleaving: a raw-gray duplex feed is even
+  // rarer than an RLENGTH one and equally uncaptured, and raw gray carries no
+  // per-row block header to tag a page index on (it is one continuous,
+  // unchunked pixel stream per page -- see ReadRawGrayStreaming), so there is
+  // no in-band page index to de-interleave by even if the device did
+  // interleave it. Simplex ADF and flatbed (the observed cases) read one whole
+  // page at a time in end-of-page order, which this loop does correctly.
   for (;;) {
     BlockHeader header;
     Status status = ReadBlockHeader(framer, timeout_ms, &header);
     if (status != Status::kOk) return status;
 
     ScanResult page;
-    // 0-based page position; for the sequential (gray/RLENGTH) readout this
-    // is also the index the finished page takes in `out` (see the duplex TODO
-    // above -- these modes are simplex-only here).
+    // 0-based page position; for this sequential raw-gray readout this is also
+    // the index the finished page takes in `out`.
     const int page_index = static_cast<int>(out->size());
 
-    if (exec_params.mode == ScanMode::kBlackWhite ||
-        exec_params.mode == ScanMode::kErrorDiffusion ||
-        exec_params.mode == ScanMode::kTrueGray) {
-      const bool bitonal = exec_params.mode != ScanMode::kTrueGray;
-      const int width = exec_params.area.x1 - exec_params.area.x0;
-      const int height = exec_params.area.y1 - exec_params.area.y0;
-      if (width <= 0 || height <= 0) return Status::kProtocolError;
-      const size_t row_bytes = RlengthRowBytes(width, bitonal);
-      const PixelFormat format =
-          bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
-
-      std::vector<uint8_t> pixels;
-      status = ReadRlengthRows(framer, header, height, row_bytes, timeout_ms,
-                               on_band, page_index, format, width, &pixels);
-      if (status != Status::kOk) return status;
-
-      Image image;
-      const Status decode_status =
-          bitonal ? WrapBitonalImage(width, height, pixels, &image)
-                  : DecodeGrayRaw(width, height, pixels.data(), pixels.size(),
-                                  &image);
-      if (decode_status != Status::kOk) return decode_status;
-
-      page.format = bitonal ? PixelFormat::kBitonal : PixelFormat::kGray;
-      page.width = width;
-      page.height = height;
-      page.data = std::move(pixels);
-    } else {
+    {
       // Gray: raw payload, exactly width * height bytes, no embedded
       // headers (see ReadRawGrayStreaming). Width comes from this block's
       // header (confirmed reliable for a gray payload); height comes from the
