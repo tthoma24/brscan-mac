@@ -192,6 +192,65 @@ Legend for the `ICScannerDocumentType` values referenced below is in
 | **C15. Cancel mid-ADF-scan** | Scan Mode = Document Feeder; several sheets loaded; a scan running | Press **Cancel** while pages are still feeding | The scan aborts cleanly; the device **feeds the remaining sheets out until the feeder is empty**, then stops; Image Capture returns to ready **without hanging**, and a new scan starts normally | ☐ | Guards mid-feed abort + recovery; no wedged session |
 | **C16. Scan failure shows a readable dialog** | Scan Mode = Document Feeder; induce a failure — feed a sheet, then **physically jam the ADF mid-feed** | Scan and induce a jam | Image Capture shows a **readable** message (e.g. "An error occurred during scanning.", or a specific alert) — **not** the bland generic failure; **record what a jam shows** | ☐ | **Readable errors (PR C):** the module posts a `kICANotificationTypeDeviceStatusError` whose subtype is an `Error.loctable` key. Empty-feeder (C13/C14) already renders "Document feeder is empty.". **Jam is DISCOVERY:** its signature is uncaptured, so a jam is not yet mapped to `kICAErrStrDFPaperErr` ("Document feeder has a paper jam or paper feed error.") — note the observed message; mapping the jam key is a follow-up pending a captured jam signature |
 
+### Known limitations
+
+This section records confirmed defects that have **no module-side fix**, so a
+tester does not re-file them or read them as regressions of the rows above.
+
+**KL1. "Combine into single document" → TIFF duplicates the first page for application destinations — Preview, Photos, Mail (macOS 26).**
+
+**Symptom.** With **Combine into single document** selected, the format set to
+**TIFF**, and the destination set to **an application** — Preview, Photos, and
+Mail all reproduce it — an N-page ADF scan
+produces an **N+1**-page TIFF: the first page is emitted twice, so the composition
+is `[page0, page0, page1, …]` (a 2-page scan yields `[page0, page0, page1]`).
+`tiffutil -info` reports **N+1** image file directories (IFDs), and the file is
+exactly **(N+1)×** one page's byte size — a verified 2-page scan reports **3 IFDs,
+75.7 MB**. The **same** Combine → TIFF job saved to a **folder** destination is
+correct: a proper N-page TIFF, **2 IFDs, 50.5 MB** for that same scan. Preview's
+own **File ▸ Import from Scanner** path also does not duplicate, so the defect is
+specific to Image Capture's open-in-app destination on macOS 26.
+
+**Root cause.** The defect is host-side, in Image Capture's open-in-app
+handoff / combine-staging on macOS 26 — **not** the folder-write path, and **not**
+the module. The module delivers exactly N pages (`pages=N`,
+one `PostFilePage` / `ScannerPageDone` per page) with the same filenames
+(`stem.tif`, `stem 1.tif`) and the same `ScannerPageDone(path)` sequence as the
+vendor driver, which combines correctly on macOS 15.7 (Intel) but ships no
+Apple-Silicon build to test on 26. Four module-side fixes were tried; none removed
+the duplicate:
+
+1. **Not the progress bands.** Removing every image-info `ScanProgressStatus` band
+   (dataless progress) still duplicated — the bands were never the cause.
+2. **Not a timing race.** Spacing page delivery ~5 s apart to match the vendor
+   driver's per-sheet cadence still duplicated — not a burst/timing race.
+3. **Page 0 cannot be renamed.** In separate-files mode page 0 must be the bare
+   `stem.tif`; indexing it from 1 regresses that mode. The module cannot tell
+   combine from separate mode — **Combine** is an Image Capture UI setting, absent
+   from the ImageCaptureCore client API.
+4. **No page signal to add.** The ICA notification API exposes no page-index,
+   page-number, or page-count key; a `ScannerPageDone` carries only
+   `kICANotificationScannerDocumentNameKey` (the file path), confirmed against the
+   exported symbols in `ICADevices.tbd` and `ImageCapture.tbd`.
+
+The destination-dependence is additional confirmation the defect is host-side. The
+module only ever receives a folder path — the real destination folder, or Image
+Capture's temporary staging folder for the app handoff — and writes byte-identical
+files either way. Identical module output that yields a correct folder TIFF but a
+duplicated open-in-app TIFF places the defect entirely in the host's open-in-app
+staging.
+
+**Workarounds.**
+
+- Scan **Combine → TIFF to a folder** destination — the folder-write path produces
+  a correct native multi-page TIFF. Best option: keeps TIFF and a single file.
+- Combine to **PDF** instead of TIFF (correct output).
+- Save **separate files** — one correct TIFF per page.
+- Stitch the separate files into one multi-page TIFF yourself:
+  `tiffutil -cat page*.tiff -out multi.tiff`.
+
+Filed to Apple Feedback Assistant: `FB24717493`
+
 ### D. Packaging and signing
 
 | Scenario | Preconditions | Steps | Expected result | Pass/Fail | Notes |
