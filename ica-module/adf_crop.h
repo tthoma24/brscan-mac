@@ -51,4 +51,50 @@ namespace brscan::ica {
 // buffer, a non-positive width/height, or a stride shorter than width*3.
 int TrailingPadRows(const uint8_t* rgb, int width, int height, int bytesPerRow);
 
+// Counts the total contiguous trailing rows to trim from an ADF color page: the
+// device gray-128 pad (TrailingPadRows) PLUS the near-white backing overscan above
+// it, down to the last row of real content.
+//
+// WHY GATED ON THE GRAY PAD. On a color scan the device hands back a JPEG already
+// padded to the requested height, with no signal for where the sheet actually
+// ended. Past the sheet the ADF scans its own near-WHITE backing/roller before the
+// device appends the gray-128 pad — and that backing is the same white as paper,
+// so a trailing near-white band is indistinguishable by pixels from a genuine
+// blank bottom margin. The gray pad is the one thing the device only emits when the
+// sheet was SHORTER than the scan window (a page whose content filled the window
+// has none). So we treat the gray pad as the device's own "this page overscanned"
+// signal: only when a gray pad is present do we also trim the near-white band above
+// it. A page with no gray pad is left entirely untouched — its bottom, margin and
+// all, is preserved.
+//
+// A near-white overscan row is one that is ≥ kBlankMinNearWhitePct near-white
+// (luminance ≥ kBlankNearWhiteLum) AND ≤ kBlankMaxInkPct ink (luminance <
+// kInkLum): the backing reads as clean near-white with at most a sparse fold/mark,
+// while any inked or colored content (the footer bar, a line of text) fails one of
+// the two and stops the scan. Scanning stops at the first such content row from the
+// bottom, so interior blank gaps and the page above are never touched. Returns a
+// count in [0, height); a page that is blank to the top still keeps ≥ 1 row via the
+// same caller guard as TrailingPadRows. Same defensive returns (0) as TrailingPadRows.
+int TrailingOverscanRows(const uint8_t* rgb, int width, int height,
+                         int bytesPerRow);
+
+// Paints the last `rows` rows of an interleaved-RGB buffer solid white (0xFF),
+// leaving every earlier row untouched.
+//
+// WHY FILL INSTEAD OF CROP. The ADF trailing overscan (backing + gray pad) has to
+// be erased, but SHORTENING the image is counter-productive for the file/PDF path:
+// macOS 26's Image Capture builds each PDF page at the selected paper size (Letter)
+// and CENTERS the delivered image on it, so a shorter image is padded back with a
+// white margin split top and bottom (the wider the crop, the wider the margin).
+// Keeping the full height lets the image fill the page exactly (no host margin,
+// like an uncropped page), while painting the overscan white removes the gray/
+// backing band -- a clean full-page scan with white trailing space. The row count
+// comes from TrailingOverscanRows; this only performs the fill.
+//
+// Fills exactly the width*3 pixel bytes of each row (never the stride padding).
+// No-op on a null buffer, non-positive width/height, rows<=0, or a stride shorter
+// than width*3; `rows` is clamped to [0,height].
+void FillTrailingRowsWhite(uint8_t* rgb, int width, int height, int bytesPerRow,
+                           int rows);
+
 }  // namespace brscan::ica

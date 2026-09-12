@@ -226,5 +226,132 @@ TEST(TrailingPadRows, StrideShorterThanRowReturnsZero) {
   EXPECT_EQ(TrailingPadRows(buf.data(), kWidth, 4, kStride - 1), 0);
 }
 
+// ---------------------------------------------------------------------
+// TrailingOverscanRows: gray pad + gated near-white backing overscan.
+// ---------------------------------------------------------------------
+
+// A near-white "backing overscan" row: mostly ≥235 with almost no ink.
+void AppendWhiteRows(std::vector<uint8_t>* buf, int width, int count) {
+  AppendSolidRows(buf, width, count, 255, 255, 255);
+}
+
+constexpr int kOW = 100;              // width where the 97%/1% bands resolve
+constexpr int kOS = kOW * 3;
+
+TEST(TrailingOverscanRows, NoGrayPadLeavesEverythingUntouched) {
+  // Trailing near-white but NO device gray pad: the device never signalled a short
+  // page, so the bottom (which could be a genuine white margin) is left intact.
+  std::vector<uint8_t> buf;
+  AppendContentRows(&buf, kOW, 20);
+  AppendWhiteRows(&buf, kOW, 30);
+  EXPECT_EQ(TrailingOverscanRows(buf.data(), kOW, 50, kOS), 0);
+}
+
+TEST(TrailingOverscanRows, GrayPadWithContentAboveTrimsGrayOnly) {
+  // Content sits directly on the gray pad (no near-white band between): only the
+  // gray rows trim — same as TrailingPadRows.
+  std::vector<uint8_t> buf;
+  AppendContentRows(&buf, kOW, 20);
+  AppendSolidRows(&buf, kOW, 8, 128, 128, 128);
+  EXPECT_EQ(TrailingOverscanRows(buf.data(), kOW, 28, kOS), 8);
+}
+
+TEST(TrailingOverscanRows, GrayPadExtendsThroughWhiteOverscanToContent) {
+  // content | near-white backing overscan | gray pad  ->  both trim, stopping at
+  // the last real content row.
+  std::vector<uint8_t> buf;
+  AppendContentRows(&buf, kOW, 20);
+  AppendWhiteRows(&buf, kOW, 15);                  // backing overscan
+  AppendSolidRows(&buf, kOW, 8, 128, 128, 128);    // device gray pad
+  EXPECT_EQ(TrailingOverscanRows(buf.data(), kOW, 43, kOS), 23);  // 15 + 8
+}
+
+TEST(TrailingOverscanRows, StopsAtLowerContentNotInteriorWhiteGap) {
+  // content | interior white gap | content | overscan | gray. The scan from the
+  // bottom stops at the LOWER content, so the interior gap and the page above it
+  // are never trimmed.
+  std::vector<uint8_t> buf;
+  AppendContentRows(&buf, kOW, 10);
+  AppendWhiteRows(&buf, kOW, 10);                  // interior white gap
+  AppendContentRows(&buf, kOW, 10);               // lower content (the stop)
+  AppendWhiteRows(&buf, kOW, 12);                 // trailing overscan
+  AppendSolidRows(&buf, kOW, 6, 128, 128, 128);   // gray pad
+  EXPECT_EQ(TrailingOverscanRows(buf.data(), kOW, 48, kOS), 18);  // 12 + 6 only
+}
+
+TEST(TrailingOverscanRows, InkyNearWhiteRowIsContentAndStopsTheScan) {
+  // A near-white row carrying ink (a line of text) is content, not overscan: it
+  // fails the ink test and stops the scan, so it is kept.
+  std::vector<uint8_t> buf;
+  AppendContentRows(&buf, kOW, 15);
+  // One row: 94 white pixels + 6 black (6% ink, > kBlankMaxInkPct) — content.
+  for (int x = 0; x < kOW; ++x) {
+    const uint8_t v = (x < 6) ? 0 : 255;
+    buf.push_back(v);
+    buf.push_back(v);
+    buf.push_back(v);
+  }
+  AppendWhiteRows(&buf, kOW, 10);                 // overscan below the text line
+  AppendSolidRows(&buf, kOW, 5, 128, 128, 128);   // gray pad
+  EXPECT_EQ(TrailingOverscanRows(buf.data(), kOW, 31, kOS), 15);  // 10 + 5, stop at text
+}
+
+// ---------------------------------------------------------------------
+// FillTrailingRowsWhite: erase overscan in place, keep the image height.
+// ---------------------------------------------------------------------
+
+TEST(FillTrailingRowsWhite, FillsLastNRowsWhiteAndLeavesRestUntouched) {
+  std::vector<uint8_t> buf;
+  AppendContentRows(&buf, kOW, 20);              // 20 content rows on top
+  AppendSolidRows(&buf, kOW, 10, 128, 128, 128); // 10 rows to be whitened
+  FillTrailingRowsWhite(buf.data(), kOW, 30, kOS, 10);
+  // Last 10 rows are now pure white.
+  for (int r = 20; r < 30; ++r)
+    for (int i = 0; i < kOS; ++i)
+      ASSERT_EQ(buf[static_cast<size_t>(r) * kOS + i], 255) << "row " << r;
+  // Row 19 (last content row) is untouched: its gradient is not all-255.
+  bool row19AllWhite = true;
+  for (int i = 0; i < kOS; ++i)
+    if (buf[static_cast<size_t>(19) * kOS + i] != 255) row19AllWhite = false;
+  EXPECT_FALSE(row19AllWhite);
+}
+
+TEST(FillTrailingRowsWhite, ZeroRowsIsNoOp) {
+  std::vector<uint8_t> buf;
+  AppendSolidRows(&buf, kOW, 5, 128, 128, 128);
+  const std::vector<uint8_t> before = buf;
+  FillTrailingRowsWhite(buf.data(), kOW, 5, kOS, 0);
+  EXPECT_EQ(buf, before);
+}
+
+TEST(FillTrailingRowsWhite, RowsClampedToHeight) {
+  std::vector<uint8_t> buf;
+  AppendSolidRows(&buf, kOW, 4, 0, 0, 0);  // 4 black rows
+  FillTrailingRowsWhite(buf.data(), kOW, 4, kOS, 999);  // asks for far too many
+  for (size_t i = 0; i < buf.size(); ++i) ASSERT_EQ(buf[i], 255);  // all white, no overrun
+}
+
+TEST(FillTrailingRowsWhite, OnlyFillsWidthNotStridePadding) {
+  const int stride = kOS + 5;  // 5 junk bytes past the pixels each row
+  const int rows = 6;
+  std::vector<uint8_t> buf(static_cast<size_t>(stride) * rows, 7);  // 7 = sentinel
+  FillTrailingRowsWhite(buf.data(), kOW, rows, stride, 2);  // whiten last 2 rows
+  for (int r = 4; r < rows; ++r) {
+    for (int x = 0; x < kOS; ++x)
+      ASSERT_EQ(buf[static_cast<size_t>(r) * stride + x], 255);  // pixels white
+    for (int j = kOS; j < stride; ++j)
+      ASSERT_EQ(buf[static_cast<size_t>(r) * stride + j], 7);  // stride pad untouched
+  }
+}
+
+TEST(FillTrailingRowsWhite, DefensiveGuards) {
+  std::vector<uint8_t> buf(kOS * 4, 0);
+  FillTrailingRowsWhite(nullptr, kOW, 4, kOS, 2);          // null: no crash
+  FillTrailingRowsWhite(buf.data(), 0, 4, kOS, 2);         // width 0
+  FillTrailingRowsWhite(buf.data(), kOW, 0, kOS, 2);       // height 0
+  FillTrailingRowsWhite(buf.data(), kOW, 4, kOS - 1, 2);   // stride too short
+  for (uint8_t b : buf) EXPECT_EQ(b, 0);  // untouched by any guarded call
+}
+
 }  // namespace
 }  // namespace brscan::ica

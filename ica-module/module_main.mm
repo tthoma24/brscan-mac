@@ -1854,31 +1854,38 @@ ICAError RunScanSynchronous(const DeviceContext& ctx, ICAObject deviceObject,
         }
 
         if (ready) {
-          // ADF color auto-crop (bottom band): on an ADF color/JPEG scan the
-          // device pads the decoded page up to the requested height with uniform
-          // full-width mid-gray (~128) once the sheet ends, so an over-sized Size
-          // leaves a solid gray strip along the bottom. Trim the contiguous
-          // trailing pad rows so the page ends at the real sheet. Scoped to ADF +
-          // kRgb (the decoded color page): the flatbed does not pad this way, and
-          // the RLENGTH gray/BW path pads differently (our own white/black fill)
-          // and is left untouched here -- it could later be cropped from
-          // rows_read. RGB rows are contiguous top-to-bottom (bytesPerRow =
-          // width*3, no inter-row padding), so the first (outHeight - pad) rows
-          // ARE the cropped image: pass the reduced height and let PostFilePage
-          // read that prefix of `bytes` (its CGImage reads only bytesPerRow*height,
-          // and byteCount stays a valid superset). The guard keeps at least one
-          // row, so an all-pad page is never cropped to nothing. The live band
-          // emission above (preview) is deliberately unaffected.
+          // ADF color trailing-overscan cleanup (bottom band): on an ADF color/
+          // JPEG scan the device returns a JPEG already padded to the requested
+          // height. Past a short sheet the ADF scans its near-white backing/roller
+          // and then the device appends a mid-gray (~128) pad, leaving a near-white
+          // band + gray strip at the trailing edge. TrailingOverscanRows measures
+          // that band (the gray pad plus, gated on the pad being present, the
+          // near-white backing above it); FillTrailingRowsWhite paints those rows
+          // white IN PLACE, keeping the full height.
+          //
+          // Why paint, not crop: macOS 26's Image Capture builds each PDF page at
+          // the selected paper size and CENTERS the delivered image, so shortening
+          // the image pads it back with a white margin split top+bottom -- the band
+          // just reappears as page background. Keeping full height lets the image
+          // fill the page exactly (like an uncropped page), and the whitened tail
+          // reads as ordinary trailing margin: no gray/backing band, no centering
+          // margin. Scoped to ADF + kRgb (the decoded color page); the flatbed does
+          // not pad this way and the RLENGTH gray/BW path crops from rows_read. The
+          // mutable `img` backs `bytes`, so the fill is what PostFilePage writes;
+          // byteCount/outHeight stay the full image. The guard leaves an all-blank
+          // page (no real content above the band) untouched. The live band emission
+          // above (preview) is unaffected.
           if (params.source == brscan::Source::kAdf &&
               outFormat == brscan::PixelFormat::kRgb) {
-            const int pad = brscan::ica::TrailingPadRows(bytes, outWidth,
-                                                         outHeight, outWidth * 3);
-            if (pad > 0 && outHeight - pad > 0) {
+            const int overscan = brscan::ica::TrailingOverscanRows(
+                bytes, outWidth, outHeight, outWidth * 3);
+            if (overscan > 0 && outHeight - overscan > 0) {
               os_log(Log(),
-                     "SyncScan: file page %d ADF trailing-pad crop %d -> %d rows "
-                     "(trimmed %d uniform gray-128 rows)",
-                     idx, outHeight, outHeight - pad, pad);
-              outHeight -= pad;
+                     "SyncScan: file page %d ADF bottom-band: painted %d trailing "
+                     "overscan rows white (gray-pad + backing), kept full %d rows",
+                     idx, overscan, outHeight);
+              brscan::ica::FillTrailingRowsWhite(img.pixels.data(), outWidth,
+                                                 outHeight, outWidth * 3, overscan);
             }
           }
           const PageResult r = PostFilePage(

@@ -3,6 +3,7 @@
 #include "adf_crop.h"
 
 #include <cstddef>
+#include <cstring>
 
 namespace brscan::ica {
 namespace {
@@ -58,6 +59,34 @@ bool RowIsPad(const uint8_t* row, int width) {
   return (hi - lo) <= kPadFlatEps;  // In-band core is flat → padding, not noise.
 }
 
+// --- Near-white backing overscan (see TrailingOverscanRows in the header) ---
+
+// A pixel counts as "near-white" (backing/paper) at or above this luminance, and
+// as "ink" (real drawn content) strictly below kInkLum.
+constexpr int kBlankNearWhiteLum = 235;
+constexpr int kInkLum = 128;
+
+// A backing-overscan row is at least this percent near-white AND at most this
+// percent ink. The scanned backing reads as clean near-white (measured ≥97% of
+// pixels ≥235, ~0% ink) even with a stray fold/mark; the footer bar or a line of
+// text fails one bound (a colored bar drops the near-white share, text raises the
+// ink share) and stops the scan.
+constexpr int kBlankMinNearWhitePct = 97;
+constexpr int kBlankMaxInkPct = 1;
+
+// True when one row of interleaved RGB is near-white backing overscan (not content).
+bool RowIsBlankOverscan(const uint8_t* row, int width) {
+  int near_white = 0;
+  int ink = 0;
+  for (int x = 0; x < width; ++x) {
+    const int lum = (row[x * 3] + row[x * 3 + 1] + row[x * 3 + 2]) / 3;
+    if (lum >= kBlankNearWhiteLum) ++near_white;
+    if (lum < kInkLum) ++ink;
+  }
+  return near_white * 100 >= width * kBlankMinNearWhitePct &&
+         ink * 100 <= width * kBlankMaxInkPct;
+}
+
 }  // namespace
 
 int TrailingPadRows(const uint8_t* rgb, int width, int height, int bytesPerRow) {
@@ -71,6 +100,37 @@ int TrailingPadRows(const uint8_t* rgb, int width, int height, int bytesPerRow) 
     ++pad;
   }
   return pad;
+}
+
+int TrailingOverscanRows(const uint8_t* rgb, int width, int height,
+                         int bytesPerRow) {
+  // The device gray pad is the "this page overscanned a short sheet" signal (see
+  // the header). Without it, leave the bottom untouched — a trailing near-white
+  // band is then an ordinary margin, not backing.
+  const int gray = TrailingPadRows(rgb, width, height, bytesPerRow);
+  if (gray == 0) return 0;
+
+  // Extend up through the contiguous near-white backing above the gray, stopping
+  // at the first real content row. `gray > 0` proves the buffer/stride are valid
+  // (TrailingPadRows returns 0 otherwise), so the row math below is in-bounds.
+  int white = 0;
+  for (int r = height - 1 - gray; r >= 0; --r) {
+    const uint8_t* row = rgb + static_cast<std::size_t>(r) * bytesPerRow;
+    if (!RowIsBlankOverscan(row, width)) break;  // Real content: stop.
+    ++white;
+  }
+  return gray + white;
+}
+
+void FillTrailingRowsWhite(uint8_t* rgb, int width, int height, int bytesPerRow,
+                           int rows) {
+  if (rgb == nullptr || width <= 0 || height <= 0 || rows <= 0) return;
+  if (bytesPerRow < width * 3) return;  // Malformed stride: refuse to write.
+  if (rows > height) rows = height;
+  for (int r = height - rows; r < height; ++r) {
+    uint8_t* row = rgb + static_cast<std::size_t>(r) * bytesPerRow;
+    std::memset(row, 0xFF, static_cast<std::size_t>(width) * 3);  // pixels only.
+  }
 }
 
 }  // namespace brscan::ica
