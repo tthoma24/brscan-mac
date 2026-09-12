@@ -831,6 +831,57 @@ Status RunColorScan(Framer* framer, int timeout_ms, const BandCallback& on_band,
 constexpr int kBlockTypeRaw = 0x40;
 constexpr int kBlockTypeRlength = 0x42;
 
+// What sits at a gray/RLENGTH row boundary: the next row's block header, the
+// page's end-of-page marker, or neither (see ClassifyRlengthBoundary).
+enum class RlengthBoundary { kHeader, kEndOfPage, kNeither };
+
+// Classifies the bytes at a gray/RLENGTH row boundary from a look-ahead
+// `peek` (up to 11 bytes, taken WITHOUT consuming). These modes are framed
+// as one 12/13-byte block header per row, but a real GRAY256 flatbed capture
+// (reference/streams/modes_gray256_in.bin) shows the wire deviates from
+// "exactly `height` headered rows" two ways:
+//   * it can splice a run of un-headered pixel bytes between two row blocks
+//     (a single 2036-byte run at row 830 of that 4913-row page -- a firmware
+//     buffer flush; those bytes belong to no header's declared length), and
+//   * it can send the end-of-page marker after FEWER rows than the requested
+//     area's height (auto-cropping to the detected paper edge).
+// Distinguishing header / marker / slop here is what lets the readout finish
+// the page instead of misreading the marker as a row header (its 0x82 type is
+// neither raw nor rlength) or a pixel byte as one. The header and marker
+// shapes are matched on the SAME fixed bytes FindChunkBoundary uses (not just
+// the 07/84 anchors), so ordinary pixel data does not false-match.
+RlengthBoundary ClassifyRlengthBoundary(const std::vector<uint8_t>& peek) {
+  const size_t n = peek.size();
+  // End-of-page marker: 82 07 00 <pidx> 00 84 00 00 00 00.
+  if (n >= 10 && peek[0] == 0x82 && peek[1] == 0x07 && peek[2] == 0x00 &&
+      peek[4] == 0x00 && peek[5] == 0x84 && peek[6] == 0x00 &&
+      peek[7] == 0x00 && peek[8] == 0x00 && peek[9] == 0x00) {
+    return RlengthBoundary::kEndOfPage;
+  }
+  // Block header, 12-byte shape: <type> 07 00 <pidx> 00 84 .. .. 00 00.
+  if (n >= 10 && (peek[0] == kBlockTypeRaw || peek[0] == kBlockTypeRlength) &&
+      peek[1] == 0x07 && peek[2] == 0x00 && peek[4] == 0x00 &&
+      peek[5] == 0x84 && peek[8] == 0x00 && peek[9] == 0x00) {
+    return RlengthBoundary::kHeader;
+  }
+  // Block header, legacy 13-byte shape: 00 <type> 07 00 <pidx> 00 84 .. .. 00
+  // 00 (the same anchors shifted one byte later by a constant leading 0x00;
+  // see DetectHeaderLength).
+  if (n >= 11 && peek[0] == 0x00 &&
+      (peek[1] == kBlockTypeRaw || peek[1] == kBlockTypeRlength) &&
+      peek[2] == 0x07 && peek[3] == 0x00 && peek[5] == 0x00 &&
+      peek[6] == 0x84 && peek[9] == 0x00 && peek[10] == 0x00) {
+    return RlengthBoundary::kHeader;
+  }
+  return RlengthBoundary::kNeither;
+}
+
+// Ceiling on how many un-headered slop bytes ClassifyRlengthBoundary may skip
+// at one row boundary before giving up and treating the stream as corrupt.
+// The one real occurrence is ~2 KB; a full chunk's worth is a generous bound
+// that still stops a genuinely garbled stream from being scanned forever.
+constexpr int kMaxRlengthSlopBytes = 0xfff4;
+
 // Reads `height` per-row blocks for a C=RLENGTH scan (TEXT/ERRDIF/
 // GRAY256) and returns their decoded pixel bytes concatenated row-major,
 // `row_bytes` bytes per row.
@@ -874,8 +925,39 @@ Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
 
   BlockHeader header = first_header;
   int band_start = 0;  // First row of the band currently accumulating.
+  int rows_read = 0;   // Rows actually decoded off the wire (<= height).
   for (int row = 0; row < height; ++row) {
     if (row > 0) {
+      // Locate the next row's block header. The device does not always place
+      // one exactly `row_bytes` after the previous row: it can splice in a
+      // run of un-headered pixel slop, or end the page early with the
+      // end-of-page marker (see ClassifyRlengthBoundary). Skip slop up to a
+      // bounded ceiling, stop cleanly on the marker (leaving it on the wire
+      // for RunReadout), and only then read the header.
+      bool end_of_page = false;
+      int skipped = 0;
+      for (;;) {
+        std::vector<uint8_t> peek;
+        const Status ps = framer->PeekUpTo(11, timeout_ms, &peek);
+        if (ps != Status::kOk) return ps;
+        const RlengthBoundary kind = ClassifyRlengthBoundary(peek);
+        if (kind == RlengthBoundary::kEndOfPage) {
+          end_of_page = true;
+          break;
+        }
+        if (kind == RlengthBoundary::kHeader) break;
+        // Neither: the stream has ended (nothing left to peek) or this is a
+        // slop byte to discard before the real header.
+        if (peek.empty()) {
+          end_of_page = true;
+          break;
+        }
+        if (++skipped > kMaxRlengthSlopBytes) return Status::kProtocolError;
+        std::vector<uint8_t> slop;
+        const Status ss = framer->ReadExact(1, timeout_ms, &slop);
+        if (ss != Status::kOk) return ss;
+      }
+      if (end_of_page) break;
       const Status s = ReadBlockHeader(framer, timeout_ms, &header);
       if (s != Status::kOk) return s;
     }
@@ -900,17 +982,42 @@ Status ReadRlengthRows(Framer* framer, const BlockHeader& first_header,
       if (ds != Status::kOk) return ds;
       pixels->insert(pixels->end(), row_out.begin(), row_out.end());
     }
+    ++rows_read;
 
-    // Flush a band every kBandRows decoded rows (and at the last row).
-    if (on_band && ((row + 1) % kBandRows == 0 || row + 1 == height)) {
-      const int num_rows = row + 1 - band_start;
+    // Flush a full band every kBandRows decoded rows; the tail (a partial
+    // band, plus any padded rows below) is flushed after the loop.
+    if (on_band && rows_read - band_start == kBandRows) {
       const Status es = EmitBand(
-          on_band, page_index, format, width_px, height, band_start, num_rows,
+          on_band, page_index, format, width_px, height, band_start, kBandRows,
           pixels->data() + static_cast<size_t>(band_start) * row_bytes,
-          static_cast<size_t>(num_rows) * row_bytes);
+          static_cast<size_t>(kBandRows) * row_bytes);
       if (es != Status::kOk) return es;
-      band_start = row + 1;
+      band_start = rows_read;
     }
+  }
+
+  // The device can deliver fewer rows than the requested area's height (early
+  // end-of-page / auto-crop). Pad the tail so the page is exactly
+  // width x height -- DecodeGrayRaw and WrapBitonalImage require an exact byte
+  // count -- filling with white (0xFF gray samples; 0x00 packed bitonal, where
+  // a 1 bit is black), matching a blank paper edge. The reserve above sized
+  // `pixels` for the full height, so this resize never reallocates and the
+  // bands emitted above stay valid.
+  if (rows_read < height) {
+    const uint8_t fill = format == PixelFormat::kBitonal ? 0x00 : 0xFF;
+    pixels->resize(row_bytes * static_cast<size_t>(height), fill);
+  }
+
+  // Flush every remaining row (the last partial band plus any padding) so the
+  // band stream covers all `height` rows contiguously.
+  while (on_band && band_start < height) {
+    const int num_rows = std::min(kBandRows, height - band_start);
+    const Status es = EmitBand(
+        on_band, page_index, format, width_px, height, band_start, num_rows,
+        pixels->data() + static_cast<size_t>(band_start) * row_bytes,
+        static_cast<size_t>(num_rows) * row_bytes);
+    if (es != Status::kOk) return es;
+    band_start += num_rows;
   }
   return Status::kOk;
 }

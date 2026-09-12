@@ -195,7 +195,14 @@ Params TranslateScanParams(const ScanRequest& req, const ScanLimits& limits) {
         p.mode = ScanMode::kBlackWhite;
         break;
       case kPixelTypeGray:
-        p.mode = ScanMode::kGray;
+        // Image Capture's single "Gray" Kind requests 8-bit grayscale. Map it
+        // to kTrueGray (GRAY256 / RLENGTH) rather than kGray (GRAY64 raw):
+        // kTrueGray is the true 8-bit path AND the one whose readout is verified
+        // against a real device capture (libbrscan/scanner.cpp ReadRlengthRows).
+        // The raw kGray/GRAY64 path (ReadRawGrayStreaming) stays available via
+        // the CLI (`--mode gray`) and the daemon config (`<dest>.mode = gray`),
+        // but is unverified over the ICA host-initiated flow.
+        p.mode = ScanMode::kTrueGray;
         break;
       case kPixelTypeRGB:
       default:

@@ -46,7 +46,7 @@ TEST(TranslateScanParamsTest, PixelTypeMapsToMode) {
     return TranslateScanParams(r, ScanLimits{}).mode;
   };
   EXPECT_EQ(mode_for(0), ScanMode::kBlackWhite);  // 1-bit BW.
-  EXPECT_EQ(mode_for(1), ScanMode::kGray);        // 8-bit gray.
+  EXPECT_EQ(mode_for(1), ScanMode::kTrueGray);    // 8-bit gray -> GRAY256/RLENGTH.
   EXPECT_EQ(mode_for(2), ScanMode::kColor);       // RGB.
 }
 
@@ -627,7 +627,7 @@ TEST(ScanRequestFromIcapTest, PixelTypeGrayAndBwMapThrough) {
     return TranslateScanParams(ScanRequestFromIcap(sel), ScanLimits{}).mode;
   };
   EXPECT_EQ(mode_for(0), ScanMode::kBlackWhite);
-  EXPECT_EQ(mode_for(1), ScanMode::kGray);
+  EXPECT_EQ(mode_for(1), ScanMode::kTrueGray);  // 8-bit gray -> GRAY256/RLENGTH.
   EXPECT_EQ(mode_for(2), ScanMode::kColor);
 }
 

@@ -729,6 +729,94 @@ TEST(RunScan, RlengthRowDecodingToWrongWidthIsError) {
   EXPECT_TRUE(pages.empty());
 }
 
+// Regression for the grayscale-flatbed hang (fix-gray-flatbed-hang): a REAL
+// GRAY256/RLENGTH flatbed capture (reference/streams/modes_gray256_in.bin,
+// git-ignored) does not place a row block header exactly every row_bytes. At
+// one row boundary it splices in a ~2 KB run of un-headered pixel bytes (a
+// firmware buffer flush) before the next row's header. The old readout treated
+// the very next bytes as a header unconditionally, so it hit pixel data where a
+// header was expected and failed with kProtocolError partway down the page --
+// the page never finalized and Image Capture hung. The readout must skip that
+// un-headered slop and keep going. This fixture reproduces the shape with a
+// tiny page (the gitignored capture is not committed).
+TEST(RunScan, TrueGrayFlatbedSkipsUnheaderedPixelSlop) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // width_px=4 (row_bytes=4 for 8-bit gray), height_px=2.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,2,"));
+
+  // Row 0: uncompressed (type 0x40) 4-byte row.
+  auto row0 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row0_payload = {0xA0, 0xA1, 0xA2, 0xA3};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  // Un-headered pixel slop between the two rows (the buffer-flush quirk). None
+  // of these bytes form a block-header or end-of-page anchor, so the readout
+  // must discard them and resync to row 1's header.
+  t.QueueRead(std::vector<uint8_t>{0xEE, 0xEE, 0xEE});
+
+  // Row 1: another uncompressed 4-byte row.
+  auto row1 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row1_payload = {0xB0, 0xB1, 0xB2, 0xB3};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  EXPECT_EQ(pages[0].height, 2);
+  // The slop is dropped; both real rows survive intact and aligned.
+  const std::vector<uint8_t> want = {0xA0, 0xA1, 0xA2, 0xA3,
+                                     0xB0, 0xB1, 0xB2, 0xB3};
+  EXPECT_EQ(pages[0].data, want);
+}
+
+// Regression companion: the same real GRAY256 capture ends its page with the
+// end-of-page marker after FEWER rows than the requested area's height (the
+// device auto-crops to the detected paper edge). The old readout, expecting a
+// row header, misread the 0x82-led marker as a block header whose type is
+// neither raw nor rlength and failed with kProtocolError -- again hanging the
+// scan. The readout must recognize the early marker, finalize, and pad the tail
+// so the page is exactly the requested width x height.
+TEST(RunScan, TrueGrayFlatbedShortDeliveryPadsToRequestedHeight) {
+  brscan::FakeTransport t;
+  QueuePreamble(&t);
+  // Requested height_px=4, but only 2 rows are delivered before end-of-page.
+  t.QueueRead(EncodeOfferFrame("300,300,2,292,4,427,4,"));
+
+  auto row0 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row0_payload = {0xA0, 0xA1, 0xA2, 0xA3};
+  row0.insert(row0.end(), row0_payload.begin(), row0_payload.end());
+  t.QueueRead(row0);
+
+  auto row1 = EncodeRlengthBlockHeader(0x40, 4);
+  const std::vector<uint8_t> row1_payload = {0xB0, 0xB1, 0xB2, 0xB3};
+  row1.insert(row1.end(), row1_payload.begin(), row1_payload.end());
+  t.QueueRead(row1);
+
+  // End-of-page after just 2 of the 4 requested rows, then job-final.
+  t.QueueRead(EncodeJobFinalTerminator(1));
+
+  std::vector<brscan::ScanResult> pages;
+  const auto status = brscan::RunScan(t, TrueGrayParams(), &pages);
+  ASSERT_EQ(status, brscan::Status::kOk);
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].format, brscan::PixelFormat::kGray);
+  EXPECT_EQ(pages[0].width, 4);
+  EXPECT_EQ(pages[0].height, 4);
+  // Two real rows, then two white (0xFF) padded rows to reach the requested
+  // height -- a correctly sized page with a blank tail, not a protocol error.
+  const std::vector<uint8_t> want = {0xA0, 0xA1, 0xA2, 0xA3, 0xB0, 0xB1, 0xB2,
+                                     0xB3, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                     0xFF, 0xFF};
+  EXPECT_EQ(pages[0].data, want);
+}
+
 TEST(RunScan, BusyGreetingReportsBusy) {
   brscan::FakeTransport t;
   t.QueueRead(std::string("-NG 401\r\n"));
