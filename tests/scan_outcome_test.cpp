@@ -43,6 +43,19 @@ TEST(ClassifyScanOutcomeTest, AdfWithPagesIsNotFeederEmpty) {
 }
 
 // ---------------------------------------------------------------------
+// ADF paper jam (C16): kPaperJam maps straight through, unambiguously.
+// ---------------------------------------------------------------------
+
+// A jammed ADF feed (a lone 0xc3 at ESC X -> libbrscan kPaperJam) classifies as
+// the paper-jam outcome, distinct from the empty feeder above and from a generic
+// failure. The feeder is the source and no page came back.
+TEST(ClassifyScanOutcomeTest, AdfNoPagesPaperJamIsPaperJam) {
+  EXPECT_EQ(ClassifyScanOutcome(Source::kAdf, /*produced_pages=*/false,
+                                Status::kPaperJam),
+            ScanOutcome::kPaperJam);
+}
+
+// ---------------------------------------------------------------------
 // Flatbed is unaffected: it never maps to the feeder-empty outcome.
 // ---------------------------------------------------------------------
 
@@ -114,6 +127,14 @@ TEST(ErrorStringKeyForOutcomeTest, FeederEmptyIsDFEmptyKey) {
   EXPECT_STREQ(
       ErrorStringKeyForOutcome(ScanOutcome::kAdfFeederEmpty, Status::kNoPaper),
       "kICAErrStrDFEmptyErr");
+}
+
+// Paper-jam resolves to Image Capture's "Document feeder has a paper jam or
+// paper feed error." (C16) -- the jam-specific dialog, not the empty-feeder one.
+TEST(ErrorStringKeyForOutcomeTest, PaperJamIsDFPaperKey) {
+  EXPECT_STREQ(
+      ErrorStringKeyForOutcome(ScanOutcome::kPaperJam, Status::kPaperJam),
+      "kICAErrStrDFPaperErr");
 }
 
 // A protocol desync reads as a generic scan error ("An error occurred during

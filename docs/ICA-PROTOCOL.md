@@ -328,6 +328,52 @@ error / Document feeder is empty."** in both simplex and 2-sided modes — see t
 re-test loop below. (The superseded `DeviceStatusInfo` +
 `kICANotificationSubTypeDocumentNotLoaded` post raised no dialog.)
 
+### ADF paper jam (jam mapping) — C16
+
+When the **feeder** is the source and the feed **jams mid-page**, the device
+returns a lone `0xc3` status byte to `ESC X` (start-scan) in place of image
+data. `libbrscan` detects this at the very start of the readout — a *lone*
+`0xc3` (nothing more follows within the readout timeout), scoped to the ADF —
+and returns `Status::kPaperJam` (see `RunReadout` in `libbrscan/scanner.cpp`,
+`docs/PROTOCOL.md` item 3, and PROVENANCE.md's `reference/c16-jam-imac.pcap`
+entry). It is the sibling of the ADF `ESC D` ack values `0x80` (loaded) and
+`0xc2` (empty); the empty case is caught at the ack before `ESC X`, while the
+jam surfaces only once the feed is attempted. `brscan::ica::ClassifyScanOutcome`
+maps `Status::kPaperJam` → `ScanOutcome::kPaperJam` (unit-tested in
+`tests/scan_outcome_test.cpp`), and the module then, parallel to the
+feeder-empty path:
+
+1. Posts a `kICANotificationTypeDeviceStatusError` carrying
+   `kICANotificationSubTypeKey` = `CFSTR("kICAErrStrDFPaperErr")` (device object,
+   plain `ICDSendNotification`), **before** the final `ScannerScanDone`. The
+   *Error* type is what makes Image Capture raise its built-in alert
+   ("Scanner reported an error / Document feeder has a paper jam or paper feed
+   error."); the informational `kICANotificationTypeDeviceStatusInfo` type
+   raises no dialog. The subtype value is a raw localized-string **key**, not an
+   SDK constant — Image Capture resolves `kICAErrStrDFPaperErr` → "Document
+   feeder has a paper jam or paper feed error." via
+   `ICADevices.framework/.../Resources/Error.loctable`. The outcome→key mapping
+   is the pure `ErrorStringKeyForOutcome` (`ica-module/scan_outcome.h`).
+2. Ends the scan with `ScannerScanDone` whose `kICAErrorKey` is the **same
+   `-9931`** (`ICReturnScannerFailedToCompleteScan`) the feeder-empty path uses
+   — the scan-did-not-complete code, strictly more specific than the generic
+   `kICADeviceInternalErr` (`-9912`) — rather than a jam-specific numeric code
+   (none exists in either enum). The readable jam text comes from the
+   `DeviceStatusError` post above, not from this numeric code.
+
+This is distinct from the empty feeder (the `0xc2` `ESC D` ack →
+`kICAErrStrDFEmptyErr`, above) and from a generic protocol desync (`kFailed` →
+`kICAErrStrScanErr`). **Flatbed is unchanged** — the jam check is ADF-only, and
+the flatbed does not jam.
+
+**Device-in-the-loop re-test (C16):** the `DeviceStatusError` +
+`kICAErrStrDFPaperErr` post is the interface fact that raises the alert; confirm
+on the device that selecting **Document Feeder**, feeding a sheet and then
+**jamming the ADF mid-feed** promptly surfaces the alert **"Scanner reported an
+error / Document feeder has a paper jam or paper feed error."** — not the bland
+generic failure, and not the empty-feeder message. See the C16 row in
+`docs/RUNBOOK-plan-2-ica.md`.
+
 ### Object registration
 
 `ICDScannerNewObjectInfoCreated(deviceObjectInfo, 0, &newObj)`

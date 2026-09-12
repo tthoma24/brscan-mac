@@ -17,6 +17,11 @@ enum class Status {
   kNoPaper,
   kCancelled,
   kTimeout,
+  // A document-feeder paper jam / feed error: the device returns a lone 0xc3
+  // status byte to ESC X in place of image data (the ADF sibling of the empty
+  // feeder's 0xc2 ESC D ack). Distinct from kNoPaper (empty feeder, caught
+  // earlier) and a generic kProtocolError. See scanner.cpp and PROVENANCE.md.
+  kPaperJam,
 };
 
 // Scan color mode.

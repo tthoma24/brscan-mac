@@ -55,6 +55,14 @@ constexpr int kDrainIdleTimeoutMs = 800;
 constexpr uint8_t kAdfAckLoaded = 0x80;
 constexpr uint8_t kAdfAckEmpty = 0xc2;
 
+// A document-feeder paper jam / feed error: the device returns this lone
+// status byte to ESC X (start-scan) in place of image data when a feed jams
+// mid-page. It is the sibling of the ESC D ADF ack values above (the empty
+// case, 0xc2, is caught at the ack before ESC X; the jam surfaces only once
+// the feed is attempted). Sourced from reference/c16-jam-imac.pcap (a jammed
+// ADF duplex scan); the byte carries no device identity (see PROVENANCE.md).
+constexpr uint8_t kAdfJam = 0xc3;
+
 // The device caps every payload block at this many bytes. A block header's
 // trailing length field pins at this exact value (0xfff4) as a "more data
 // follows" SENTINEL, NOT as an exact byte count: a chunk may declare
@@ -1210,6 +1218,35 @@ void ApplyOfferAreaFallback(const Offer& offer, Params* exec_params) {
 // before returning.
 Status RunReadout(Framer* framer, const Params& exec_params, int timeout_ms,
                   const BandCallback& on_band, std::vector<ScanResult>* out) {
+  // Document-feeder paper jam (C16): a jammed feed returns a lone kAdfJam
+  // (0xc3) status byte to ESC X in place of image data (see PROVENANCE.md and
+  // docs/PROTOCOL.md). Detect it here, at the very start of the readout,
+  // before any mode dispatch. Scope it to the ADF: the flatbed does not jam,
+  // and its raw payload can legitimately begin with any byte.
+  //
+  // False-positive care: raw-gray/bitonal pixel data can legitimately be 0xc3,
+  // so do NOT key on the value alone -- key on the *lone* status byte. A jam
+  // sends exactly one 0xc3 and then nothing; a real scan streams a full page
+  // immediately. Peek (non-destructively) the first byte; only if it is 0xc3
+  // do we look for a second byte within the readout timeout. Nothing more
+  // follows (a timeout: the lone byte) -> a jam; a data stream follows -> treat
+  // the 0xc3 as ordinary data and fall through to the normal readout unchanged.
+  // The color path never legitimately starts with 0xc3 (its block header leads
+  // with 0x64, or 0x00 on legacy firmware), so it is covered too. Both peeks
+  // are non-destructive, so a normal scan's byte stream is unaffected.
+  if (exec_params.source == Source::kAdf) {
+    std::vector<uint8_t> lead;
+    Status s = framer->Peek(1, timeout_ms, &lead);
+    if (s != Status::kOk) return s;
+    if (lead[0] == kAdfJam) {
+      std::vector<uint8_t> lead2;
+      s = framer->Peek(2, timeout_ms, &lead2);
+      if (s == Status::kTimeout) return Status::kPaperJam;  // Lone 0xc3: a jam.
+      if (s != Status::kOk) return s;
+      // A second byte followed: real image data, not a jam. Fall through.
+    }
+  }
+
   // Color (CGRAY/C=JPEG) has its own de-interleaving readout: a duplex feed
   // multiplexes the two sides' chunks by page index, so it cannot use the
   // one-whole-page-at-a-time sequential loop below. RunColorScan handles

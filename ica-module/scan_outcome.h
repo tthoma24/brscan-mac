@@ -20,6 +20,7 @@ enum class ScanOutcome {
   kOk,              // Deliver/finish the scan normally.
   kCanceled,        // Clean host cancel (RunScan returned kCancelled).
   kAdfFeederEmpty,  // ADF selected but no page was fed -> "feeder empty".
+  kPaperJam,        // ADF document-feeder paper jam / feed error (kPaperJam).
   kFailed,          // Any other non-OK status -> generic device failure.
 };
 
@@ -34,6 +35,11 @@ inline ScanOutcome ClassifyScanOutcome(Source source, bool produced_pages,
                                        Status status) {
   if (status == Status::kOk) return ScanOutcome::kOk;
   if (status == Status::kCancelled) return ScanOutcome::kCanceled;
+  // A document-feeder paper jam is unambiguous: libbrscan returns kPaperJam
+  // only for an ADF scan whose feed jammed mid-page (a lone 0xc3 at ESC X),
+  // never for the flatbed and never after real pages, so map it straight
+  // through -- ahead of the ambiguous no-page kNoPaper/kTimeout cases below.
+  if (status == Status::kPaperJam) return ScanOutcome::kPaperJam;
   if (source == Source::kAdf && !produced_pages &&
       (status == Status::kNoPaper || status == Status::kTimeout)) {
     return ScanOutcome::kAdfFeederEmpty;
@@ -52,15 +58,18 @@ inline ScanOutcome ClassifyScanOutcome(Source source, bool produced_pages,
 // ICADevices.framework/.../Resources/Error.loctable (verified on this machine)
 // to, respectively:
 //   kICAErrStrDFEmptyErr      -> "Document feeder is empty."
+//   kICAErrStrDFPaperErr      -> "Document feeder has a paper jam or paper feed
+//                                 error."
 //   kICAErrStrScanErr         -> "An error occurred during scanning."
 //   kICAErrStrScannerComErr   -> "An error occurred while communicating with the
 //                                 scanner."
 //   kICAErrStrScannerBusyErr  -> "The scanner is busy."
-// No Apple source was copied. Paper-jam is deliberately NOT mapped here: the
-// key kICAErrStrDFPaperErr ("Document feeder has a paper jam or paper feed
-// error.") exists, but the device's jam signature is uncaptured, and labeling a
-// protocol desync as a jam would be wrong -- mapping it is a follow-up pending a
-// captured jam signature.
+// No Apple source was copied. Paper-jam IS mapped (kICAErrStrDFPaperErr): unlike
+// a generic protocol desync, the jam has a captured, unambiguous wire signature
+// -- a lone 0xc3 status byte at ESC X (reference/c16-jam-imac.pcap; see
+// PROVENANCE.md and scanner.cpp) -- which libbrscan reports as Status::kPaperJam
+// and ClassifyScanOutcome maps to ScanOutcome::kPaperJam, so labeling it a jam
+// is correct rather than a guess.
 inline const char* ErrorStringKeyForOutcome(ScanOutcome outcome,
                                             Status status) {
   switch (outcome) {
@@ -70,6 +79,8 @@ inline const char* ErrorStringKeyForOutcome(ScanOutcome outcome,
       return nullptr;
     case ScanOutcome::kAdfFeederEmpty:
       return "kICAErrStrDFEmptyErr";
+    case ScanOutcome::kPaperJam:
+      return "kICAErrStrDFPaperErr";
     case ScanOutcome::kFailed:
       switch (status) {
         case Status::kProtocolError:
