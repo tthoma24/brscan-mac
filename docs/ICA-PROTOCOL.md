@@ -271,21 +271,32 @@ The module posts, per scan, in order (via `ICDSendNotification` /
    `kICANotificationScannerDocumentNameKey` = the exact destination path. Sent
    with plain `ICDSendNotification`.
 
-   **ADF color trailing-pad auto-crop.** Before this encode, on an **ADF color**
-   page (`params.source == kAdf` and the decoded `outFormat == kRgb`) the module
-   trims the device's trailing gray padding: when Size is taller than the fed
-   sheet the scanner pads the JPEG up to the requested height with uniform
-   full-width mid-gray (`128`), leaving a solid gray band at the bottom (see
-   docs/PROTOCOL.md "Resolution and size"). `brscan::ica::TrailingPadRows`
+   **ADF color trailing-overscan cleanup (paint white, keep full height).** Before
+   this encode, on an **ADF color** page (`params.source == kAdf` and the decoded
+   `outFormat == kRgb`) the module erases the device's trailing overscan: past a
+   short sheet the scanner pads the JPEG up to the requested height with uniform
+   full-width mid-gray (`128`), and the ADF also images its own near-white
+   backing/roller past the sheet edge — a gray + near-white band at the bottom (see
+   docs/PROTOCOL.md "Resolution and size"). `brscan::ica::TrailingOverscanRows`
    (`ica-module/adf_crop.h`, pure + unit-tested in `tests/adf_crop_test.cpp`)
-   counts the contiguous trailing rows that are uniform near-`128` **and** flat
-   (real content, even gray, is noisy and is not trimmed); the module then
-   shortens the encoded height by that count (guarding `height - pad > 0` so a
-   page is never cropped to nothing). RGB rows are contiguous top-to-bottom, so
-   the first `height - pad` rows are the cropped image. This is FILE-path only —
-   the live overview/preview bands are untouched — and RGB-only: the gray/BW
-   RLENGTH path pads differently and is out of scope (it could later be trimmed
-   from `rows_read`).
+   measures that band — the contiguous trailing gray pad (robust to a sparse
+   scatter of bright JPEG-decode specks) plus, **gated on that gray pad being
+   present** (the device's own "this page overscanned" signal), the near-white
+   backing rows above it — and `brscan::ica::FillTrailingRowsWhite` paints those
+   rows **white in place, keeping the full image height**.
+
+   Why paint, not crop: macOS-26 Image Capture builds each combined-PDF page at the
+   **selected paper size** (Quartz PDFContext) and **centers** the delivered image
+   on it, so a SHORTER (cropped) image is just re-padded with a white margin split
+   top and bottom — the band reappears as page background, and on a sheet fed
+   trailing-edge-first the crop also removes real content. Keeping full height lets
+   the image fill the page exactly (no host margin, like an uncropped page) while
+   the whitened tail reads as ordinary trailing margin. FILE-path only (live
+   overview/preview bands untouched) and RGB-only: the gray/BW RLENGTH path pads its
+   own white/black and crops from `rows_read` instead. The ICA path deliberately
+   does NOT request native's bounded ADF scan area (Letter@300 `A=…,3253`, see
+   PROVENANCE.md) — trimming the scan window cut trailing content and did not change
+   the host's fixed page size.
 4. `kICANotificationTypeScannerScanDone` — one per scan, ends the job. Keys:
    `kICANotificationICAObjectKey` (device object) + `kICANotificationTypeKey`.
    Plain `ICDSendNotification`. A clean cancel (`RunScan` returned
@@ -351,8 +362,15 @@ re-test loop below. (The superseded `DeviceStatusInfo` +
 When the **feeder** is the source and the feed **jams mid-page**, the device
 returns a lone `0xc3` status byte to `ESC X` (start-scan) in place of image
 data. `libbrscan` detects this at the very start of the readout — a *lone*
-`0xc3` (nothing more follows within the readout timeout), scoped to the ADF —
-and returns `Status::kPaperJam` (see `RunReadout` in `libbrscan/scanner.cpp`,
+`0xc3`, scoped to the ADF. After the byte the device **goes silent** (it stays
+connected but sends nothing until re-queried — ~32s in the capture), so the
+second-byte confirmation uses a short window (`kLoneStatusConfirmMs`, ~2s), **not**
+the 20s scan timeout: a full-timeout confirmation would block ~20s before
+returning, long enough that `icdd` abandons the synchronous scan and no jam dialog
+fires (the C16 "jam didn't fire" bug). A real scan's first two bytes always arrive
+in the same burst, so a lone status byte reliably times out of the short window
+while a data stream never does. On the lone byte the readout returns
+`Status::kPaperJam` (see `RunReadout` in `libbrscan/scanner.cpp`,
 `docs/PROTOCOL.md` item 3, and PROVENANCE.md's `reference/c16-jam-imac.pcap`
 entry). It is the sibling of the ADF `ESC D` ack values `0x80` (loaded) and
 `0xc2` (empty); the empty case is caught at the ack before `ESC X`, while the

@@ -173,7 +173,15 @@ A typical scan is: `ESC Q` (once per connection), then per scan
    the start of the readout as `Status::kCancelled`, ending the scan cleanly
    with no error dialog (see the C15 row and PROVENANCE.md). Like the jam, this
    is disambiguated from a pixel byte that merely happens to be `0x86` by the
-   *lone*-byte test (nothing follows).
+   *lone*-byte test (nothing follows). After either lone status byte the device
+   goes **silent** -- it holds the connection open but sends nothing further until
+   re-queried (~32 s observed on the jam capture) -- so the readout confirms
+   "lone" with a **short** second-byte window (`kLoneStatusConfirmMs`, ~2 s), not
+   the full scan timeout: a real page's first data chunk always carries >= 2 bytes
+   in one burst, whereas the lone byte reliably times the short window out.
+   Confirming with the full scan timeout would instead delay the jam/cancel ~20 s
+   -- long enough that the ICA host (`icdd`) abandons the synchronous scan before
+   the readout returns, so no dialog fires.
 4. `ESC I` reply: `[1-byte status][2-byte little-endian length][ASCII CSV
    text][NUL]`. The status byte was `0x00` in every sample seen and its
    meaning is unconfirmed. The CSV is a comma-terminated offer of the granted
